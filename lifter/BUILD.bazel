@@ -78,6 +78,7 @@ cc_library(
     deps = [
         ":invert_gas_append_insn",
         ":invert_gas_mips_ip",
+        "//core:compiler_flags",
         "//core:rtl_cfg",
         "@abseil-cpp//absl/base",
         "@abseil-cpp//absl/container:flat_hash_map",
@@ -152,11 +153,62 @@ cc_library(
     hdrs = ["reconstruct_hard_reg_liveness.h"],
     visibility = ["//visibility:public"],
     deps = [
+        "//core:compiler_flags",
         "//core:rtl_cfg",
         "//core:rtl_expr",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_library(
+    name = "mips_multi_insn_idioms",
+    srcs = ["mips_multi_insn_idioms.cc"],
+    hdrs = ["mips_multi_insn_idioms.h"],
+    deps = [
+        ":reconstruct_hard_reg_liveness",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/container:flat_hash_set",
+    ],
+)
+
+cc_library(
+    name = "rtl_liveness",
+    srcs = ["rtl_liveness.cc"],
+    hdrs = ["rtl_liveness.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":reconstruct_hard_reg_liveness",
+        "//core:compiler_flags",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status:statusor",
+    ],
+)
+
+cc_test(
+    name = "rtl_liveness_test",
+    size = "medium",
+    srcs = ["rtl_liveness_test.cc"],
+    linkstatic = True,
+    shard_count = 32,
+    deps = [
+        ":reconstruct_hard_reg_liveness",
+        ":rtl_liveness",
+        "//core:compiler_flags",
+        "//core:round_trip_test_cases",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "//gcc_harness:function_hooks",
+        "//gcc_harness:gcc_context",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
     ],
 )
 
@@ -200,7 +252,9 @@ cc_library(
     hdrs = ["invert_final_scan_insn.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":mips_multi_insn_idioms",
         ":reconstruct_hard_reg_liveness",
+        "//core:compiler_flags",
         "//core:rtl_cfg",
         "//core:rtl_expr",
         "@abseil-cpp//absl/base",
@@ -385,10 +439,14 @@ cc_library(
     hdrs = ["invert_fill_simple_delay_slots.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":mips_multi_insn_idioms",
         ":reconstruct_hard_reg_liveness",
+        ":rtl_liveness",
+        "//core:compiler_flags",
         "//core:rtl_cfg",
         "//core:rtl_expr",
         "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
     ],
@@ -465,6 +523,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":reconstruct_hard_reg_liveness",
+        "//core:compiler_flags",
         "//core:rtl_cfg",
         "//core:rtl_expr",
         "@abseil-cpp//absl/container:flat_hash_map",
@@ -541,6 +600,8 @@ cc_library(
     hdrs = ["invert_schedule_block.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":reconstruct_hard_reg_liveness",
+        "//core:compiler_flags",
         "//core:rtl_cfg",
         "//core:rtl_expr",
         "@abseil-cpp//absl/container:flat_hash_set",
@@ -556,6 +617,8 @@ cc_test(
     shard_count = 32,
     deps = [
         ":invert_schedule_block",
+        ":reconstruct_hard_reg_liveness",
+        "//core:compiler_flags",
         "//core:round_trip_test_cases",
         "//core:rtl_cfg",
         "//core:rtl_expr",
@@ -563,6 +626,55 @@ cc_test(
         "//gcc_harness:gcc_context",
         "//gcc_harness:right_inverse_verifier",
         "//gcc_harness:subfunction_inverse_provider",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "pass03_sched2_post_reload",
+    srcs = ["pass03_sched2_post_reload.cc"],
+    hdrs = ["pass03_sched2_post_reload.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":invert_schedule_block",
+        ":rtl_liveness",
+        "//core:compiler_flags",
+        "//core:rtl_cfg",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "pass03_sched2_post_reload_test",
+    size = "medium",
+    srcs = ["pass03_sched2_post_reload_test.cc"],
+    linkstatic = True,
+    shard_count = 32,
+    deps = [
+        ":invert_do_cross_jump",
+        ":invert_fill_eager_delay_slots",
+        ":invert_fill_simple_delay_slots",
+        ":invert_final_scan_insn",
+        ":invert_function_prologue_epilogue",
+        ":invert_gas_append_insn",
+        ":invert_gas_macro",
+        ":invert_gas_mips_ip",
+        ":invert_make_return_insns",
+        ":invert_relax_delay_slots",
+        ":invert_schedule_block",
+        ":pass00_final_and_gas",
+        ":pass01_dbr_schedule",
+        ":pass02_jump2_cross_jump",
+        ":pass03_sched2_post_reload",
+        "//core:round_trip_test_cases",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "//gcc_harness:function_hooks",
+        "//gcc_harness:gcc_context",
+        "//gcc_harness:right_inverse_verifier",
+        "//gcc_harness:subfunction_inverse_provider",
+        "@abseil-cpp//absl/types:span",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],

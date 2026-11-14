@@ -347,9 +347,12 @@ void schedule_insns(FILE* dump_file);
 int schedule_block(int b, FILE* file);
 void update_flow_info(rtx_def* notes, rtx_def* first, rtx_def* last, rtx_def* orig_insn);
 
+extern int write_symbols;
 extern rtx_def* sched_before_next_call;
 extern rtx_def* unused_insn_list;
 extern rtx_def* unused_expr_list;
+extern rtx_def** line_note;
+extern rtx_def** line_note_head;
 extern rtx_def* note_list;
 extern int* insn_luid;
 extern int* insn_priority;
@@ -3121,6 +3124,23 @@ void FunctionHooks::PrepareSchedState(Rtx first) {
 
   const int max_uid = get_max_uid() + 64;
   sched_before_next_call = make_insn_raw(nullptr);
+  unused_insn_list = nullptr;
+  unused_expr_list = nullptr;
+  if (write_symbols != 0) {
+    line_note = AllocZeroed<Rtx>(max_uid + 1);
+    line_note_head = AllocZeroed<Rtx>(n_basic_blocks + 4);
+    for (int b = 0; b < n_basic_blocks; ++b) {
+      for (Rtx line = basic_block_head[b]; line != nullptr; line = line->fld[1].rtx) {
+        if (line->code == kNote && line->fld[4].rtint > 0) {
+          line_note_head[b] = line;
+          break;
+        }
+      }
+    }
+  } else {
+    line_note = nullptr;
+    line_note_head = nullptr;
+  }
   insn_luid = AllocZeroed<int>(max_uid + 1);
   insn_priority = AllocZeroed<int>(max_uid + 1);
   insn_tick = AllocZeroed<int>(max_uid + 1);
@@ -3321,6 +3341,8 @@ void FunctionHooks::RunScheduleInsns(Rtx first) {
       basic_block_end[n_basic_blocks - 1]->fld[2].rtx == nullptr) {
     emit_note(nullptr, kNoteInsnDeleted);
   }
+  unused_insn_list = nullptr;
+  unused_expr_list = nullptr;
   schedule_insns(nullptr);
 }
 
@@ -3378,13 +3400,15 @@ void FunctionHooks::ExecuteSchedPassGranular(Rtx first) {
       }
     }
   } else {
-    const SavedBlockLiveState saved_live = SaveActiveBasicBlockLiveAtStart();
     restore_reg_data(head);
     max_regno = max_reg_num();
     reg_scan(head, max_regno, 0);
-    RunFindBasicBlocks(head, nullptr);
-    RefreshJumpLabelsAndNuses(head);
-    RestoreBasicBlockLiveAtStartAfterFindBasicBlocks(saved_live, *ctx_);
+    if (n_basic_blocks == 0 || basic_block_head == nullptr || basic_block_end == nullptr) {
+      const SavedBlockLiveState saved_live = SaveActiveBasicBlockLiveAtStart();
+      RunFindBasicBlocks(head, nullptr);
+      RefreshJumpLabelsAndNuses(head);
+      RestoreBasicBlockLiveAtStartAfterFindBasicBlocks(saved_live, *ctx_);
+    }
   }
   init_alias_analysis();
   PopulateInsnCodesWithVolatileOk(head);
@@ -3395,9 +3419,25 @@ void FunctionHooks::ExecuteSchedPassGranular(Rtx first) {
 
   const int max_uid = (get_max_uid() + 1) * 4;
   sched_before_next_call = make_insn_raw(nullptr);
-  if (reload_completed == 0 || flag_schedule_insns == 0) {
-    unused_insn_list = nullptr;
-    unused_expr_list = nullptr;
+  // Always clear `sched.c`'s static free-lists across granular harness calls:
+  // each `MaterializeFromCfg` resets `function_obstack`, invalidating any
+  // cached `INSN_LIST` / `EXPR_LIST` nodes from prior compilations or passes.
+  unused_insn_list = nullptr;
+  unused_expr_list = nullptr;
+  if (write_symbols != 0) {
+    line_note = AllocZeroed<Rtx>(max_uid + 1);
+    line_note_head = AllocZeroed<Rtx>(n_basic_blocks + 4);
+    for (int b = 0; b < n_basic_blocks; ++b) {
+      for (Rtx line = basic_block_head[b]; line != nullptr; line = line->fld[1].rtx) {
+        if (line->code == kNote && line->fld[4].rtint > 0) {
+          line_note_head[b] = line;
+          break;
+        }
+      }
+    }
+  } else {
+    line_note = nullptr;
+    line_note_head = nullptr;
   }
   insn_luid = AllocZeroed<int>(max_uid + 1);
   insn_priority = AllocZeroed<int>(max_uid + 1);
@@ -3475,7 +3515,17 @@ void FunctionHooks::ExecuteSchedPassGranular(Rtx first) {
   in_sched_pass_ = false;
 
   if (reload_completed != 0) {
-    reposition_prologue_and_epilogue_notes(get_insns());
+    bool has_prologue_or_epilogue_note = false;
+    for (Rtx scan = get_insns(); scan != nullptr; scan = scan->fld[2].rtx) {
+      if (scan->code == kNote && (scan->fld[4].rtint == kNoteInsnPrologueEnd ||
+                                  scan->fld[4].rtint == kNoteInsnEpilogueBeg)) {
+        has_prologue_or_epilogue_note = true;
+        break;
+      }
+    }
+    if (has_prologue_or_epilogue_note) {
+      reposition_prologue_and_epilogue_notes(get_insns());
+    }
   } else {
     for (int i = 0; i < max_regno; ++i) {
       if (sched_reg_live_length[i] != 0) {
@@ -4509,24 +4559,31 @@ void ExecuteLifeAnalysisGranular(FunctionHooks* hooks, Rtx f, int nregs) {
   const int n_blocks = n_basic_blocks;
   const int alloc_blocks = std::max(1, n_blocks) + 4;
   basic_block_live_at_start = AllocZeroed<Rtx>(alloc_blocks);
+  std::vector<int*> bb_live_at_end(alloc_blocks, nullptr);
   std::vector<int*> bb_new_live(alloc_blocks, nullptr);
   std::vector<int*> bb_significant(alloc_blocks, nullptr);
   for (int b = 0; b < alloc_blocks; ++b) {
     basic_block_live_at_start[b] = reinterpret_cast<Rtx>(AllocZeroed<int>(regset_size + 2));
+    bb_live_at_end[b] = AllocZeroed<int>(regset_size + 2);
     bb_new_live[b] = AllocZeroed<int>(regset_size + 2);
     bb_significant[b] = AllocZeroed<int>(regset_size + 2);
   }
   regs_live_at_setjmp = AllocZeroed<uint32_t>(regset_size + 2);
 
-  // Mark stack pointer live at end of function (`flow.c:1039-1052`).
+  // Mark stack pointer and frame pointer live at end of function (`flow.c:1039-1052`).
+  const bool fp_live_at_exit = (reload_completed == 0 || frame_pointer_needed != 0);
   if (n_blocks > 0) {
-    reinterpret_cast<int*>(basic_block_live_at_start[n_blocks - 1])[29 / 32] |= (1u << (29 % 32));
+    bb_live_at_end[n_blocks - 1][29 / 32] |= (1u << (29 % 32));
     bb_new_live[n_blocks - 1][29 / 32] |= (1u << (29 % 32));
+    if (fp_live_at_exit) {
+      bb_live_at_end[n_blocks - 1][30 / 32] |= (1u << (30 % 32));
+      bb_new_live[n_blocks - 1][30 / 32] |= (1u << (30 % 32));
+    }
   }
 
   // Initial backward scan (`flow.c:1058-1071`).
   for (int i = n_blocks - 1; i >= 0; --i) {
-    std::memcpy(bb_new_live[i], basic_block_live_at_start[i], regset_bytes);
+    std::memcpy(bb_new_live[i], bb_live_at_end[i], regset_bytes);
     hooks->RunPropagateBlock(reinterpret_cast<Rtx>(bb_new_live[i]), basic_block_head[i],
                              basic_block_end[i], /*final_pass=*/0,
                              reinterpret_cast<Rtx>(bb_significant[i]), i);
@@ -4546,6 +4603,9 @@ void ExecuteLifeAnalysisGranular(FunctionHooks* hooks, Rtx f, int nregs) {
       std::memset(bb_new_live[i], 0, regset_bytes);
       if (i == n_blocks - 1) {
         bb_new_live[i][29 / 32] |= (1u << (29 % 32));
+        if (fp_live_at_exit) {
+          bb_new_live[i][30 / 32] |= (1u << (30 % 32));
+        }
       }
       if (i + 1 < n_blocks && basic_block_drops_in[i + 1] != 0) {
         int* src = reinterpret_cast<int*>(basic_block_live_at_start[i + 1]);
@@ -4599,37 +4659,46 @@ void ExecuteLifeAnalysisGranular(FunctionHooks* hooks, Rtx f, int nregs) {
       }
 
       bool consider = false;
-      bool first_pass_check = false;
+      bool need_propagate = false;
       int* cur_live = reinterpret_cast<int*>(basic_block_live_at_start[i]);
       for (int j = 0; j < regset_size; ++j) {
-        if (bb_new_live[i][j] & ~cur_live[j]) {
-          first_pass_check = true;
-          if ((bb_new_live[i][j] & ~cur_live[j]) & bb_significant[i][j]) {
-            consider = true;
+        const int newly_live_at_end = bb_new_live[i][j] & ~bb_live_at_end[i][j];
+        if (newly_live_at_end != 0) {
+          consider = true;
+          if ((newly_live_at_end & bb_significant[i][j]) != 0) {
+            need_propagate = true;
             break;
           }
         }
       }
-      if (!first_pass_check) {
+      if (!consider) {
         continue;
       }
-      if (!consider) {
+      if (!need_propagate) {
+        bool start_changed = false;
         for (int j = 0; j < regset_size; ++j) {
-          cur_live[j] |= bb_new_live[i][j];
+          const int newly_live_at_end = bb_new_live[i][j] & ~bb_live_at_end[i][j];
+          if ((cur_live[j] | newly_live_at_end) != cur_live[j]) {
+            start_changed = true;
+          }
+          cur_live[j] |= newly_live_at_end;
+          bb_live_at_end[i][j] |= newly_live_at_end;
         }
-        if (basic_block_drops_in[i] != 0 && i > 0) {
-          must_rescan[i - 1] = 1;
-          changed = true;
-        }
-        if (basic_block_head[i]->code == kCodeLabel) {
-          for (Rtx ref = basic_block_head[i]->fld[5].rtx;
-               ref != nullptr && ref != basic_block_head[i]; ref = ref->fld[1].rtx) {
-            Rtx containing = ref->fld[2].rtx;
-            if (containing != nullptr && containing->fld[0].rtint <= max_uid_for_flow) {
-              const int b = uid_block_number[containing->fld[0].rtint];
-              if (b >= 0 && b < n_blocks) {
-                must_rescan[b] = 1;
-                changed = true;
+        if (start_changed) {
+          if (basic_block_drops_in[i] != 0 && i > 0) {
+            must_rescan[i - 1] = 1;
+            changed = true;
+          }
+          if (basic_block_head[i]->code == kCodeLabel) {
+            for (Rtx ref = basic_block_head[i]->fld[5].rtx;
+                 ref != nullptr && ref != basic_block_head[i]; ref = ref->fld[1].rtx) {
+              Rtx containing = ref->fld[2].rtx;
+              if (containing != nullptr && containing->fld[0].rtint <= max_uid_for_flow) {
+                const int b = uid_block_number[containing->fld[0].rtint];
+                if (b >= 0 && b < n_blocks) {
+                  must_rescan[b] = 1;
+                  changed = true;
+                }
               }
             }
           }
@@ -4637,12 +4706,13 @@ void ExecuteLifeAnalysisGranular(FunctionHooks* hooks, Rtx f, int nregs) {
         continue;
       }
 
+      std::memcpy(bb_live_at_end[i], bb_new_live[i], regset_bytes);
       std::vector<int> old_live(cur_live, cur_live + regset_size);
       hooks->RunPropagateBlock(reinterpret_cast<Rtx>(bb_new_live[i]), basic_block_head[i],
                                basic_block_end[i], /*final_pass=*/0, nullptr, i);
       bool prop_changed = false;
       for (int j = 0; j < regset_size; ++j) {
-        cur_live[j] |= bb_new_live[i][j];
+        cur_live[j] = bb_new_live[i][j];
         if (cur_live[j] != old_live[j]) {
           prop_changed = true;
         }
@@ -4675,6 +4745,9 @@ void ExecuteLifeAnalysisGranular(FunctionHooks* hooks, Rtx f, int nregs) {
     std::memset(bb_new_live[i], 0, regset_bytes);
     if (i == n_blocks - 1) {
       bb_new_live[i][29 / 32] |= (1u << (29 % 32));
+      if (fp_live_at_exit) {
+        bb_new_live[i][30 / 32] |= (1u << (30 % 32));
+      }
     }
     if (i + 1 < n_blocks && basic_block_drops_in[i + 1] != 0) {
       int* src = reinterpret_cast<int*>(basic_block_live_at_start[i + 1]);
@@ -6708,6 +6781,8 @@ void FunctionHooks::ApplyCompilationProfile(const CompilationProfile& profile) {
   int opt = profile.optimize_level;
   ApplyCompilerFlags(profile.c_flags, &opt);
   SyncGasGpSymbols(profile.gp_symbol_sizes);
+  active_profile_ = profile;
+  active_profile_.optimize_level = opt;
 }
 
 bool FunctionHooks::ValidateMaterializedInsnsRecognizable(std::string* out_bad_insn) const {
@@ -6826,6 +6901,11 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
   ApplyCompilerFlags(c_flags, &optimize_level);
   SyncGasGpSymbols(gp_symbol_sizes);
   snap.optimize_level = optimize_level;
+  active_profile_ = CompilationProfile{
+      .optimize_level = optimize_level,
+      .c_flags = snap.c_flags,
+      .gp_symbol_sizes = gp_symbol_sizes,
+  };
   auto materialize_post_expand = [&]() -> Rtx {
     Rtx h = ctx_->MaterializeFromCfg(pre_state);
     rtx_equal_function_value_matters = 0;
@@ -7306,42 +7386,22 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
       Rtx head = materialize_post_expand();
       if (head != nullptr) {
         reload_completed = 1;
-        bool has_prologue_sp_adjust = false;
-        if (!pre_state.rpo_blocks.empty()) {
-          for (const std::string& pat : pre_state.rpo_blocks[0].instructions) {
-            auto parsed = ParsePatternAndNotes(pat);
-            if (!parsed.ok() || !parsed->pattern.IsSet()) {
-              continue;
-            }
-            const RtlExpr& dst = parsed->pattern.SetDest();
-            const RtlExpr& src = parsed->pattern.SetSrc();
-            if (dst.IsReg() && dst.mode == RtlMachineMode::kSi && dst.RegNo() == 29 &&
-                src.op == RtlOp::kMinus && src.mode == RtlMachineMode::kSi &&
-                src.children.size() == 2 && src.children[0].IsReg() &&
-                src.children[0].mode == RtlMachineMode::kSi && src.children[0].RegNo() == 29) {
-              has_prologue_sp_adjust = true;
-              break;
-            }
-          }
+        frame_pointer_needed =
+            (pre_state.sideband.frame_pointer_needed || flag_omit_frame_pointer == 0) ? 1 : 0;
+        if (optimize_level > 0) {
+          const SavedBlockLiveState saved_live = SaveActiveBasicBlockLiveAtStart();
+          RefreshJumpLabelsAndNuses(head);
+          RunFindBasicBlocks(head, nullptr);
+          RefreshJumpLabelsAndNuses(head);
+          RestoreBasicBlockLiveAtStartAfterFindBasicBlocks(saved_live, *ctx_);
+        } else {
+          n_basic_blocks = 0;
+          basic_block_head = nullptr;
+          basic_block_end = nullptr;
+          RefreshJumpLabelsAndNuses(head);
         }
-        if (!has_prologue_sp_adjust) {
-          frame_pointer_needed =
-              (pre_state.sideband.frame_pointer_needed || flag_omit_frame_pointer == 0) ? 1 : 0;
-          if (optimize_level > 0) {
-            const SavedBlockLiveState saved_live = SaveActiveBasicBlockLiveAtStart();
-            RefreshJumpLabelsAndNuses(head);
-            RunFindBasicBlocks(head, nullptr);
-            RefreshJumpLabelsAndNuses(head);
-            RestoreBasicBlockLiveAtStartAfterFindBasicBlocks(saved_live, *ctx_);
-          } else {
-            n_basic_blocks = 0;
-            basic_block_head = nullptr;
-            basic_block_end = nullptr;
-            RefreshJumpLabelsAndNuses(head);
-          }
-          thread_prologue_and_epilogue_insns(head);
-          head = ctx_->GetInsns();
-        }
+        thread_prologue_and_epilogue_insns(head);
+        head = ctx_->GetInsns();
         if (optimize_level > 0 && flag_schedule_insns_after_reload != 0) {
           ExecuteSchedPassGranular(head);
         }

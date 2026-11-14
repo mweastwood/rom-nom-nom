@@ -162,6 +162,9 @@ class FunctionHooks {
   // GCC 2.7.2 and Binutils 2.6 globals.
   void ApplyCompilationProfile(const CompilationProfile& profile);
 
+  // Returns the most recently applied module-level `CompilationProfile`.
+  const CompilationProfile& ActiveCompilationProfile() const { return active_profile_; }
+
   // Checks that every materialized `INSN`/`JUMP_INSN`/`CALL_INSN` in `ctx_` is
   // recognizable by GCC 2.7.2 `recog` under the active compilation profile
   // (preventing `fatal_insn` `abort()`s on invalid/adversarial lifted RTL).
@@ -404,6 +407,7 @@ class FunctionHooks {
   void ExecuteCombinePassGranular(Rtx first, int nregs);
 
   GccContext* ctx_;
+  CompilationProfile active_profile_{.optimize_level = 2, .c_flags = {"-O2"}};
   bool in_sched_pass_ = false;
   bool in_local_alloc_pass_ = false;
   bool in_combine_pass_ = false;

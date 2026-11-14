@@ -103,13 +103,25 @@ class ProductionHardRegLivenessInverseProvider final : public SubfunctionInverse
       const RtlControlFlowGraph& dbr_simple_cfg_x) const override {
     return lifter::InvertFillSimpleDelaySlots(dbr_simple_cfg_x);
   }
+  RtlControlFlowGraph InvertFillSimpleDelaySlots(const RtlControlFlowGraph& dbr_simple_cfg_x,
+                                                 const CompilationProfile& profile) const override {
+    return lifter::InvertFillSimpleDelaySlots(dbr_simple_cfg_x, profile);
+  }
 
   RtlControlFlowGraph InvertDbrSchedule(const RtlControlFlowGraph& dbr_cfg_x) const override {
     return lifter::InvertPass01DbrSchedule(dbr_cfg_x);
   }
+  RtlControlFlowGraph InvertDbrSchedule(const RtlControlFlowGraph& dbr_cfg_x,
+                                        const CompilationProfile& profile) const override {
+    return lifter::InvertPass01DbrSchedule(dbr_cfg_x, profile);
+  }
 
   RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& jump2_cfg_x) const override {
     return lifter::InvertDoCrossJump(jump2_cfg_x);
+  }
+  RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& jump2_cfg_x,
+                                        const CompilationProfile& profile) const override {
+    return lifter::InvertDoCrossJump(jump2_cfg_x, profile);
   }
 };
 
@@ -722,11 +734,11 @@ TEST(ReconstructHardRegLivenessTest,
   EXPECT_FALSE(BlockLiveInContains(post_reload_cfg, 2, 5));
   EXPECT_EQ(post_reload_cfg.rpo_blocks[1].instructions, orig_b1_insns);
 
-  // 2. Negative `-O0` CFG (empty `basic_block_live_at_start`, no `SEQUENCE`, no `return_internal`,
-  // no `REG_DEAD` / `REG_UNUSED`): `RecomputePostReloadLiveAtStart` leaves
-  // `basic_block_live_at_start` empty.
+  // 2. Negative `-O0` profile: `RecomputePostReloadLiveAtStart` clears
+  // `basic_block_live_at_start` based strictly on `profile.optimize_level == 0`.
   RtlControlFlowGraph o0_cfg;
   o0_cfg.pass = RtlPassKind::kSched2;
+  o0_cfg.sideband.basic_block_live_at_start = {{0, {4}}};
   o0_cfg.rpo_blocks = {
       MakeBlock(0, false,
                 {
@@ -735,7 +747,7 @@ TEST(ReconstructHardRegLivenessTest,
                 },
                 {}),
   };
-  RecomputePostReloadLiveAtStart(&o0_cfg);
+  RecomputePostReloadLiveAtStart(&o0_cfg, MakeProfile(0, {"-O0"}));
   EXPECT_TRUE(o0_cfg.sideband.basic_block_live_at_start.empty());
 
   // 3a. Negative pre-reload CFG with pseudo-register (`regno >= 68`) in pattern: sentinel
@@ -1148,6 +1160,98 @@ TEST(ReconstructHardRegLivenessTest,
   EXPECT_TRUE(explicit_zero_arg_cfg.rpo_blocks[0].rtl_insns[2].call_fusage.empty());
   EXPECT_TRUE(TopLevelInsnHasNote(explicit_zero_arg_cfg.rpo_blocks[0].instructions[1],
                                   RtlMachineMode::kRegDead, 4));
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     InfersDeletedNoopCallArgFusageExceptFprSlotAndResolvesConstZeroDeadNotes) {
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips2"});
+
+  // 1. Entry block saves `$16` before `$31` and copies `$16 <- $4` before calling `first_callee`,
+  // then reads `$16` after the call (`jump.c:434-465` deleted `(set $4 $16)` and stripped
+  // `REG_DEAD(4)`): `call_fusage` gets `(use (reg:SI 4 a0))` and `copy` omits `REG_DEAD(4)`.
+  RtlControlFlowGraph gpr_arg_cfg;
+  gpr_arg_cfg.pass = RtlPassKind::kDbr;
+  gpr_arg_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 29 sp) (minus:SI (reg:SI 29 sp) (const_int 24)))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 16))) (reg:SI 16 s0))",
+                    "(set (reg:SI 16 s0) (reg:SI 4 a0))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))) (reg:SI 31 ra))",
+                    "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref \"first_callee\")) "
+                    "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 16 s0)))",
+                    "(set (reg:SI 31 ra) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))))",
+                    "(set (reg:SI 16 s0) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 16))))",
+                    "(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int 24)))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&gpr_arg_cfg, profile_o2);
+  ASSERT_TRUE(gpr_arg_cfg.rpo_blocks[0].rtl_insns[4].has_explicit_call_fusage);
+  ASSERT_EQ(gpr_arg_cfg.rpo_blocks[0].rtl_insns[4].call_fusage.size(), 1u);
+  EXPECT_EQ(gpr_arg_cfg.rpo_blocks[0].rtl_insns[4].call_fusage[0].ToGccPrintRtlString(),
+            "(use (reg:SI 4 a0))");
+  EXPECT_FALSE(
+      TopLevelInsnHasNote(gpr_arg_cfg.rpo_blocks[0].instructions[2], RtlMachineMode::kRegDead, 4));
+
+  // 2. When `$f12` (`44`) already occupies argument word 0 (`mips.c:function_arg`), `$4` cannot
+  // also be passed as GPR argument 0, so `call_fusage` contains only `$f12` and `$16 <- $4`
+  // retains `REG_DEAD(4)`.
+  RtlControlFlowGraph fpr_lead_cfg;
+  fpr_lead_cfg.pass = RtlPassKind::kDbr;
+  fpr_lead_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 29 sp) (minus:SI (reg:SI 29 sp) (const_int 24)))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 16))) (reg:SI 16 s0))",
+                    "(set (reg:SI 16 s0) (reg:SI 4 a0))",
+                    "(set (reg:SF 44 $f12) (mem:SF (reg:SI 5 a1)))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))) (reg:SI 31 ra))",
+                    "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref \"fp_callee\")) "
+                    "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 16 s0)))",
+                    "(set (reg:SI 31 ra) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))))",
+                    "(set (reg:SI 16 s0) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 16))))",
+                    "(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int 24)))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&fpr_lead_cfg, profile_o2);
+  ASSERT_TRUE(fpr_lead_cfg.rpo_blocks[0].rtl_insns[5].has_explicit_call_fusage);
+  ASSERT_EQ(fpr_lead_cfg.rpo_blocks[0].rtl_insns[5].call_fusage.size(), 1u);
+  EXPECT_EQ(fpr_lead_cfg.rpo_blocks[0].rtl_insns[5].call_fusage[0].ToGccPrintRtlString(),
+            "(use (reg:SF 44 $f12))");
+  EXPECT_TRUE(
+      TopLevelInsnHasNote(fpr_lead_cfg.rpo_blocks[0].instructions[2], RtlMachineMode::kRegDead, 4));
+
+  // 3. Unpacked post-reload instruction carrying `(expr_list:REG_DEAD (const_int 0) (nil))` stays
+  // untouched during `RecomputePostReloadLiveAtStart` and is resolved back into
+  // `(expr_list:REG_DEAD (reg:SI 3 v1) (nil))` by `ResolvePostReloadConstZeroRegDeadNotes`
+  // even when `sideband.reg_renumber` is populated.
+  RtlControlFlowGraph unpacked_jump2;
+  unpacked_jump2.pass = RtlPassKind::kJump2;
+  unpacked_jump2.sideband.reg_renumber = {{72, 3}};
+  unpacked_jump2.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 3 v1) (plus:SI (reg:SI 4 a0) (const_int 1))) "
+                    "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                    "(set (reg/i:SI 2 v0) (reg:SI 3 v1)) "
+                    "(expr_list:REG_DEAD (const_int 0) (nil))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  RecomputePostReloadLiveAtStart(&unpacked_jump2);
+  EXPECT_FALSE(TopLevelInsnHasNote(unpacked_jump2.rpo_blocks[0].instructions[1],
+                                   RtlMachineMode::kRegDead, 3));
+  ResolvePostReloadConstZeroRegDeadNotes(&unpacked_jump2);
+  EXPECT_TRUE(TopLevelInsnHasNote(unpacked_jump2.rpo_blocks[0].instructions[1],
+                                  RtlMachineMode::kRegDead, 3));
 }
 
 }  // namespace

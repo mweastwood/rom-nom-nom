@@ -17,6 +17,8 @@ namespace rom_nom_nom::lifter {
 // Returns an empty `RtlControlFlowGraph` if `dbr_relaxed_cfg_x` has no basic
 // blocks or contains malformed RTL instruction patterns or out-of-range
 // successor edges.
+RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed_cfg_x,
+                                          const CompilationProfile& profile);
 RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed_cfg_x);
 
 }  // namespace rom_nom_nom::lifter

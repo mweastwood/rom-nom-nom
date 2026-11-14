@@ -97,12 +97,27 @@ class ProductionPass02InverseProvider final : public SubfunctionInverseProvider 
     return lifter::InvertFillSimpleDelaySlots(dbr_simple_cfg_x);
   }
 
+  RtlControlFlowGraph InvertFillSimpleDelaySlots(const RtlControlFlowGraph& dbr_simple_cfg_x,
+                                                 const CompilationProfile& profile) const override {
+    return lifter::InvertFillSimpleDelaySlots(dbr_simple_cfg_x, profile);
+  }
+
   RtlControlFlowGraph InvertDbrSchedule(const RtlControlFlowGraph& dbr_cfg_x) const override {
     return lifter::InvertPass01DbrSchedule(dbr_cfg_x);
   }
 
+  RtlControlFlowGraph InvertDbrSchedule(const RtlControlFlowGraph& dbr_cfg_x,
+                                        const CompilationProfile& profile) const override {
+    return lifter::InvertPass01DbrSchedule(dbr_cfg_x, profile);
+  }
+
   RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& jump2_cfg_x) const override {
     return lifter::InvertPass02Jump2CrossJump(jump2_cfg_x);
+  }
+
+  RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& jump2_cfg_x,
+                                        const CompilationProfile& profile) const override {
+    return lifter::InvertPass02Jump2CrossJump(jump2_cfg_x, profile);
   }
 };
 
@@ -324,6 +339,15 @@ TEST_F(Pass02Jump2CrossJumpTest, SyntheticNegativeMalformedCfgAndCorruptedInvers
   class BrokenJump2Provider final : public SubfunctionInverseProvider {
    public:
     RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& jump2_cfg_x) const override {
+      return Corrupt(jump2_cfg_x);
+    }
+    RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& jump2_cfg_x,
+                                          const CompilationProfile& /*profile*/) const override {
+      return Corrupt(jump2_cfg_x);
+    }
+
+   private:
+    static RtlControlFlowGraph Corrupt(const RtlControlFlowGraph& jump2_cfg_x) {
       RtlControlFlowGraph bad = jump2_cfg_x;
       bad.pass = RtlPassKind::kSched2;
       if (!bad.rpo_blocks.empty()) {

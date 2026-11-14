@@ -593,7 +593,9 @@ absl::StatusOr<RtlExpr> ParseExprImpl(std::string_view text, size_t* pos) {
       return expr;
     }
 
-    case RtlOp::kSymbolRef: {
+    case RtlOp::kSymbolRef:
+    case RtlOp::kConstString:
+    case RtlOp::kAsmInput: {
       SkipWhitespace(text, pos);
       if (PeekParenQuotedString(text, *pos)) {
         expr.symbol_paren_wrapped = true;
@@ -610,23 +612,8 @@ absl::StatusOr<RtlExpr> ParseExprImpl(std::string_view text, size_t* pos) {
         }
         expr.str_val = std::move(*sym_or);
       } else {
-        return absl::InvalidArgumentError("Expected quoted symbol in symbol_ref");
+        return absl::InvalidArgumentError("Expected quoted string operand");
       }
-      SkipWhitespace(text, pos);
-      if (*pos >= text.size() || text[*pos] != ')') {
-        return absl::InvalidArgumentError("Expected ')' after symbol_ref");
-      }
-      ++(*pos);
-      return expr;
-    }
-
-    case RtlOp::kConstString:
-    case RtlOp::kAsmInput: {
-      auto str_or = ParseQuotedString(text, pos);
-      if (!str_or.ok()) {
-        return str_or.status();
-      }
-      expr.str_val = std::move(*str_or);
       SkipWhitespace(text, pos);
       if (*pos >= text.size() || text[*pos] != ')') {
         return absl::InvalidArgumentError("Expected ')' after string operand");
@@ -920,16 +907,13 @@ void FormatExprImpl(const RtlExpr& expr, std::string* out, bool gcc_print_rtl = 
       break;
 
     case RtlOp::kSymbolRef:
+    case RtlOp::kConstString:
+    case RtlOp::kAsmInput:
       if (expr.symbol_paren_wrapped) {
         absl::StrAppend(out, " (", EscapeQuotedString(expr.str_val), ")");
       } else {
         absl::StrAppend(out, " ", EscapeQuotedString(expr.str_val));
       }
-      break;
-
-    case RtlOp::kConstString:
-    case RtlOp::kAsmInput:
-      absl::StrAppend(out, " ", EscapeQuotedString(expr.str_val));
       break;
 
     case RtlOp::kLabelRef:

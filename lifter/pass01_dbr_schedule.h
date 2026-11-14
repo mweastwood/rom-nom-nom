@@ -19,7 +19,15 @@ namespace rom_nom_nom::lifter {
 //
 // Returns an empty `RtlControlFlowGraph` (`rpo_blocks.empty()`) if `dbr_cfg_x`
 // is empty or contains invalid / malformed RTL patterns or CFG edges.
+RtlControlFlowGraph InvertPass01DbrSchedule(const RtlControlFlowGraph& dbr_cfg_x,
+                                            const CompilationProfile& profile);
+
 RtlControlFlowGraph InvertPass01DbrSchedule(const RtlControlFlowGraph& dbr_cfg_x);
+
+inline RtlControlFlowGraph InvertDbrSchedule(const RtlControlFlowGraph& dbr_cfg_x,
+                                             const CompilationProfile& profile) {
+  return InvertPass01DbrSchedule(dbr_cfg_x, profile);
+}
 
 inline RtlControlFlowGraph InvertDbrSchedule(const RtlControlFlowGraph& dbr_cfg_x) {
   return InvertPass01DbrSchedule(dbr_cfg_x);

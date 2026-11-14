@@ -200,7 +200,8 @@ bool TrailingBlockHasExplicitLabelReference(const RtlControlFlowGraph& cfg) {
 
 }  // namespace
 
-RtlControlFlowGraph InvertMakeReturnInsns(const RtlControlFlowGraph& dbr_return_cfg_x) {
+RtlControlFlowGraph InvertMakeReturnInsns(const RtlControlFlowGraph& dbr_return_cfg_x,
+                                          const CompilationProfile& profile) {
   if (!IsValidCfg(dbr_return_cfg_x)) {
     return {};
   }
@@ -236,8 +237,13 @@ RtlControlFlowGraph InvertMakeReturnInsns(const RtlControlFlowGraph& dbr_return_
     out.rpo_blocks.push_back(std::move(end_blk));
   }
 
-  RecomputePostReloadLiveAtStart(&out);
+  RecomputePostReloadLiveAtStart(&out, profile);
   return out;
+}
+
+RtlControlFlowGraph InvertMakeReturnInsns(const RtlControlFlowGraph& dbr_return_cfg_x) {
+  const CompilationProfile default_profile{.optimize_level = 2};
+  return InvertMakeReturnInsns(dbr_return_cfg_x, default_profile);
 }
 
 }  // namespace rom_nom_nom::lifter

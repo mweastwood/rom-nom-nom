@@ -208,10 +208,18 @@ class SubfunctionInverseProvider {
   virtual RtlControlFlowGraph InvertFillSimpleDelaySlots(const RtlControlFlowGraph& /*x*/) const {
     return {};
   }
+  virtual RtlControlFlowGraph InvertFillSimpleDelaySlots(
+      const RtlControlFlowGraph& x, const CompilationProfile& /*profile*/) const {
+    return InvertFillSimpleDelaySlots(x);
+  }
 
   // 10. Inverse of `reorg.c:dbr_schedule`.
   virtual RtlControlFlowGraph InvertDbrSchedule(const RtlControlFlowGraph& /*x*/) const {
     return {};
+  }
+  virtual RtlControlFlowGraph InvertDbrSchedule(const RtlControlFlowGraph& x,
+                                                const CompilationProfile& /*profile*/) const {
+    return InvertDbrSchedule(x);
   }
 
   // ---------------------------------------------------------------------------
@@ -222,6 +230,10 @@ class SubfunctionInverseProvider {
   virtual RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& /*x*/) const {
     return {};
   }
+  virtual RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& x,
+                                                const CompilationProfile& /*profile*/) const {
+    return InvertDoCrossJump(x);
+  }
 
   // ---------------------------------------------------------------------------
   // Stage 3 & Stage 6: Instruction Scheduling (`sched.c`)
@@ -229,6 +241,18 @@ class SubfunctionInverseProvider {
 
   // 12. Inverse of `sched.c:schedule_block` / `schedule_insns`.
   virtual RtlControlFlowGraph InvertScheduleBlock(const RtlControlFlowGraph& /*x*/) const {
+    return {};
+  }
+  virtual RtlControlFlowGraph InvertScheduleBlock(const RtlControlFlowGraph& x,
+                                                  const CompilationProfile& /*profile*/) const {
+    return InvertScheduleBlock(x);
+  }
+
+  // Whole-stage inverse for Stage 3 (`function.c:thread_prologue_and_epilogue_insns`
+  // + post-reload `sched.c:schedule_insns`, `.10.sched2` -> `.09.greg`).
+  virtual RtlControlFlowGraph InvertSched2PostReload(const RtlControlFlowGraph& /*scheduled_cfg_x*/,
+                                                     const CompilationProfile& /*profile*/,
+                                                     bool /*sched2_enabled*/) const {
     return {};
   }
 

@@ -14,21 +14,26 @@ namespace rom_nom_nom::lifter {
 //   2. `InvertRelaxDelaySlots`
 //   3. `InvertFillEagerDelaySlots`
 //   4. `InvertFillSimpleDelaySlots`
-RtlControlFlowGraph InvertPass01DbrSchedule(const RtlControlFlowGraph& dbr_cfg_x) {
-  RtlControlFlowGraph cfg = InvertMakeReturnInsns(dbr_cfg_x);
+RtlControlFlowGraph InvertPass01DbrSchedule(const RtlControlFlowGraph& dbr_cfg_x,
+                                            const CompilationProfile& profile) {
+  RtlControlFlowGraph cfg = InvertMakeReturnInsns(dbr_cfg_x, profile);
   if (cfg.rpo_blocks.empty()) {
     return {};
   }
-  cfg = InvertRelaxDelaySlots(cfg);
+  cfg = InvertRelaxDelaySlots(cfg, profile);
   if (cfg.rpo_blocks.empty()) {
     return {};
   }
-  cfg = InvertFillEagerDelaySlots(cfg);
+  cfg = InvertFillEagerDelaySlots(cfg, profile);
   if (cfg.rpo_blocks.empty()) {
     return {};
   }
-  cfg = InvertFillSimpleDelaySlots(cfg);
+  cfg = InvertFillSimpleDelaySlots(cfg, profile);
   return cfg;
+}
+
+RtlControlFlowGraph InvertPass01DbrSchedule(const RtlControlFlowGraph& dbr_cfg_x) {
+  return InvertPass01DbrSchedule(dbr_cfg_x, CompilationProfile{.optimize_level = 2});
 }
 
 }  // namespace rom_nom_nom::lifter

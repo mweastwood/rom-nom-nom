@@ -11,6 +11,8 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
+#include "core/compiler_flags.h"
 #include "core/rtl_cfg.h"
 #include "core/rtl_expr.h"
 
@@ -86,15 +88,37 @@ void DetectRegisterWidthFlags(const RtlControlFlowGraph& cfg, const CompilationP
                               bool* gp64, bool* fp64) {
   *gp64 = false;
   *fp64 = false;
-  if (profile != nullptr) {
+  if (profile != nullptr && !profile->c_flags.empty()) {
+    int cc1_isa = 0;
+    bool has_msingle_float = false;
+    bool has_m4650 = false;
     for (const std::string& flag : profile->c_flags) {
-      if (flag == "-mips3" || flag == "-mips4") {
-        *gp64 = true;
+      if (flag == "-mips1") {
+        cc1_isa = 1;
+      } else if (flag == "-mips2") {
+        cc1_isa = 2;
+      } else if (flag == "-mips3") {
+        cc1_isa = 3;
+      } else if (flag == "-mips4") {
+        cc1_isa = 4;
+      } else if (flag == "-msingle-float") {
+        has_msingle_float = true;
+      } else if (flag == "-mdouble-float") {
+        has_msingle_float = false;
+      } else if (flag == "-m4650") {
+        has_m4650 = true;
+      } else if (flag == "-mno-4650") {
+        has_m4650 = false;
+      }
+    }
+    if (cc1_isa == 3 || cc1_isa == 4) {
+      *gp64 = true;
+      if (!has_msingle_float && !has_m4650) {
         *fp64 = true;
-      } else if (flag == "-mips1" || flag == "-mips2") {
-        *gp64 = false;
-        *fp64 = false;
-      } else if (flag == "-mgp64") {
+      }
+    }
+    for (const std::string& flag : profile->c_flags) {
+      if (flag == "-mgp64") {
         *gp64 = true;
       } else if (flag == "-mgp32") {
         *gp64 = false;
@@ -106,22 +130,57 @@ void DetectRegisterWidthFlags(const RtlControlFlowGraph& cfg, const CompilationP
     }
     return;
   }
+  auto check_di_alu_set = [&](const RtlExpr& set_expr, bool has_si_clobber) {
+    if (has_si_clobber || !set_expr.IsSet() || !set_expr.SetDest().IsReg() ||
+        set_expr.SetDest().RegNo() >= 32 || set_expr.SetSrc().mode != RtlMachineMode::kDi) {
+      return;
+    }
+    const RtlOp op = set_expr.SetSrc().op;
+    if (op == RtlOp::kPlus || op == RtlOp::kMinus || op == RtlOp::kAshift ||
+        op == RtlOp::kAshiftrt || op == RtlOp::kLshiftrt || op == RtlOp::kSignExtend ||
+        op == RtlOp::kZeroExtend) {
+      *gp64 = true;
+    }
+  };
+  auto check_top_expr = [&](const RtlExpr& top) {
+    if (top.IsParallel()) {
+      bool has_si_clobber = false;
+      for (const RtlExpr& c : top.children) {
+        if (c.op == RtlOp::kClobber && !c.children.empty() &&
+            c.children[0].mode == RtlMachineMode::kSi) {
+          has_si_clobber = true;
+          break;
+        }
+      }
+      for (const RtlExpr& c : top.children) {
+        check_di_alu_set(c, has_si_clobber);
+      }
+    } else {
+      check_di_alu_set(top, /*has_si_clobber=*/false);
+    }
+  };
   for (const auto& blk : cfg.rpo_blocks) {
     for (const std::string& s : blk.instructions) {
       auto parsed = ParsePatternAndNotes(s);
       if (!parsed.ok()) {
         continue;
       }
+      if (parsed->pattern.op == RtlOp::kSequence) {
+        for (const RtlExpr& sub : parsed->pattern.children) {
+          auto sub_pn = RtlPatternAndNotes::FromSequenceSubInsn(sub);
+          if (sub_pn.ok()) {
+            check_top_expr(sub_pn->pattern);
+          }
+        }
+      } else {
+        check_top_expr(parsed->pattern);
+      }
       parsed->pattern.Visit([&](const RtlExpr& node) {
         if (node.IsReg() && node.RegNo() >= 32 && node.RegNo() < 64 && (node.RegNo() % 2) == 1) {
           *fp64 = true;
         }
-        if (node.IsSet() && node.SetDest().IsReg() && node.SetDest().RegNo() < 32 &&
-            node.SetSrc().mode == RtlMachineMode::kDi &&
-            (node.SetSrc().op == RtlOp::kPlus || node.SetSrc().op == RtlOp::kMinus ||
-             node.SetSrc().op == RtlOp::kAshift || node.SetSrc().op == RtlOp::kAshiftrt ||
-             node.SetSrc().op == RtlOp::kLshiftrt || node.SetSrc().op == RtlOp::kSignExtend ||
-             node.SetSrc().op == RtlOp::kZeroExtend)) {
+        if (node.IsReg() && node.RegNo() >= 1 && node.RegNo() < 32 && (node.RegNo() % 2) == 1 &&
+            node.mode == RtlMachineMode::kDi) {
           *gp64 = true;
         }
       });
@@ -381,6 +440,303 @@ struct DataflowResult {
   std::vector<RegMask> live_out;
   std::vector<std::vector<InsnSummary>> block_summaries;
 };
+
+// Accounts for `jump.c:434-465` (`jump_optimize` with `noop_moves = 1`), which
+// deletes redundant `(set (reg:M arg_reg) (reg:M saved_reg))` moves before
+// `B0`'s first `CALL_INSN` while keeping `(use (reg:M arg_reg))` in
+// `CALL_INSN_FUNCTION_USAGE` and stripping `REG_DEAD(arg_reg)` via
+// `remove_death`.
+void InferEntryFirstCallDeletedNoopArgMoves(const CompilationProfile* profile,
+                                            DataflowResult* res) {
+  if (profile == nullptr || profile->optimize_level <= 0 || res->block_summaries.empty()) {
+    return;
+  }
+  const size_t n_blocks = res->block_summaries.size();
+  struct PreCallElem {
+    const ElemSummary* esum = nullptr;
+    const RtlPatternAndNotes* pn = nullptr;
+  };
+  std::vector<PreCallElem> pre_elems;
+  ElemSummary* first_call_elem = nullptr;
+  const RtlPatternAndNotes* first_call_pn = nullptr;
+  size_t first_call_insn_idx = 0;
+  bool b0_ok = true;
+  for (size_t i = 0; i < res->block_summaries[0].size(); ++i) {
+    InsnSummary& isum = res->block_summaries[0][i];
+    if (!isum.valid) {
+      b0_ok = false;
+      break;
+    }
+    if (isum.is_sequence) {
+      if (isum.is_call_seq) {
+        pre_elems.push_back(PreCallElem{&isum.slot, &isum.slot_pn});
+        first_call_elem = &isum.head;
+        first_call_pn = &isum.head_pn;
+        first_call_insn_idx = i;
+      }
+      break;
+    }
+    if (IsAnyControlTransferPattern(isum.top_pn.pattern)) {
+      break;
+    }
+    if (isum.single.is_call) {
+      first_call_elem = &isum.single;
+      first_call_pn = &isum.top_pn;
+      first_call_insn_idx = i;
+      break;
+    }
+    pre_elems.push_back(PreCallElem{&isum.single, &isum.top_pn});
+  }
+
+  if (!b0_ok || first_call_elem == nullptr || first_call_pn->has_explicit_call_fusage) {
+    return;
+  }
+
+  auto is_callee_saved_gpr = [](int r) -> bool { return (r >= 16 && r <= 23) || r == 30; };
+  auto match_prologue_sp_save = [](const RtlExpr& pat, int* out_reg,
+                                   RtlMachineMode* out_mode) -> bool {
+    if (!pat.IsSet() || pat.SetDest().op != RtlOp::kMem || pat.SetSrc().op != RtlOp::kReg ||
+        pat.SetDest().children.size() != 1) {
+      return false;
+    }
+    const RtlExpr& addr = pat.SetDest().children[0];
+    bool sp_addr = false;
+    if (addr.op == RtlOp::kReg && addr.RegNo() == 29) {
+      sp_addr = true;
+    } else if (addr.op == RtlOp::kPlus && addr.children.size() == 2 &&
+               addr.children[0].op == RtlOp::kReg && addr.children[0].RegNo() == 29 &&
+               addr.children[1].op == RtlOp::kConstInt && addr.children[1].IntVal() >= 0) {
+      sp_addr = true;
+    }
+    if (!sp_addr) {
+      return false;
+    }
+    *out_reg = pat.SetSrc().RegNo();
+    *out_mode = pat.SetSrc().mode;
+    return true;
+  };
+
+  int ra_save_pos = -1;
+  absl::flat_hash_map<int, size_t> gpr_save_pos;
+  for (size_t idx = 0; idx < pre_elems.size(); ++idx) {
+    int saved_reg = -1;
+    RtlMachineMode save_mode = RtlMachineMode::kSi;
+    if (match_prologue_sp_save(pre_elems[idx].pn->pattern, &saved_reg, &save_mode)) {
+      if (saved_reg == 31 && ra_save_pos < 0) {
+        ra_save_pos = static_cast<int>(idx);
+      } else if (is_callee_saved_gpr(saved_reg)) {
+        const int span = HardRegNregs(saved_reg, save_mode, res->gp64, res->fp64);
+        for (int off = 0; off < span; ++off) {
+          if (is_callee_saved_gpr(saved_reg + off) && !gpr_save_pos.contains(saved_reg + off)) {
+            gpr_save_pos[saved_reg + off] = idx;
+          }
+        }
+      }
+    }
+  }
+  if (ra_save_pos < 0) {
+    return;
+  }
+
+  RegMask read_after_first_call = 0;
+  for (size_t i = first_call_insn_idx + 1; i < res->block_summaries[0].size(); ++i) {
+    const InsnSummary& s = res->block_summaries[0][i];
+    if (!s.valid) continue;
+    read_after_first_call |= s.is_sequence ? (s.head.uses | s.slot.uses) : s.single.uses;
+  }
+  for (size_t b = 1; b < n_blocks; ++b) {
+    for (const InsnSummary& s : res->block_summaries[b]) {
+      if (!s.valid) continue;
+      read_after_first_call |= s.is_sequence ? (s.head.uses | s.slot.uses) : s.single.uses;
+    }
+  }
+
+  constexpr RegMask kGprArgMask =
+      (RegMask{1} << 4) | (RegMask{1} << 5) | (RegMask{1} << 6) | (RegMask{1} << 7);
+  RegMask arg_gpr_live_into_call = first_call_elem->arg_fusage_uses & kGprArgMask;
+  for (int r = 4; r <= 7; ++r) {
+    int last_def = -1;
+    for (size_t idx = 0; idx < pre_elems.size(); ++idx) {
+      if ((pre_elems[idx].esum->defs & (RegMask{1} << r)) != 0) {
+        last_def = ((pre_elems[idx].esum->explicit_sets & (RegMask{1} << r)) != 0)
+                       ? static_cast<int>(idx)
+                       : -1;
+      }
+    }
+    if (last_def >= 0) {
+      arg_gpr_live_into_call |= (RegMask{1} << r);
+    }
+  }
+
+  auto fpr_live_into_call = [&](int regno, bool* out_is_df) -> bool {
+    if ((first_call_elem->arg_fusage_uses & (RegMask{1} << regno)) != 0) {
+      if (out_is_df != nullptr) {
+        *out_is_df = ((first_call_elem->arg_fusage_uses & (RegMask{1} << (regno + 1))) != 0);
+      }
+      return true;
+    }
+    int last_def = -1;
+    for (size_t idx = 0; idx < pre_elems.size(); ++idx) {
+      if ((pre_elems[idx].esum->defs & (RegMask{1} << regno)) != 0) {
+        last_def = ((pre_elems[idx].esum->explicit_sets & (RegMask{1} << regno)) != 0)
+                       ? static_cast<int>(idx)
+                       : -1;
+      }
+    }
+    if (last_def < 0) {
+      return false;
+    }
+    if (out_is_df != nullptr) {
+      *out_is_df = res->fp64 ? (pre_elems[static_cast<size_t>(last_def)].esum->def_modes[regno] ==
+                                RtlMachineMode::kDf)
+                             : ((pre_elems[static_cast<size_t>(last_def)].esum->explicit_sets &
+                                 (RegMask{1} << (regno + 1))) != 0);
+    }
+    return true;
+  };
+
+  RegMask arg_word_occupied_by_fpr = 0;
+  bool f12_is_df = false;
+  if (fpr_live_into_call(44, &f12_is_df)) {
+    arg_word_occupied_by_fpr |= (RegMask{1} << 4);
+    if (!res->gp64 && f12_is_df) {
+      arg_word_occupied_by_fpr |= (RegMask{1} << 5);
+    }
+    bool f14_is_df = false;
+    if (fpr_live_into_call(46, &f14_is_df)) {
+      if (res->gp64) {
+        arg_word_occupied_by_fpr |= (RegMask{1} << 5);
+      } else if (f12_is_df) {
+        arg_word_occupied_by_fpr |= (RegMask{1} << 6);
+        if (f14_is_df) {
+          arg_word_occupied_by_fpr |= (RegMask{1} << 7);
+        }
+      } else {
+        arg_word_occupied_by_fpr |= (RegMask{1} << 5);
+        if (f14_is_df) {
+          arg_word_occupied_by_fpr |= (RegMask{1} << 6) | (RegMask{1} << 7);
+        }
+      }
+    }
+  }
+
+  struct PreCallCopyCand {
+    size_t copy_pos = 0;
+    int saved_reg = -1;
+    int arg_reg = -1;
+    int span = 1;
+  };
+  std::vector<PreCallCopyCand> cands;
+  RegMask arg_gpr_saved_in_callee_reg = 0;
+  for (size_t idx = 0; idx < pre_elems.size(); ++idx) {
+    const RtlExpr& pat = pre_elems[idx].pn->pattern;
+    if (pre_elems[idx].esum->is_call || pre_elems[idx].esum->is_note_or_pseudo || !pat.IsSet() ||
+        pat.SetDest().op != RtlOp::kReg || pat.SetSrc().op != RtlOp::kReg) {
+      continue;
+    }
+    const RtlMachineMode mode = pat.SetDest().mode;
+    if (mode != pat.SetSrc().mode || (mode != RtlMachineMode::kSi && mode != RtlMachineMode::kSf &&
+                                      mode != RtlMachineMode::kDi && mode != RtlMachineMode::kDf)) {
+      continue;
+    }
+    const int saved_reg = pat.SetDest().RegNo();
+    const int arg_reg = pat.SetSrc().RegNo();
+    const int span = HardRegNregs(saved_reg, mode, res->gp64, res->fp64);
+    if (!is_callee_saved_gpr(saved_reg) || arg_reg < 4 || arg_reg + span - 1 > 7) {
+      continue;
+    }
+    if (span == 2 && !is_callee_saved_gpr(saved_reg + 1)) {
+      continue;
+    }
+    bool valid = true;
+    for (int off = 0; off < span; ++off) {
+      const int sr = saved_reg + off;
+      const int ar = arg_reg + off;
+      if ((read_after_first_call & (RegMask{1} << sr)) == 0 ||
+          (arg_word_occupied_by_fpr & (RegMask{1} << ar)) != 0) {
+        valid = false;
+      }
+      for (size_t k = 0; k < idx; ++k) {
+        if ((pre_elems[k].esum->defs & (RegMask{1} << ar)) != 0) {
+          valid = false;
+        }
+      }
+      for (size_t k = idx + 1; k < pre_elems.size(); ++k) {
+        if ((pre_elems[k].esum->defs & ((RegMask{1} << sr) | (RegMask{1} << ar))) != 0 ||
+            (pre_elems[k].esum->uses & ((RegMask{1} << sr) | (RegMask{1} << ar))) != 0) {
+          valid = false;
+        }
+      }
+    }
+    if (!valid) {
+      continue;
+    }
+    cands.push_back(PreCallCopyCand{idx, saved_reg, arg_reg, span});
+    for (int off = 0; off < span; ++off) {
+      arg_gpr_saved_in_callee_reg |= (RegMask{1} << (arg_reg + off));
+    }
+  }
+
+  auto has_cand = [&](int sr, int ar) -> bool {
+    for (const PreCallCopyCand& c : cands) {
+      if (c.saved_reg == sr && c.arg_reg == ar && c.span == 1) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  for (const PreCallCopyCand& cand : cands) {
+    bool save_hoisted_before_ra = false;
+    for (int off = 0; off < cand.span; ++off) {
+      auto it = gpr_save_pos.find(cand.saved_reg + off);
+      if (it != gpr_save_pos.end() && it->second < static_cast<size_t>(ra_save_pos) &&
+          it->second < cand.copy_pos) {
+        save_hoisted_before_ra = true;
+      }
+    }
+    if (!res->gp64 && cand.span == 1 && (cand.saved_reg % 2) == 1 && cand.arg_reg == 7 &&
+        has_cand(cand.saved_reg - 1, 6)) {
+      auto it_hi = gpr_save_pos.find(cand.saved_reg - 1);
+      if (it_hi != gpr_save_pos.end() && it_hi->second < static_cast<size_t>(ra_save_pos) &&
+          it_hi->second < cand.copy_pos) {
+        save_hoisted_before_ra = true;
+      }
+    }
+
+    bool higher_arg_written = false;
+    for (int r = cand.arg_reg + cand.span; r <= 7; ++r) {
+      if ((arg_gpr_live_into_call & (RegMask{1} << r)) != 0) {
+        higher_arg_written = true;
+      }
+    }
+
+    const bool is_o32_aligned_pair_at_6 =
+        (cand.span == 2 && cand.arg_reg == 6) ||
+        (!res->gp64 && cand.span == 1 &&
+         ((cand.arg_reg == 6 && (cand.saved_reg % 2) == 0 && has_cand(cand.saved_reg + 1, 7)) ||
+          (cand.arg_reg == 7 && (cand.saved_reg % 2) == 1 && has_cand(cand.saved_reg - 1, 6))));
+
+    bool all_lower_args_supplied = true;
+    for (int r = 4; r < cand.arg_reg; ++r) {
+      if (is_o32_aligned_pair_at_6 && r == 5) {
+        continue;
+      }
+      if (((arg_gpr_live_into_call | arg_gpr_saved_in_callee_reg | arg_word_occupied_by_fpr) &
+           (RegMask{1} << r)) == 0) {
+        all_lower_args_supplied = false;
+      }
+    }
+
+    if (all_lower_args_supplied && (save_hoisted_before_ra || higher_arg_written)) {
+      for (int off = 0; off < cand.span; ++off) {
+        const RegMask bit = RegMask{1} << (cand.arg_reg + off);
+        first_call_elem->arg_fusage_uses |= bit;
+        first_call_elem->uses |= bit;
+      }
+    }
+  }
+}
 
 DataflowResult RunHardRegDataflow(const RtlControlFlowGraph& cfg, const CompilationProfile* profile,
                                   bool dbr_post_simple_markers = false) {
@@ -760,6 +1116,8 @@ DataflowResult RunHardRegDataflow(const RtlControlFlowGraph& cfg, const Compilat
         }
       }
     }
+
+    InferEntryFirstCallDeletedNoopArgMoves(profile, &res);
   }
 
   res.live_at_exit = (RegMask{1} << 29) | (RegMask{1} << 31) | any_integrated_ret;
@@ -1342,25 +1700,7 @@ bool AttachNotesToElem(RtlPatternAndNotes* pn, const ElemSummary& esum, RegMask 
   return changed;
 }
 
-}  // namespace
-
-void ReconstructPostDbrHardRegLivenessAndReturnUse(RtlControlFlowGraph* cfg,
-                                                   const CompilationProfile& profile) {
-  if (cfg == nullptr || cfg->rpo_blocks.empty()) {
-    return;
-  }
-
-  DataflowResult df = RunHardRegDataflow(*cfg, &profile);
-  const bool attach_notes = (profile.optimize_level > 0);
-  if (attach_notes) {
-    WriteLiveInToSideband(df, cfg);
-  } else {
-    cfg->sideband.basic_block_live_at_start.clear();
-  }
-
-  const RegMask exit_ret_mask = df.live_at_exit & kRetCandMask;
-  const size_t n_blocks = cfg->rpo_blocks.size();
-
+void ApplyMissingCallFusageFromDataflow(const DataflowResult& df, RtlControlFlowGraph* cfg) {
   auto build_call_fusage_exprs = [&](RegMask arg_mask) -> std::vector<RtlExpr> {
     std::vector<RtlExpr> fusage;
     const RtlMachineMode gpr_mode = df.gp64 ? RtlMachineMode::kDi : RtlMachineMode::kSi;
@@ -1388,28 +1728,106 @@ void ReconstructPostDbrHardRegLivenessAndReturnUse(RtlControlFlowGraph* cfg,
     return fusage;
   };
 
-  auto apply_call_fusage_to_blocks = [&]() {
-    for (size_t b = 0; b < n_blocks; ++b) {
-      RtlBasicBlock& blk = cfg->rpo_blocks[b];
-      if (blk.rtl_insns.size() != blk.instructions.size()) {
-        blk.SyncRtlInsnsFromInstructions();
+  const size_t n_blocks = cfg->rpo_blocks.size();
+  for (size_t b = 0; b < n_blocks; ++b) {
+    RtlBasicBlock& blk = cfg->rpo_blocks[b];
+    if (blk.rtl_insns.size() != blk.instructions.size()) {
+      blk.SyncRtlInsnsFromInstructions();
+    }
+    const size_t limit = std::min(blk.rtl_insns.size(), df.block_summaries[b].size());
+    for (size_t i = 0; i < limit; ++i) {
+      const InsnSummary& isum = df.block_summaries[b][i];
+      if (!isum.valid || !(isum.is_call_seq || (!isum.is_sequence && isum.single.is_call))) {
+        continue;
       }
-      const size_t limit = std::min(blk.rtl_insns.size(), df.block_summaries[b].size());
-      for (size_t i = 0; i < limit; ++i) {
-        const InsnSummary& isum = df.block_summaries[b][i];
-        if (!isum.valid || !(isum.is_call_seq || (!isum.is_sequence && isum.single.is_call))) {
-          continue;
-        }
-        RtlInsn& rinsn = blk.rtl_insns[i];
-        if (!rinsn.has_explicit_call_fusage) {
-          const RegMask fusage_mask =
-              isum.is_call_seq ? isum.head.arg_fusage_uses : isum.single.arg_fusage_uses;
-          rinsn.has_explicit_call_fusage = true;
-          rinsn.call_fusage = build_call_fusage_exprs(fusage_mask);
-        }
+      RtlInsn& rinsn = blk.rtl_insns[i];
+      if (!rinsn.has_explicit_call_fusage) {
+        const RegMask fusage_mask =
+            isum.is_call_seq ? isum.head.arg_fusage_uses : isum.single.arg_fusage_uses;
+        rinsn.has_explicit_call_fusage = true;
+        rinsn.call_fusage = build_call_fusage_exprs(fusage_mask);
       }
     }
-  };
+  }
+}
+
+}  // namespace
+
+int MipsModeByteSize(RtlMachineMode mode) {
+  return ModeByteSize(mode);
+}
+
+int MipsHardRegNregs(int regno, RtlMachineMode mode, bool gp64, bool fp64) {
+  return HardRegNregs(regno, mode, gp64, fp64);
+}
+
+void DetectMipsRegisterWidthFlags(const RtlControlFlowGraph& cfg, const CompilationProfile* profile,
+                                  bool* gp64, bool* fp64) {
+  DetectRegisterWidthFlags(cfg, profile, gp64, fp64);
+}
+
+ParsedCompilerFlags ParseCompilationProfileFlags(const CompilationProfile& profile) {
+  std::vector<std::string> tokens;
+  tokens.reserve(profile.c_flags.size() + 1);
+  tokens.push_back(absl::StrCat("-O", profile.optimize_level));
+  tokens.insert(tokens.end(), profile.c_flags.begin(), profile.c_flags.end());
+  return ParsedCompilerFlags::Parse(tokens);
+}
+
+void ReconstructMissingCallFusage(RtlControlFlowGraph* cfg, const CompilationProfile& profile) {
+  if (cfg == nullptr || cfg->rpo_blocks.empty()) {
+    return;
+  }
+  bool has_missing_call_fusage = false;
+  for (RtlBasicBlock& blk : cfg->rpo_blocks) {
+    if (blk.rtl_insns.size() != blk.instructions.size()) {
+      blk.SyncRtlInsnsFromInstructions();
+    }
+    for (size_t i = 0; i < blk.instructions.size(); ++i) {
+      if (blk.rtl_insns[i].has_explicit_call_fusage) {
+        continue;
+      }
+      auto pn = ParsePatternAndNotes(blk.instructions[i]);
+      if (!pn.ok()) {
+        continue;
+      }
+      if (pn->has_explicit_call_fusage) {
+        blk.rtl_insns[i].has_explicit_call_fusage = true;
+        blk.rtl_insns[i].call_fusage = std::move(pn->call_fusage);
+        continue;
+      }
+      if (IsCallPattern(pn->pattern) ||
+          (pn->pattern.op == RtlOp::kSequence && !pn->pattern.children.empty() &&
+           pn->pattern.children[0].op == RtlOp::kCallInsn)) {
+        has_missing_call_fusage = true;
+      }
+    }
+  }
+  if (!has_missing_call_fusage) {
+    return;
+  }
+  const DataflowResult df = RunHardRegDataflow(*cfg, &profile);
+  ApplyMissingCallFusageFromDataflow(df, cfg);
+}
+
+void ReconstructPostDbrHardRegLivenessAndReturnUse(RtlControlFlowGraph* cfg,
+                                                   const CompilationProfile& profile) {
+  if (cfg == nullptr || cfg->rpo_blocks.empty()) {
+    return;
+  }
+
+  DataflowResult df = RunHardRegDataflow(*cfg, &profile);
+  const bool attach_notes = (profile.optimize_level > 0);
+  if (attach_notes) {
+    WriteLiveInToSideband(df, cfg);
+  } else {
+    cfg->sideband.basic_block_live_at_start.clear();
+  }
+
+  const RegMask exit_ret_mask = df.live_at_exit & kRetCandMask;
+  const size_t n_blocks = cfg->rpo_blocks.size();
+
+  auto apply_call_fusage_to_blocks = [&]() { ApplyMissingCallFusageFromDataflow(df, cfg); };
 
   // Backward propagation of exit-reaching return register values (`exit_ret_mask`)
   // so only genuine return-value `SET`s receive `REG_FUNCTION_VALUE_P` (`reg/i`).
@@ -2109,32 +2527,20 @@ void ReconstructPostDbrHardRegLivenessAndReturnUse(RtlControlFlowGraph* cfg,
   }
 }
 
-void RecomputePostReloadLiveAtStart(RtlControlFlowGraph* cfg) {
+void RecomputePostReloadLiveAtStart(RtlControlFlowGraph* cfg, const CompilationProfile& profile) {
   if (cfg == nullptr || cfg->rpo_blocks.empty() ||
-      static_cast<int>(cfg->pass) < static_cast<int>(RtlPassKind::kGreg)) {
+      static_cast<int>(cfg->pass) <= static_cast<int>(RtlPassKind::kGreg)) {
     return;
   }
-  for (const auto& [block_idx, live_set] : cfg->sideband.basic_block_live_at_start) {
-    (void)block_idx;
-    for (int regno : live_set) {
-      if (regno >= kMipsFirstPseudoRegister) {
-        return;
-      }
-    }
+  const ParsedCompilerFlags flags = ParseCompilationProfileFlags(profile);
+  if (flags.opt_level <= 0) {
+    cfg->sideband.basic_block_live_at_start.clear();
+    return;
   }
   bool has_pseudo = false;
-  bool has_optimized_indicator = cfg->sideband.epilogue_delay_pattern.has_value() &&
-                                 !cfg->sideband.epilogue_delay_pattern->empty();
   auto check_pseudo = [&has_pseudo](const RtlExpr& node) {
     if (node.IsReg() && node.RegNo() >= kMipsFirstPseudoRegister) {
       has_pseudo = true;
-    }
-  };
-  auto check_notes = [&has_optimized_indicator](const std::vector<RtlRegNote>& notes) {
-    for (const RtlRegNote& note : notes) {
-      if (note.kind == RtlMachineMode::kRegDead || note.kind == RtlMachineMode::kRegUnused) {
-        has_optimized_indicator = true;
-      }
     }
   };
   if (cfg->sideband.epilogue_delay_pattern.has_value() &&
@@ -2142,7 +2548,6 @@ void RecomputePostReloadLiveAtStart(RtlControlFlowGraph* cfg) {
     auto ep_parsed = ParsePatternAndNotes(*cfg->sideband.epilogue_delay_pattern);
     if (ep_parsed.ok()) {
       ep_parsed->pattern.Visit(check_pseudo);
-      check_notes(ep_parsed->reg_notes);
     }
     if (has_pseudo) {
       return;
@@ -2155,31 +2560,211 @@ void RecomputePostReloadLiveAtStart(RtlControlFlowGraph* cfg) {
         continue;
       }
       parsed->pattern.Visit(check_pseudo);
-      check_notes(parsed->reg_notes);
-      if (parsed->pattern.op == RtlOp::kSequence ||
-          (parsed->pattern.IsParallel() && IsReturnJumpPattern(parsed->pattern))) {
-        has_optimized_indicator = true;
-      }
-      if (parsed->pattern.op == RtlOp::kSequence) {
-        for (const RtlExpr& sub : parsed->pattern.children) {
-          auto sub_pn = RtlPatternAndNotes::FromSequenceSubInsn(sub);
-          if (sub_pn.ok()) {
-            check_notes(sub_pn->reg_notes);
-          }
-        }
-      }
       if (has_pseudo) {
         return;
       }
     }
   }
-  if (cfg->sideband.basic_block_live_at_start.empty() && !has_optimized_indicator) {
-    return;
-  }
   const DataflowResult df =
-      RunHardRegDataflow(*cfg, /*profile=*/nullptr,
+      RunHardRegDataflow(*cfg, &profile,
                          /*dbr_post_simple_markers=*/(cfg->pass == RtlPassKind::kDbr));
   WriteLiveInToSideband(df, cfg);
+}
+
+void RecomputePostReloadLiveAtStart(RtlControlFlowGraph* cfg) {
+  const CompilationProfile default_profile{.optimize_level = 2};
+  RecomputePostReloadLiveAtStart(cfg, default_profile);
+}
+
+void ResolvePostReloadConstZeroRegDeadNotes(RtlControlFlowGraph* cfg,
+                                            const CompilationProfile& profile) {
+  if (cfg == nullptr || cfg->rpo_blocks.empty()) {
+    return;
+  }
+  const ParsedCompilerFlags flags = ParseCompilationProfileFlags(profile);
+  if (flags.opt_level <= 0) {
+    return;
+  }
+  bool has_const_zero_dead = false;
+  for (const auto& blk : cfg->rpo_blocks) {
+    for (const std::string& pat : blk.instructions) {
+      auto parsed = ParsePatternAndNotes(pat);
+      if (parsed.ok() && CountConstZeroRegDeadNotes(parsed->reg_notes) > 0) {
+        has_const_zero_dead = true;
+        break;
+      }
+    }
+    if (has_const_zero_dead) {
+      break;
+    }
+  }
+  if (!has_const_zero_dead) {
+    return;
+  }
+
+  const DataflowResult df = RunHardRegDataflow(*cfg, &profile);
+  const RegMask fixed_mask = (RegMask{1} << 0) | (RegMask{1} << 28) | (RegMask{1} << 29) |
+                             (cfg->sideband.frame_pointer_needed ? (RegMask{1} << 30) : RegMask{0});
+  auto find_used_reg_expr = [](const RtlExpr& root, int target_regno,
+                               RtlMachineMode fallback_mode) -> RtlExpr {
+    const RtlExpr* found = nullptr;
+    auto visit = [&](auto& self, const RtlExpr& e, bool is_set_lhs) -> void {
+      if (found != nullptr) {
+        return;
+      }
+      if (e.IsSet()) {
+        self(self, e.SetSrc(), false);
+        self(self, e.SetDest(), true);
+        return;
+      }
+      if (e.op == RtlOp::kClobber) {
+        return;
+      }
+      if (e.IsReg()) {
+        if (!is_set_lhs && e.RegNo() == target_regno) {
+          found = &e;
+        }
+        return;
+      }
+      for (const RtlExpr& child : e.children) {
+        self(self, child, false);
+      }
+    };
+    visit(visit, root, false);
+    if (found != nullptr) {
+      return *found;
+    }
+    return RtlExpr::MakeReg(fallback_mode, target_regno);
+  };
+
+  for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
+    RtlBasicBlock& blk = cfg->rpo_blocks[b];
+    std::vector<InsnSummary> block_sums = df.block_summaries[b];
+    std::vector<RegMask> live_after(block_sums.size(), 0);
+    RegMask cur_live = df.live_out[b];
+    bool block_changed = false;
+    for (size_t rev_i = block_sums.size(); rev_i > 0; --rev_i) {
+      const size_t i = rev_i - 1;
+      live_after[i] = cur_live;
+      InsnSummary& isum = block_sums[i];
+      if (!isum.valid) {
+        continue;
+      }
+      if (isum.is_sequence) {
+        if (isum.is_call_seq) {
+          const RegMask before_call = (cur_live & ~isum.head.defs) | isum.head.uses;
+          cur_live = (before_call & ~isum.slot.defs) | isum.slot.uses;
+        } else {
+          const RegMask before_slot = (cur_live & ~isum.slot.defs) | isum.slot.uses;
+          cur_live = (before_slot & ~isum.head.defs) | isum.head.uses;
+        }
+        continue;
+      }
+      const ElemSummary& esum = isum.single;
+      const size_t num_const_zero = CountConstZeroRegDeadNotes(isum.top_pn.reg_notes);
+      if (num_const_zero > 0) {
+        std::vector<RtlExpr> candidates;
+        RegMask picked = 0;
+        auto collect_tier = [&](RegMask cand_mask) {
+          for (int r = 1; r < kMipsFirstPseudoRegister;) {
+            if ((cand_mask & ~picked & (RegMask{1} << r)) != 0) {
+              const RtlMachineMode mode = esum.use_modes[r];
+              if (!HasRegNote(isum.top_pn.reg_notes, RtlMachineMode::kRegDead, r)) {
+                candidates.push_back(find_used_reg_expr(isum.top_pn.pattern, r, mode));
+              }
+              const int nregs = HardRegNregs(r, mode, df.gp64, df.fp64);
+              for (int k = 0; k < nregs && r + k < kMipsFirstPseudoRegister; ++k) {
+                picked |= (RegMask{1} << (r + k));
+              }
+              r += nregs;
+            } else {
+              ++r;
+            }
+          }
+        };
+
+        // First resolve deaths that genuinely occur on instruction `i` itself.
+        collect_tier(esum.uses & ~esum.defs & ~cur_live & ~fixed_mask);
+        collect_tier(esum.uses & esum.defs & ~fixed_mask);
+
+        // Invert `reorg.c:2283-2306` (`update_reg_dead_notes`): any remaining
+        // `(REG_DEAD (const_int 0))` notes were moved onto `trial` from an
+        // intervening instruction `j > i` between `trial` and `delayed_insn`.
+        size_t excess =
+            (num_const_zero > candidates.size()) ? (num_const_zero - candidates.size()) : 0;
+        for (size_t j = i + 1; excess > 0 && j + 1 < block_sums.size(); ++j) {
+          InsnSummary& jsum = block_sums[j];
+          if (!jsum.valid || jsum.is_sequence) {
+            continue;
+          }
+          const bool is_use_insn = (jsum.top_pn.pattern.op == RtlOp::kUse);
+          const RegMask shared_uses = jsum.single.uses & esum.uses & ~fixed_mask;
+          if (shared_uses == 0) {
+            continue;
+          }
+          for (int r = 1; excess > 0 && r < kMipsFirstPseudoRegister;) {
+            if ((shared_uses & (RegMask{1} << r)) != 0) {
+              const RtlMachineMode jmode = jsum.single.use_modes[r];
+              const int nregs = HardRegNregs(r, jmode, df.gp64, df.fp64);
+              const bool dies_at_j = is_use_insn || ((live_after[j] & (RegMask{1} << r)) == 0) ||
+                                     ((jsum.single.defs & (RegMask{1} << r)) != 0);
+              if (dies_at_j && !HasRegNote(jsum.top_pn.reg_notes, RtlMachineMode::kRegDead, r)) {
+                RtlRegNote restored_note;
+                restored_note.kind = RtlMachineMode::kRegDead;
+                restored_note.datum = find_used_reg_expr(jsum.top_pn.pattern, r, jmode);
+                jsum.top_pn.reg_notes.push_back(std::move(restored_note));
+                blk.instructions[j] = jsum.top_pn.ToGccPrintRtlString();
+                if (blk.rtl_insns.size() == blk.instructions.size()) {
+                  blk.rtl_insns[j].canonical_pattern = blk.instructions[j];
+                } else {
+                  block_changed = true;
+                }
+                --excess;
+              }
+              r += nregs;
+            } else {
+              ++r;
+            }
+          }
+        }
+
+        if (excess > 0) {
+          collect_tier(esum.uses & ~fixed_mask);
+        }
+
+        size_t cand_idx = 0;
+        std::vector<RtlRegNote> updated_notes;
+        updated_notes.reserve(isum.top_pn.reg_notes.size());
+        for (RtlRegNote& note : isum.top_pn.reg_notes) {
+          if (note.kind == RtlMachineMode::kRegDead && note.datum.IsConstInt() &&
+              note.datum.int_val == 0) {
+            if (cand_idx < candidates.size()) {
+              note.datum = candidates[cand_idx++];
+              updated_notes.push_back(std::move(note));
+            }
+          } else {
+            updated_notes.push_back(std::move(note));
+          }
+        }
+        isum.top_pn.reg_notes = std::move(updated_notes);
+        blk.instructions[i] = isum.top_pn.ToGccPrintRtlString();
+        if (blk.rtl_insns.size() == blk.instructions.size()) {
+          blk.rtl_insns[i].canonical_pattern = blk.instructions[i];
+        } else {
+          block_changed = true;
+        }
+      }
+      cur_live = (cur_live & ~esum.defs) | esum.uses;
+    }
+    if (block_changed) {
+      blk.SyncRtlInsnsFromInstructions();
+    }
+  }
+}
+
+void ResolvePostReloadConstZeroRegDeadNotes(RtlControlFlowGraph* cfg) {
+  const CompilationProfile default_profile{.optimize_level = 2};
+  ResolvePostReloadConstZeroRegDeadNotes(cfg, default_profile);
 }
 
 bool IsAnyDefinedHardRegLiveAtBlockEntry(const RtlControlFlowGraph& cfg, const RtlExpr& def_pat,

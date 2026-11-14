@@ -25,8 +25,10 @@
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
 #include "absl/types/span.h"
+#include "core/compiler_flags.h"
 #include "core/rtl_cfg.h"
 #include "core/rtl_expr.h"
+#include "lifter/mips_multi_insn_idioms.h"
 #include "lifter/reconstruct_hard_reg_liveness.h"
 
 namespace rom_nom_nom::lifter {
@@ -501,6 +503,65 @@ std::string InvertTwoLineDiConstLoad(std::string_view line0, std::string_view li
   }
   return absl::StrFormat("(set %s (const_double:VOID (cc0) %d %d))", FormatGprRtl(rd0, "DI"), lo32,
                          hi32);
+}
+
+std::string InvertTwoLineDfTransfer(std::string_view first_line, std::string_view second_line) {
+  auto clean_line = [](std::string_view raw) {
+    const size_t hash_pos = raw.find('#');
+    if (hash_pos != std::string_view::npos) {
+      raw = raw.substr(0, hash_pos);
+    }
+    return absl::StripAsciiWhitespace(raw);
+  };
+  first_line = clean_line(first_line);
+  second_line = clean_line(second_line);
+  if (first_line.empty() || second_line.empty()) {
+    return "";
+  }
+  auto parse_cop1_xfer = [](std::string_view ln, std::string_view* out_mnem, int* out_gpr,
+                            int* out_fpr) -> bool {
+    size_t sp = 0;
+    while (sp < ln.size() && !absl::ascii_isspace(static_cast<unsigned char>(ln[sp]))) {
+      ++sp;
+    }
+    const std::string_view mnem = ln.substr(0, sp);
+    if (mnem != "mtc1" && mnem != "mfc1") {
+      return false;
+    }
+    const std::vector<std::string_view> ops = SplitOperands(ln.substr(sp));
+    if (ops.size() != 2) {
+      return false;
+    }
+    const int gpr = ParseGprNumber(ops[0]);
+    const int fpr = ParseFprNumber(ops[1]);
+    if (gpr < 0 || fpr < 0) {
+      return false;
+    }
+    *out_mnem = mnem;
+    *out_gpr = gpr;
+    *out_fpr = fpr;
+    return true;
+  };
+  std::string_view m0;
+  std::string_view m1;
+  int g0 = -1;
+  int f0 = -1;
+  int g1 = -1;
+  int f1 = -1;
+  if (!parse_cop1_xfer(first_line, &m0, &g0, &f0) || !parse_cop1_xfer(second_line, &m1, &g1, &f1) ||
+      m0 != m1 || (f0 % 2) != 0 || f1 != f0 + 1) {
+    return "";
+  }
+  if (m0 == "mtc1" && g0 == 0 && g1 == 0) {
+    return absl::StrFormat("(set %s (const_double:DF (cc0) 0 0))", FormatFprRtl(f0, "DF"));
+  }
+  if (g1 >= 2 && (g1 % 2) == 0 && g0 == g1 + 1) {
+    if (m0 == "mtc1") {
+      return absl::StrFormat("(set %s %s)", FormatFprRtl(f0, "DF"), FormatGprRtl(g1, "DF"));
+    }
+    return absl::StrFormat("(set %s %s)", FormatGprRtl(g1, "DF"), FormatFprRtl(f0, "DF"));
+  }
+  return "";
 }
 
 std::string InvertMips1DiShift(std::string_view multi_line_asm) {
@@ -984,6 +1045,10 @@ std::string InvertFinalScanInsn(std::string_view asm_line_x) {
               InvertTwoLineDiConstLoad(first_line, second_line, /*require_nonneg_decimal=*/false);
           !di_li.empty()) {
         return di_li;
+      }
+      if (std::string df_xfer = InvertTwoLineDfTransfer(first_line, second_line);
+          !df_xfer.empty()) {
+        return df_xfer;
       }
     }
     if (std::string di_shift = InvertMips1DiShift(trimmed_full); !di_shift.empty()) {
@@ -3530,6 +3595,717 @@ void NormalizeMips12AdduZeroMoves(RtlControlFlowGraph* cfg) {
   }
 }
 
+bool FoldFinalScanMultiInsnTemplates(RtlControlFlowGraph* cfg, const CompilationProfile& profile) {
+  if (cfg == nullptr || cfg->rpo_blocks.empty()) {
+    return false;
+  }
+  const ParsedCompilerFlags flags = ParseCompilationProfileFlags(profile);
+  if (flags.opt_level <= 0) {
+    return false;
+  }
+  bool gp64 = false;
+  bool fp64 = false;
+  DetectMipsRegisterWidthFlags(*cfg, &profile, &gp64, &fp64);
+
+  std::vector<std::vector<RtlPatternAndNotes>> parsed_blocks(cfg->rpo_blocks.size());
+  for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
+    parsed_blocks[b].reserve(cfg->rpo_blocks[b].instructions.size());
+    for (const std::string& pat_str : cfg->rpo_blocks[b].instructions) {
+      auto parsed = ParsePatternAndNotes(pat_str);
+      if (!parsed.ok()) {
+        return false;
+      }
+      parsed_blocks[b].push_back(std::move(*parsed));
+    }
+  }
+  std::optional<RtlPatternAndNotes> epilogue_delay_pn;
+  if (cfg->sideband.epilogue_delay_pattern.has_value() &&
+      !cfg->sideband.epilogue_delay_pattern->empty()) {
+    auto parsed = ParsePatternAndNotes(*cfg->sideband.epilogue_delay_pattern);
+    if (!parsed.ok()) {
+      return false;
+    }
+    epilogue_delay_pn = std::move(*parsed);
+  }
+
+  bool folded_any = false;
+  absl::flat_hash_set<int> compare_di_pairs;
+  absl::flat_hash_set<int> existing_di_regs;
+  bool has_di_witness = false;
+  if (!gp64) {
+    for (size_t b = 0; b < parsed_blocks.size(); ++b) {
+      if (TryFoldGp32DiMultiInsnIdiomsInBlock(*cfg, b, /*mark_newly_folded_sentinel=*/false,
+                                              &parsed_blocks[b])) {
+        folded_any = true;
+      }
+    }
+    CollectCompareDiamondDiPairs(parsed_blocks, &compare_di_pairs);
+    bool has_any_di = false;
+    CollectExistingDiEvenRegs(parsed_blocks, &existing_di_regs, &has_any_di);
+    has_di_witness = has_any_di || !compare_di_pairs.empty();
+  }
+
+  const MipsMovstrsiFoldOptions movstrsi_opts{
+      .gp64 = gp64,
+      .fp64 = fp64,
+      .has_di_witness = has_di_witness,
+      .skip_unfilled_dbr_jump_tail = flags.flag_delayed_branch,
+      .allow_delay_slot_split_movstrsi = true,
+      .mark_newly_folded_sentinel = false,
+  };
+  for (size_t b = 0; b < parsed_blocks.size(); ++b) {
+    std::optional<RtlPatternAndNotes>* ep_ptr =
+        (b + 1 == parsed_blocks.size()) ? &epilogue_delay_pn : nullptr;
+    if (TryFoldMovstrsiBlockMovesInBlock(*cfg, b, movstrsi_opts, &parsed_blocks[b], ep_ptr)) {
+      folded_any = true;
+    }
+  }
+
+  if (has_di_witness) {
+    const int frame_size = DetectStackFrameSize(*cfg);
+    const MipsWitnessedDiFoldOptions witnessed_opts{
+        .allow_noncontiguous_reg_move = false,
+        .mark_newly_folded_sentinel = false,
+    };
+    if (TryFoldGp32DiWitnessedIdioms(*cfg, frame_size, compare_di_pairs, existing_di_regs,
+                                     witnessed_opts, &parsed_blocks)) {
+      folded_any = true;
+    }
+  }
+
+  if (!folded_any) {
+    return false;
+  }
+
+  for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
+    cfg->rpo_blocks[b].instructions.clear();
+    cfg->rpo_blocks[b].instructions.reserve(parsed_blocks[b].size());
+    for (const auto& pn : parsed_blocks[b]) {
+      cfg->rpo_blocks[b].instructions.push_back(pn.ToGccPrintRtlString());
+    }
+    cfg->rpo_blocks[b].SyncRtlInsnsFromInstructions();
+  }
+  if (epilogue_delay_pn.has_value()) {
+    cfg->sideband.epilogue_delay_pattern = epilogue_delay_pn->ToGccPrintRtlString();
+  }
+  return true;
+}
+
+void StripRegDeadAndUnusedNotesOnCfg(RtlControlFlowGraph* cfg) {
+  auto strip_notes = [](std::vector<RtlRegNote>* notes) -> bool {
+    const size_t before = notes->size();
+    notes->erase(std::remove_if(notes->begin(), notes->end(),
+                                [](const RtlRegNote& n) {
+                                  return n.kind == RtlMachineMode::kRegDead ||
+                                         n.kind == RtlMachineMode::kRegUnused;
+                                }),
+                 notes->end());
+    return notes->size() != before;
+  };
+  auto strip_str = [&](std::string* s) -> bool {
+    auto p = ParsePatternAndNotes(*s);
+    if (!p.ok()) {
+      return false;
+    }
+    bool changed = strip_notes(&p->reg_notes);
+    if (p->pattern.op == RtlOp::kSequence && p->pattern.children.size() == 2) {
+      auto sub0 = RtlPatternAndNotes::FromSequenceSubInsn(p->pattern.children[0]);
+      auto sub1 = RtlPatternAndNotes::FromSequenceSubInsn(p->pattern.children[1]);
+      if (sub0.ok() && sub1.ok()) {
+        const bool c0 = strip_notes(&sub0->reg_notes);
+        const bool c1 = strip_notes(&sub1->reg_notes);
+        if (c0 || c1) {
+          p->pattern = RtlExpr::MakeSequence({
+              RtlExpr::MakeInsnWrapper(p->pattern.children[0].op, p->pattern.children[0].flags,
+                                       *sub0),
+              RtlExpr::MakeInsnWrapper(p->pattern.children[1].op, p->pattern.children[1].flags,
+                                       *sub1),
+          });
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
+      *s = p->ToGccPrintRtlString();
+    }
+    return changed;
+  };
+  if (cfg->sideband.epilogue_delay_pattern.has_value() &&
+      !cfg->sideband.epilogue_delay_pattern->empty()) {
+    strip_str(&*cfg->sideband.epilogue_delay_pattern);
+  }
+  for (auto& blk : cfg->rpo_blocks) {
+    bool blk_changed = false;
+    for (std::string& s : blk.instructions) {
+      if (strip_str(&s)) {
+        blk_changed = true;
+      }
+    }
+    if (blk_changed) {
+      blk.SyncRtlInsnsFromInstructions();
+    }
+  }
+}
+
+bool IsGccSynthesizedLibcallSymbol(std::string_view sym, bool is_void_call) {
+  if (sym == "bcopy" || sym == "__gcc_bcmp" || sym == "cacheflush") {
+    return true;
+  }
+  if (is_void_call && sym == "memcpy") {
+    return true;
+  }
+  static constexpr std::string_view kLibcallPrefixes[] = {
+      "__add",    "__sub",  "__mul",    "__div",   "__udiv", "__mod",      "__umod",
+      "__ftrunc", "__and",  "__ior",    "__xor",   "__ashl", "__ashr",     "__lshr",
+      "__min",    "__max",  "__umin",   "__umax",  "__neg",  "__one_cmpl", "__ffs",
+      "__cmp",    "__ucmp", "__extend", "__trunc", "__eq",   "__ne",       "__gt",
+      "__ge",     "__lt",   "__le",     "__float", "__fix",
+  };
+  for (std::string_view pfx : kLibcallPrefixes) {
+    if (absl::StartsWith(sym, pfx) && sym.size() > pfx.size()) {
+      const char tail = sym.back();
+      if (tail == '2' || tail == '3' || tail == '4' || tail == 'i' || tail == 'f') {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+void UpgradeCallOutgoingArgBytes(RtlControlFlowGraph* cfg, const CompilationProfile& profile) {
+  if (cfg == nullptr || cfg->rpo_blocks.empty()) {
+    return;
+  }
+  bool gp64 = false;
+  bool fp64 = false;
+  DetectMipsRegisterWidthFlags(*cfg, &profile, &gp64, &fp64);
+  const int min_reg_parm_bytes = gp64 ? 32 : 16;
+
+  std::vector<std::vector<RtlPatternAndNotes>> blocks(cfg->rpo_blocks.size());
+  bool any_call = false;
+  for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
+    blocks[b].reserve(cfg->rpo_blocks[b].instructions.size());
+    for (const std::string& s : cfg->rpo_blocks[b].instructions) {
+      auto p = ParsePatternAndNotes(s);
+      if (!p.ok()) {
+        return;
+      }
+      if (ExprContainsCall(p->pattern)) {
+        any_call = true;
+      }
+      blocks[b].push_back(std::move(*p));
+    }
+  }
+  if (!any_call) {
+    return;
+  }
+
+  // Determine `non_reg_size = args_size + var_size`: either from `sideband` (populated by
+  // `ExtractFunctionPrologueEpilogue`) or from block 0's prologue `$sp` decrement / lowest save.
+  int non_reg_size = cfg->sideband.outgoing_args_size + cfg->sideband.frame_size_bytes;
+  if (non_reg_size <= 0) {
+    const int tsize = DetectStackFrameSize(*cfg);
+    if (tsize > 0) {
+      int min_save_off = tsize;
+      for (const auto& pn : blocks[0]) {
+        const RtlExpr& pat = pn.pattern;
+        int breg = -1;
+        int64_t off = 0;
+        if (pat.IsSet() && pat.SetDest().IsMem() && pat.SetDest().children.size() == 1 &&
+            pat.SetSrc().IsReg() &&
+            ExtractBasePlusConstAddr(pat.SetDest().children[0], &breg, &off) && breg == 29 &&
+            off >= 0 && off < tsize) {
+          const int sr = pat.SetSrc().RegNo();
+          if (IsSavedGprOrRaRegno(sr) || (sr >= 52 && sr <= 63)) {
+            min_save_off = std::min(min_save_off, static_cast<int>(off));
+          }
+        }
+      }
+      non_reg_size = min_save_off;
+    }
+  }
+
+  std::vector<bool> is_local_byte(static_cast<size_t>(std::max(0, non_reg_size)), false);
+  auto mark_local = [&](int64_t off, int bytes) {
+    for (int k = 0; k < bytes; ++k) {
+      const int64_t idx = off + k;
+      if (idx >= 0 && idx < non_reg_size) {
+        is_local_byte[static_cast<size_t>(idx)] = true;
+      }
+    }
+  };
+
+  if (non_reg_size > min_reg_parm_bytes) {
+    // Identify which blocks can reach at least one `CALL` along CFG edges.
+    const size_t nb = blocks.size();
+    std::vector<std::vector<size_t>> preds(nb);
+    std::vector<bool> block_has_call(nb, false);
+    std::vector<bool> block_reaches_call(nb, false);
+    std::queue<size_t> q;
+    for (size_t b = 0; b < nb; ++b) {
+      for (size_t s : cfg->rpo_blocks[b].successors) {
+        if (s < nb) {
+          preds[s].push_back(b);
+        }
+      }
+      for (const auto& pn : blocks[b]) {
+        if (ExprContainsCall(pn.pattern)) {
+          block_has_call[b] = true;
+          break;
+        }
+      }
+      if (block_has_call[b]) {
+        block_reaches_call[b] = true;
+        q.push(b);
+      }
+    }
+    while (!q.empty()) {
+      const size_t cur = q.front();
+      q.pop();
+      for (size_t p : preds[cur]) {
+        if (!block_reaches_call[p]) {
+          block_reaches_call[p] = true;
+          q.push(p);
+        }
+      }
+    }
+
+    auto check_single_pat_locals = [&](const RtlExpr& pat, bool after_last_call_without_succ_call,
+                                       std::array<int, 32>* sp_ptr_off) {
+      int movstr_dst = -1;
+      int64_t movstr_dst_off = 0;
+      int movstr_src = -1;
+      int64_t movstr_src_off = 0;
+      int movstr_bytes = 0;
+      if (ExtractMovstrsiAddrsAndBytes(pat, &movstr_dst, &movstr_dst_off, &movstr_src,
+                                       &movstr_src_off, &movstr_bytes)) {
+        const bool src_is_fp = cfg->sideband.frame_pointer_needed && movstr_src == 30;
+        if ((movstr_src == 29 || src_is_fp) && movstr_src_off >= min_reg_parm_bytes &&
+            movstr_src_off < non_reg_size) {
+          mark_local(movstr_src_off, movstr_bytes);
+        } else if (movstr_src >= 1 && movstr_src < 32 &&
+                   (*sp_ptr_off)[movstr_src] >= min_reg_parm_bytes) {
+          const int64_t eff_src = (*sp_ptr_off)[movstr_src] + movstr_src_off;
+          if (eff_src >= min_reg_parm_bytes && eff_src < non_reg_size) {
+            mark_local(eff_src, non_reg_size - static_cast<int>(eff_src));
+          }
+        }
+        const bool dst_is_fp = cfg->sideband.frame_pointer_needed && movstr_dst == 30;
+        if ((movstr_dst == 29 || dst_is_fp) && (dst_is_fp || after_last_call_without_succ_call) &&
+            movstr_dst_off >= min_reg_parm_bytes && movstr_dst_off < non_reg_size) {
+          mark_local(movstr_dst_off, movstr_bytes);
+        } else if (movstr_dst >= 1 && movstr_dst < 32 &&
+                   (*sp_ptr_off)[movstr_dst] >= min_reg_parm_bytes &&
+                   after_last_call_without_succ_call) {
+          const int64_t eff_dst = (*sp_ptr_off)[movstr_dst] + movstr_dst_off;
+          if (eff_dst >= min_reg_parm_bytes && eff_dst < non_reg_size) {
+            mark_local(eff_dst, movstr_bytes);
+          }
+        }
+        for (size_t c = 1; c <= 4; ++c) {
+          if (pat.children[c].op == RtlOp::kClobber && !pat.children[c].children.empty() &&
+              pat.children[c].children[0].IsReg()) {
+            const int cr = pat.children[c].children[0].RegNo();
+            if (cr >= 1 && cr < 32) {
+              (*sp_ptr_off)[cr] = -1;
+            }
+          }
+        }
+        return;
+      }
+
+      // Check if `pat` sets `dreg = sp/fp + off`.
+      int dreg = -1;
+      int breg = -1;
+      int64_t off = 0;
+      if (pat.IsSet() && IsPlainSiGpr(pat.SetDest(), &dreg) &&
+          ExtractBasePlusConstAddr(pat.SetSrc(), &breg, &off) && off != 0) {
+        if (cfg->sideband.frame_pointer_needed && breg == 30 && off >= min_reg_parm_bytes &&
+            off < non_reg_size) {
+          mark_local(off, non_reg_size - static_cast<int>(off));
+          (*sp_ptr_off)[dreg] = -1;
+          return;
+        }
+        if (breg == 29 && dreg != 29 && !(cfg->sideband.frame_pointer_needed && dreg == 30) &&
+            off >= min_reg_parm_bytes && off < non_reg_size) {
+          (*sp_ptr_off)[dreg] = static_cast<int>(off);
+          return;
+        }
+      }
+
+      // Any other read of a register holding `$sp + off` (or passing it in `$4..$7` into a `CALL`)
+      // means its address escaped or was used as a local variable pointer!
+      MipsHardRegSet defs, uses;
+      CollectHardRegDefsAndUses(pat, gp64, fp64, &defs, &uses);
+      if (ExprContainsCall(pat)) {
+        for (int ar = 4; ar <= 7; ++ar) {
+          if ((*sp_ptr_off)[ar] >= min_reg_parm_bytes) {
+            mark_local((*sp_ptr_off)[ar], non_reg_size - (*sp_ptr_off)[ar]);
+          }
+        }
+        static constexpr int kCallClobberedGprs[] = {
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 24, 25, 31,
+        };
+        for (int cr : kCallClobberedGprs) {
+          (*sp_ptr_off)[cr] = -1;
+        }
+      }
+      for (int r = 1; r < 32; ++r) {
+        if (uses.Test(r) && (*sp_ptr_off)[r] >= min_reg_parm_bytes) {
+          mark_local((*sp_ptr_off)[r], non_reg_size - (*sp_ptr_off)[r]);
+        }
+      }
+
+      auto inspect_stmt_mems = [&](const RtlExpr& stmt) {
+        if (stmt.IsSet() && stmt.SetDest().IsMem() && stmt.SetDest().children.size() == 1) {
+          int mb = -1;
+          int64_t moff = 0;
+          const int sz = ModeAccessByteSize(stmt.SetDest().mode);
+          if (sz > 0 && ExtractBasePlusConstAddr(stmt.SetDest().children[0], &mb, &moff)) {
+            const bool is_fp = cfg->sideband.frame_pointer_needed && mb == 30;
+            if ((is_fp || stmt.SetDest().flags.volatil || after_last_call_without_succ_call) &&
+                (mb == 29 || is_fp) && moff >= min_reg_parm_bytes && moff < non_reg_size) {
+              mark_local(moff, sz);
+            }
+          }
+          stmt.SetSrc().Visit([&](const RtlExpr& n) {
+            if (n.IsMem() && n.children.size() == 1) {
+              int lb = -1;
+              int64_t loff = 0;
+              const int lsz = std::max(1, ModeAccessByteSize(n.mode));
+              if (ExtractBasePlusConstAddr(n.children[0], &lb, &loff) &&
+                  (lb == 29 || (cfg->sideband.frame_pointer_needed && lb == 30)) &&
+                  loff >= min_reg_parm_bytes && loff < non_reg_size) {
+                mark_local(loff, lsz);
+              }
+            }
+          });
+          return;
+        }
+        stmt.Visit([&](const RtlExpr& n) {
+          if (n.IsMem() && n.children.size() == 1) {
+            int lb = -1;
+            int64_t loff = 0;
+            const int lsz = std::max(1, ModeAccessByteSize(n.mode));
+            if (ExtractBasePlusConstAddr(n.children[0], &lb, &loff) &&
+                (lb == 29 || (cfg->sideband.frame_pointer_needed && lb == 30)) &&
+                loff >= min_reg_parm_bytes && loff < non_reg_size) {
+              mark_local(loff, lsz);
+            }
+          }
+        });
+      };
+      if (pat.IsParallel()) {
+        for (const RtlExpr& el : pat.children) {
+          inspect_stmt_mems(el);
+        }
+      } else {
+        inspect_stmt_mems(pat);
+      }
+
+      for (int r = 1; r < 32; ++r) {
+        if (defs.Test(r)) {
+          (*sp_ptr_off)[r] = -1;
+        }
+      }
+    };
+
+    for (size_t b = 0; b < nb; ++b) {
+      bool succ_reaches_call = false;
+      for (size_t s : cfg->rpo_blocks[b].successors) {
+        if (s < nb && block_reaches_call[s]) {
+          succ_reaches_call = true;
+          break;
+        }
+      }
+      size_t last_call_idx = blocks[b].size();
+      for (size_t i = 0; i < blocks[b].size(); ++i) {
+        if (ExprContainsCall(blocks[b][i].pattern)) {
+          last_call_idx = i;
+        }
+      }
+      std::array<int, 32> sp_ptr_off;
+      sp_ptr_off.fill(-1);
+      for (size_t i = 0; i < blocks[b].size(); ++i) {
+        const bool cannot_reach_call =
+            !block_reaches_call[b] ||
+            (!succ_reaches_call && (last_call_idx == blocks[b].size() || i > last_call_idx));
+        const RtlExpr& pat = blocks[b][i].pattern;
+        if (pat.op == RtlOp::kSequence && pat.children.size() >= 2 &&
+            !pat.children[0].children.empty() && !pat.children[1].children.empty()) {
+          const bool is_call_seq = pat.children[0].op == RtlOp::kCallInsn ||
+                                   ExprContainsCall(pat.children[0].children[0]);
+          if (is_call_seq) {
+            check_single_pat_locals(pat.children[1].children[0], false, &sp_ptr_off);
+            check_single_pat_locals(pat.children[0].children[0], false, &sp_ptr_off);
+          } else {
+            check_single_pat_locals(pat.children[0].children[0], cannot_reach_call, &sp_ptr_off);
+            check_single_pat_locals(pat.children[1].children[0], cannot_reach_call, &sp_ptr_off);
+          }
+        } else {
+          check_single_pat_locals(pat, cannot_reach_call, &sp_ptr_off);
+        }
+      }
+      // If any `$sp + off` pointer is still live in a callee-saved or live-out register at block
+      // end without being consumed solely by `movstrsi` in this block, conservatively mark it
+      // local unless no successor reads it—checking `basic_block_live_at_start` of successors!
+      for (int r = 1; r < 32; ++r) {
+        if (sp_ptr_off[r] >= min_reg_parm_bytes) {
+          bool live_in_succ = false;
+          for (size_t s : cfg->rpo_blocks[b].successors) {
+            auto it = cfg->sideband.basic_block_live_at_start.find(static_cast<int>(s));
+            if (it != cfg->sideband.basic_block_live_at_start.end() &&
+                std::find(it->second.begin(), it->second.end(), r) != it->second.end()) {
+              live_in_succ = true;
+              break;
+            }
+          }
+          if (live_in_succ) {
+            mark_local(sp_ptr_off[r], non_reg_size - sp_ptr_off[r]);
+          }
+        }
+      }
+    }
+  }
+
+  auto record_arg_store_end = [&](const RtlExpr& pat, std::array<int, 32>* sp_ptr_off,
+                                  int* cur_end) {
+    if (non_reg_size <= min_reg_parm_bytes) {
+      return;
+    }
+    int movstr_dst = -1;
+    int64_t movstr_dst_off = 0;
+    int movstr_src = -1;
+    int64_t movstr_src_off = 0;
+    int movstr_bytes = 0;
+    if (ExtractMovstrsiAddrsAndBytes(pat, &movstr_dst, &movstr_dst_off, &movstr_src,
+                                     &movstr_src_off, &movstr_bytes)) {
+      int64_t start = -1;
+      if (movstr_dst == 29) {
+        start = movstr_dst_off;
+      } else if (movstr_dst >= 1 && movstr_dst < 32 &&
+                 (*sp_ptr_off)[movstr_dst] >= min_reg_parm_bytes) {
+        start = (*sp_ptr_off)[movstr_dst] + movstr_dst_off;
+      }
+      if (start >= min_reg_parm_bytes && start + movstr_bytes <= non_reg_size) {
+        bool overlaps_local = false;
+        for (int k = 0; k < movstr_bytes; ++k) {
+          if (is_local_byte[static_cast<size_t>(start + k)]) {
+            overlaps_local = true;
+            break;
+          }
+        }
+        if (!overlaps_local) {
+          *cur_end = std::max(*cur_end, static_cast<int>(start) + movstr_bytes);
+        }
+      }
+      for (size_t c = 1; c <= 4; ++c) {
+        if (pat.children[c].op == RtlOp::kClobber && !pat.children[c].children.empty() &&
+            pat.children[c].children[0].IsReg()) {
+          const int cr = pat.children[c].children[0].RegNo();
+          if (cr >= 1 && cr < 32) {
+            (*sp_ptr_off)[cr] = -1;
+          }
+        }
+      }
+      return;
+    }
+
+    int dreg = -1;
+    int breg = -1;
+    int64_t off = 0;
+    if (pat.IsSet() && IsPlainSiGpr(pat.SetDest(), &dreg) &&
+        ExtractBasePlusConstAddr(pat.SetSrc(), &breg, &off) && breg == 29 && dreg != 29 &&
+        !(cfg->sideband.frame_pointer_needed && dreg == 30) && off >= min_reg_parm_bytes &&
+        off < non_reg_size) {
+      (*sp_ptr_off)[dreg] = static_cast<int>(off);
+      return;
+    }
+
+    auto check_store = [&](const RtlExpr& stmt) {
+      if (!stmt.IsSet() || !stmt.SetDest().IsMem() || stmt.SetDest().flags.volatil ||
+          stmt.SetDest().children.size() != 1) {
+        return;
+      }
+      int mb = -1;
+      int64_t moff = 0;
+      const int sz = ModeAccessByteSize(stmt.SetDest().mode);
+      if (sz > 0 && ExtractBasePlusConstAddr(stmt.SetDest().children[0], &mb, &moff) && mb == 29 &&
+          moff >= min_reg_parm_bytes && moff + sz <= non_reg_size) {
+        bool overlaps_local = false;
+        for (int k = 0; k < sz; ++k) {
+          if (is_local_byte[static_cast<size_t>(moff + k)]) {
+            overlaps_local = true;
+            break;
+          }
+        }
+        if (!overlaps_local) {
+          *cur_end = std::max(*cur_end, static_cast<int>(moff) + sz);
+        }
+      }
+    };
+    if (pat.IsParallel()) {
+      for (const RtlExpr& el : pat.children) {
+        check_store(el);
+      }
+    } else {
+      check_store(pat);
+    }
+
+    MipsHardRegSet defs, uses;
+    CollectHardRegDefsAndUses(pat, gp64, fp64, &defs, &uses);
+    for (int r = 1; r < 32; ++r) {
+      if (defs.Test(r)) {
+        (*sp_ptr_off)[r] = -1;
+      }
+    }
+  };
+
+  auto find_mutable_call = [](RtlExpr* pat, bool* out_is_void_call) -> RtlExpr* {
+    *out_is_void_call = false;
+    auto check_core = [&](RtlExpr* core) -> RtlExpr* {
+      if (core->op == RtlOp::kCall) {
+        *out_is_void_call = true;
+        return core;
+      }
+      if (core->IsSet() && core->MutableSetSrc().op == RtlOp::kCall) {
+        *out_is_void_call = false;
+        return &core->MutableSetSrc();
+      }
+      if (core->IsParallel() && !core->children.empty()) {
+        if (core->children[0].op == RtlOp::kCall) {
+          *out_is_void_call = true;
+          return &core->children[0];
+        }
+        if (core->children[0].IsSet() && core->children[0].MutableSetSrc().op == RtlOp::kCall) {
+          *out_is_void_call = false;
+          return &core->children[0].MutableSetSrc();
+        }
+      }
+      return nullptr;
+    };
+    return check_core(pat);
+  };
+
+  // Fixed-point forward propagation of `in_arg_end[b]` across basic blocks.
+  const size_t nb = blocks.size();
+  std::vector<int> in_arg_end(nb, 0);
+  auto simulate_block = [&](size_t b, int start_end, bool apply_rewrite, int* max_call_bytes_seen,
+                            bool* block_mutated) -> int {
+    int cur_end = start_end;
+    std::array<int, 32> sp_ptr_off;
+    sp_ptr_off.fill(-1);
+    for (size_t i = 0; i < blocks[b].size(); ++i) {
+      RtlExpr& pat = blocks[b][i].pattern;
+      if (pat.op == RtlOp::kSequence && pat.children.size() >= 2 &&
+          !pat.children[0].children.empty() && !pat.children[1].children.empty()) {
+        const bool is_call_seq =
+            pat.children[0].op == RtlOp::kCallInsn || ExprContainsCall(pat.children[0].children[0]);
+        if (is_call_seq) {
+          record_arg_store_end(pat.children[1].children[0], &sp_ptr_off, &cur_end);
+          bool is_void = false;
+          RtlExpr* call_node = find_mutable_call(&pat.children[0].children[0], &is_void);
+          if (call_node != nullptr && call_node->children.size() >= 2 &&
+              call_node->children[1].IsConstInt()) {
+            std::string_view callee_sym;
+            if (call_node->children[0].IsMem() && !call_node->children[0].children.empty() &&
+                call_node->children[0].children[0].op == RtlOp::kSymbolRef) {
+              callee_sym = call_node->children[0].children[0].str_val;
+            }
+            const bool is_libcall =
+                !callee_sym.empty() && IsGccSynthesizedLibcallSymbol(callee_sym, is_void);
+            int call_bytes = std::max(min_reg_parm_bytes, (cur_end + 7) & ~7);
+            if (non_reg_size >= min_reg_parm_bytes) {
+              call_bytes = std::min(call_bytes, non_reg_size);
+            }
+            if (max_call_bytes_seen != nullptr) {
+              *max_call_bytes_seen = std::max(*max_call_bytes_seen, call_bytes);
+            }
+            if (apply_rewrite && !is_libcall && call_node->children[1].int_val == 0) {
+              call_node->children[1].int_val = call_bytes;
+              if (block_mutated != nullptr) {
+                *block_mutated = true;
+              }
+            }
+          }
+          cur_end = 0;
+          sp_ptr_off.fill(-1);
+          continue;
+        }
+        record_arg_store_end(pat.children[0].children[0], &sp_ptr_off, &cur_end);
+        record_arg_store_end(pat.children[1].children[0], &sp_ptr_off, &cur_end);
+        continue;
+      }
+      if (ExprContainsCall(pat)) {
+        bool is_void = false;
+        RtlExpr* call_node = find_mutable_call(&pat, &is_void);
+        if (call_node != nullptr && call_node->children.size() >= 2 &&
+            call_node->children[1].IsConstInt()) {
+          std::string_view callee_sym;
+          if (call_node->children[0].IsMem() && !call_node->children[0].children.empty() &&
+              call_node->children[0].children[0].op == RtlOp::kSymbolRef) {
+            callee_sym = call_node->children[0].children[0].str_val;
+          }
+          const bool is_libcall =
+              !callee_sym.empty() && IsGccSynthesizedLibcallSymbol(callee_sym, is_void);
+          int call_bytes = std::max(min_reg_parm_bytes, (cur_end + 7) & ~7);
+          if (non_reg_size >= min_reg_parm_bytes) {
+            call_bytes = std::min(call_bytes, non_reg_size);
+          }
+          if (max_call_bytes_seen != nullptr) {
+            *max_call_bytes_seen = std::max(*max_call_bytes_seen, call_bytes);
+          }
+          if (apply_rewrite && !is_libcall && call_node->children[1].int_val == 0) {
+            call_node->children[1].int_val = call_bytes;
+            if (block_mutated != nullptr) {
+              *block_mutated = true;
+            }
+          }
+        }
+        cur_end = 0;
+        sp_ptr_off.fill(-1);
+        continue;
+      }
+      record_arg_store_end(pat, &sp_ptr_off, &cur_end);
+    }
+    return cur_end;
+  };
+
+  bool prop_changed = true;
+  while (prop_changed) {
+    prop_changed = false;
+    for (size_t b = 0; b < nb; ++b) {
+      const int out_end =
+          simulate_block(b, in_arg_end[b], /*apply_rewrite=*/false, nullptr, nullptr);
+      for (size_t s : cfg->rpo_blocks[b].successors) {
+        if (s < nb && out_end > in_arg_end[s]) {
+          in_arg_end[s] = out_end;
+          prop_changed = true;
+        }
+      }
+    }
+  }
+
+  int max_call_bytes_seen = 0;
+  for (size_t b = 0; b < nb; ++b) {
+    bool block_mutated = false;
+    simulate_block(b, in_arg_end[b], /*apply_rewrite=*/true, &max_call_bytes_seen, &block_mutated);
+    if (block_mutated) {
+      for (size_t i = 0; i < blocks[b].size(); ++i) {
+        cfg->rpo_blocks[b].instructions[i] = blocks[b][i].ToGccPrintRtlString();
+      }
+      cfg->rpo_blocks[b].SyncRtlInsnsFromInstructions();
+    }
+  }
+
+  if (non_reg_size >= min_reg_parm_bytes &&
+      max_call_bytes_seen > cfg->sideband.outgoing_args_size &&
+      cfg->sideband.outgoing_args_size + cfg->sideband.frame_size_bytes == non_reg_size) {
+    cfg->sideband.outgoing_args_size = std::min(non_reg_size, max_call_bytes_seen);
+    cfg->sideband.frame_size_bytes = non_reg_size - cfg->sideband.outgoing_args_size;
+  }
+}
+
 }  // namespace
 
 RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
@@ -3543,6 +4319,23 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
   RtlControlFlowGraph cfg;
   cfg.pass = RtlPassKind::kDbr;
   cfg.sideband = sideband;
+
+  bool gp64 = false;
+  bool fp64 = false;
+  if (profile != nullptr) {
+    DetectMipsRegisterWidthFlags(cfg, profile, &gp64, &fp64);
+  } else {
+    for (const std::string& ln : asm_lines) {
+      if (absl::StartsWith(ln, "dadd") || absl::StartsWith(ln, "dsll") ||
+          absl::StartsWith(ln, "dsrl") || absl::StartsWith(ln, "dsra") ||
+          absl::StartsWith(ln, "dmtc1") || absl::StartsWith(ln, "dmfc1") ||
+          absl::StartsWith(ln, "ld\t") || absl::StartsWith(ln, "ld ") ||
+          absl::StartsWith(ln, "sd\t") || absl::StartsWith(ln, "sd ")) {
+        fp64 = true;
+        break;
+      }
+    }
+  }
 
   std::vector<RtlBasicBlock> blocks;
   absl::flat_hash_map<std::string, size_t> label_to_block;
@@ -3631,6 +4424,17 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
                 absl::StartsWith(line, "trunc.w.d\t") || absl::StartsWith(line, "trunc.w.d "))) {
       if (std::string trunc_w = InvertTwoLineTruncW(line, asm_lines[i + 1]); !trunc_w.empty()) {
         precomputed_pat = std::move(trunc_w);
+        ++i;
+      }
+    } else if (!fp64 && i + 1 < asm_lines.size() &&
+               (absl::StartsWith(line, "mtc1\t") || absl::StartsWith(line, "mtc1 ") ||
+                absl::StartsWith(line, "mfc1\t") || absl::StartsWith(line, "mfc1 ")) &&
+               (absl::StartsWith(asm_lines[i + 1], "mtc1\t") ||
+                absl::StartsWith(asm_lines[i + 1], "mtc1 ") ||
+                absl::StartsWith(asm_lines[i + 1], "mfc1\t") ||
+                absl::StartsWith(asm_lines[i + 1], "mfc1 "))) {
+      if (std::string df_xfer = InvertTwoLineDfTransfer(line, asm_lines[i + 1]); !df_xfer.empty()) {
+        precomputed_pat = std::move(df_xfer);
         ++i;
       }
     } else if (i + 1 < asm_lines.size() &&
@@ -3977,6 +4781,11 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
       MarkSelfLoopSpinWaitLoadsVolatile(&cfg);
     }
     ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, *profile);
+    if (profile->optimize_level > 0 && FoldFinalScanMultiInsnTemplates(&cfg, *profile)) {
+      StripRegDeadAndUnusedNotesOnCfg(&cfg);
+      ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, *profile);
+    }
+    UpgradeCallOutgoingArgBytes(&cfg, *profile);
   }
   CanonicalizeCfgLabels(&cfg);
   return cfg;

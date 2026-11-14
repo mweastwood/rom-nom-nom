@@ -50,19 +50,26 @@ class ToySubfunctionInverses : public SubfunctionInverseProvider {
   RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& x) const override;
   RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& x) const override;
   RtlControlFlowGraph InvertFillSimpleDelaySlots(const RtlControlFlowGraph& x) const override;
+  using SubfunctionInverseProvider::InvertFillSimpleDelaySlots;
   RtlControlFlowGraph InvertDbrSchedule(const RtlControlFlowGraph& x) const override;
+  using SubfunctionInverseProvider::InvertDbrSchedule;
 
   // ---------------------------------------------------------------------------
   // Stage 2: Post-Reload Cross-Jumping (`jump.c`)
   // ---------------------------------------------------------------------------
 
   RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& x) const override;
+  using SubfunctionInverseProvider::InvertDoCrossJump;
 
   // ---------------------------------------------------------------------------
   // Stage 3 & Stage 6: Instruction Scheduling (`sched.c`)
   // ---------------------------------------------------------------------------
 
   RtlControlFlowGraph InvertScheduleBlock(const RtlControlFlowGraph& x) const override;
+  using SubfunctionInverseProvider::InvertScheduleBlock;
+  RtlControlFlowGraph InvertSched2PostReload(const RtlControlFlowGraph& scheduled_cfg_x,
+                                             const CompilationProfile& profile,
+                                             bool sched2_enabled) const override;
 
   // ---------------------------------------------------------------------------
   // Stage 4 & Stage 5: Register Allocation & Reload (`reload1.c`, `local-alloc.c`, `global.c`)

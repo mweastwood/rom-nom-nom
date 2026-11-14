@@ -32,6 +32,11 @@ class ProductionFillSimpleDelaySlotsProvider final : public SubfunctionInversePr
       const RtlControlFlowGraph& dbr_simple_cfg_x) const override {
     return ::rom_nom_nom::lifter::InvertFillSimpleDelaySlots(dbr_simple_cfg_x);
   }
+
+  RtlControlFlowGraph InvertFillSimpleDelaySlots(const RtlControlFlowGraph& dbr_simple_cfg_x,
+                                                 const CompilationProfile& profile) const override {
+    return ::rom_nom_nom::lifter::InvertFillSimpleDelaySlots(dbr_simple_cfg_x, profile);
+  }
 };
 
 class FillSimpleDelaySlotsCorpusTest : public ::testing::TestWithParam<RoundTripTestCase> {
@@ -220,7 +225,7 @@ TEST(InvertFillSimpleDelaySlotsUnitTest, PreservesSlotRegDeadNotesAndVerifiesRig
   ASSERT_EQ(lifted.rpo_blocks.size(), 3u);
   ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 2u);
   EXPECT_EQ(lifted.rpo_blocks[0].instructions[0],
-            "(set (reg:SI 2 v0) (reg:SI 5 a1)) (expr_list:REG_DEAD (const_int 0) (nil))");
+            "(set (reg:SI 2 v0) (reg:SI 5 a1)) (expr_list:REG_DEAD (reg:SI 5 a1) (nil))");
 
   GccContext ctx;
   FunctionHooks hooks(&ctx);
@@ -426,6 +431,52 @@ TEST(InvertFillSimpleDelaySlotsUnitTest, VerifierRejectsCorruptedInverse) {
   RightInverseVerifier verifier(&ctx, &hooks, &broken_provider);
   const RightInverseResult res = verifier.VerifyFillSimpleDelaySlotsRightInverse(cfg);
   EXPECT_FALSE(res.matches);
+}
+
+TEST(InvertFillSimpleDelaySlotsUnitTest,
+     PreservesVariadicCallerHomeStoresAndFoldsWitnessedHiLoDiMove) {
+  // 1. Pre-`$sp`-decrement variadic caller-home `sw $4, 0($sp); sw $5, 4($sp)` stores must remain
+  // distinct `SImode` stores (`mips_expand_prologue` `store_args_on_stack`) even when `DImode` is
+  // witnessed in the function, whereas a non-div/mod `mflo`/`mfhi` (`64..65 -> 2..3`) move pair is
+  // folded into `(set (reg:DI 2 v0) (reg:DI 64 hi))`.
+  RtlControlFlowGraph cfg;
+  cfg.pass = RtlPassKind::kDbr;
+  cfg.sideband.basic_block_live_at_start[0] = {4, 5, 29, 31};
+  cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (mem:SI (reg:SI 29 sp)) (reg:SI 4 a0))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 4))) (reg:SI 5 a1))",
+                    "(set (reg:SI 29 sp) (minus:SI (reg:SI 29 sp) (const_int 16)))",
+                    "(set (reg:SI 64 hi) (reg:SI 4 a0)) "
+                    "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                    "(set (reg:SI 65 lo) (reg:SI 5 a1)) "
+                    "(expr_list:REG_DEAD (reg:SI 5 a1) (nil))",
+                    "(set (reg/i:SI 2 v0) (reg:SI 64 hi))",
+                    "(set (reg/i:SI 3 v1) (reg:SI 65 lo))",
+                    "(use (reg/i:DI 2 v0))",
+                    "(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int 16)))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+
+  const RtlControlFlowGraph out = InvertFillSimpleDelaySlots(cfg);
+  ASSERT_EQ(out.rpo_blocks.size(), 1u);
+  ASSERT_GE(out.rpo_blocks[0].instructions.size(), 8u);
+  EXPECT_EQ(out.rpo_blocks[0].instructions[0], "(set (mem:SI (reg:SI 29 sp)) (reg:SI 4 a0))");
+  EXPECT_EQ(out.rpo_blocks[0].instructions[1],
+            "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 4))) (reg:SI 5 a1))");
+
+  bool saw_folded_hilo_to_v0 = false;
+  for (const std::string& pat_str : out.rpo_blocks[0].instructions) {
+    auto parsed = ParsePatternAndNotes(pat_str);
+    ASSERT_TRUE(parsed.ok());
+    if (parsed->pattern.ToGccPrintRtlString() == "(set (reg/i:DI 2 v0) (reg:DI 64 hi))") {
+      saw_folded_hilo_to_v0 = true;
+    }
+  }
+  EXPECT_TRUE(saw_folded_hilo_to_v0);
 }
 
 }  // namespace

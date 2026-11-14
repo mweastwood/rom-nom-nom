@@ -22,6 +22,8 @@ namespace rom_nom_nom::lifter {
 // Returns an empty `RtlControlFlowGraph` if `dbr_return_cfg_x` has no basic
 // blocks or contains malformed RTL instruction patterns (including bare
 // `(return)` outside `parallel`) or out-of-range successor edges.
+RtlControlFlowGraph InvertMakeReturnInsns(const RtlControlFlowGraph& dbr_return_cfg_x,
+                                          const CompilationProfile& profile);
 RtlControlFlowGraph InvertMakeReturnInsns(const RtlControlFlowGraph& dbr_return_cfg_x);
 
 }  // namespace rom_nom_nom::lifter

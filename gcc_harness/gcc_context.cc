@@ -179,6 +179,7 @@ extern int regset_size;
 extern int regset_bytes;
 extern int frame_offset;
 extern int current_function_outgoing_args_size;
+extern int current_function_calls_alloca;
 extern int virtuals_instantiated;
 extern int immediate_size_expand;
 extern rtx_def* return_label;
@@ -3481,6 +3482,77 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
   frame_pointer_needed = cfg.sideband.frame_pointer_needed ? 1 : 0;
   frame_offset = cfg.sideband.frame_size_bytes;
   current_function_outgoing_args_size = cfg.sideband.outgoing_args_size;
+  {
+    int calls_alloca = (cfg.sideband.frame_pointer_needed && flag_omit_frame_pointer != 0) ? 1 : 0;
+    if (calls_alloca == 0) {
+      int neg_const_sp_adjusts = 0;
+      auto check_pat_for_alloca = [&](auto& self, Rtx pat) -> void {
+        if (pat == nullptr || calls_alloca != 0) {
+          return;
+        }
+        if (pat->code == kReg && pat->fld[0].rtint == kMipsFirstVirtualRegister + 2) {
+          calls_alloca = 1;
+          return;
+        }
+        if (pat->code == kSequence && pat->fld[0].rtvec != nullptr) {
+          Rtvec vec = pat->fld[0].rtvec;
+          for (int i = 0; i < vec->num_elem; ++i) {
+            Rtx inner = vec->elem[i].rtx;
+            if (inner != nullptr &&
+                (inner->code == kInsn || inner->code == kJumpInsn || inner->code == kCallInsn)) {
+              self(self, inner->fld[3].rtx);
+            }
+          }
+          return;
+        }
+        if (pat->code == kParallel && pat->fld[0].rtvec != nullptr) {
+          Rtvec vec = pat->fld[0].rtvec;
+          for (int i = 0; i < vec->num_elem; ++i) {
+            self(self, vec->elem[i].rtx);
+          }
+          return;
+        }
+        if (pat->code == kSet && pat->fld[0].rtx != nullptr && pat->fld[1].rtx != nullptr) {
+          Rtx dst = pat->fld[0].rtx;
+          Rtx src = pat->fld[1].rtx;
+          const std::string_view src_name =
+              (rtx_name[src->code] != nullptr) ? std::string_view(rtx_name[src->code]) : "";
+          if (dst->code == kReg && dst->fld[0].rtint == 29 &&
+              (src_name == "plus" || src_name == "minus") && src->fld[0].rtx != nullptr &&
+              src->fld[0].rtx->code == kReg && src->fld[0].rtx->fld[0].rtint == 29 &&
+              src->fld[1].rtx != nullptr) {
+            Rtx op1 = src->fld[1].rtx;
+            if (op1->code != kConstInt && !(op1->code == kReg && op1->fld[0].rtint == 12)) {
+              calls_alloca = 1;
+              return;
+            }
+            if (cfg.sideband.frame_pointer_needed && op1->code == kConstInt &&
+                ((src_name == "plus" && op1->fld[0].rtint < 0) ||
+                 (src_name == "minus" && op1->fld[0].rtint > 0))) {
+              ++neg_const_sp_adjusts;
+              if (neg_const_sp_adjusts > 1 || cfg.pass == RtlPassKind::kGreg) {
+                calls_alloca = 1;
+                return;
+              }
+            }
+          }
+        }
+        const char* fmt = rtx_format[pat->code];
+        const int len = rtx_length[pat->code];
+        for (int i = 0; i < len && fmt[i] != '\0'; ++i) {
+          if (fmt[i] == 'e') {
+            self(self, pat->fld[i].rtx);
+          }
+        }
+      };
+      for (Rtx insn = first; insn != nullptr && calls_alloca == 0; insn = insn->fld[2].rtx) {
+        if (insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) {
+          check_pat_for_alloca(check_pat_for_alloca, insn->fld[3].rtx);
+        }
+      }
+    }
+    current_function_calls_alloca = calls_alloca;
+  }
   compute_frame_size(cfg.sideband.frame_size_bytes);
   if (cfg.sideband.epilogue_delay_pattern.has_value() &&
       !cfg.sideband.epilogue_delay_pattern->empty()) {
@@ -3887,8 +3959,7 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
   }
   if (basic_block_live_at_start != nullptr && n_basic_blocks > 0 && regset_size > 0) {
     absl::flat_hash_map<int, int> uid_to_rpo;
-    if (basic_block_head != nullptr &&
-        cfg.rpo_blocks.size() != static_cast<size_t>(n_basic_blocks)) {
+    if (basic_block_head != nullptr) {
       size_t idx = 0;
       int cur_rpo = 0;
       while (idx < items.size()) {
@@ -3946,6 +4017,8 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
           dst_b = it->second;
         } else if (b == 0) {
           dst_b = 0;
+        } else {
+          continue;
         }
       }
       if (dst_b >= 0 && static_cast<size_t>(dst_b) < assigned_rpo.size()) {

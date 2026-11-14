@@ -1032,6 +1032,56 @@ RtlControlFlowGraph ToySubfunctionInverses::InvertScheduleBlock(
   return out;
 }
 
+RtlControlFlowGraph ToySubfunctionInverses::InvertSched2PostReload(
+    const RtlControlFlowGraph& scheduled_cfg_x, const CompilationProfile& profile,
+    bool sched2_enabled) const {
+  RtlControlFlowGraph out =
+      sched2_enabled ? InvertScheduleBlock(scheduled_cfg_x, profile) : scheduled_cfg_x;
+  if (!out.rpo_blocks.empty() && !out.rpo_blocks[0].instructions.empty() &&
+      absl::StartsWith(out.rpo_blocks[0].instructions[0], "(set (reg:") &&
+      absl::StrContains(out.rpo_blocks[0].instructions[0], " 29 sp) (minus:")) {
+    auto& b0 = out.rpo_blocks[0].instructions;
+    size_t drop_head = 1;
+    while (drop_head < b0.size() && (absl::StartsWith(b0[drop_head], "(set (mem:") &&
+                                     absl::StrContains(b0[drop_head], "(reg:") &&
+                                     absl::StrContains(b0[drop_head], " 29 sp)"))) {
+      ++drop_head;
+    }
+    if (drop_head < b0.size() && absl::StartsWith(b0[drop_head], "(set (reg:") &&
+        absl::StrContains(b0[drop_head], " 30 ") && absl::StrContains(b0[drop_head], " 29 sp)")) {
+      ++drop_head;
+    }
+    b0.erase(b0.begin(), b0.begin() + static_cast<ptrdiff_t>(drop_head));
+    out.rpo_blocks[0].SyncRtlInsnsFromInstructions();
+
+    for (auto& blk : out.rpo_blocks) {
+      if (!blk.successors.empty() || blk.instructions.empty()) {
+        continue;
+      }
+      auto& insns = blk.instructions;
+      if (absl::StartsWith(insns.back(), "(parallel[ (return)")) {
+        insns.pop_back();
+      }
+      if (!insns.empty() && absl::StartsWith(insns.back(), "(set (reg:") &&
+          absl::StrContains(insns.back(), " 29 sp) (plus:")) {
+        insns.pop_back();
+      }
+      while (!insns.empty() && absl::StartsWith(insns.back(), "(set (reg:") &&
+             absl::StrContains(insns.back(), "(mem:") &&
+             absl::StrContains(insns.back(), " 29 sp)")) {
+        insns.pop_back();
+      }
+      if (!insns.empty() && absl::StartsWith(insns.back(), "(set (reg:") &&
+          absl::StrContains(insns.back(), " 29 sp) (reg:") &&
+          absl::StrContains(insns.back(), " 30 ")) {
+        insns.pop_back();
+      }
+      blk.SyncRtlInsnsFromInstructions();
+    }
+  }
+  return out;
+}
+
 // -----------------------------------------------------------------------------
 // Stage 4 & Stage 5: Register Allocation & Reload (`reload1.c`, `local-alloc.c`)
 // -----------------------------------------------------------------------------

@@ -29,11 +29,24 @@ class ProductionDoCrossJumpProvider final : public SubfunctionInverseProvider {
   RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& jump2_cfg_x) const override {
     return lifter::InvertDoCrossJump(jump2_cfg_x);
   }
+  RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& jump2_cfg_x,
+                                        const CompilationProfile& profile) const override {
+    return lifter::InvertDoCrossJump(jump2_cfg_x, profile);
+  }
 };
 
 class BrokenDoCrossJumpProvider final : public SubfunctionInverseProvider {
  public:
   RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& jump2_cfg_x) const override {
+    return Corrupt(jump2_cfg_x);
+  }
+  RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& jump2_cfg_x,
+                                        const CompilationProfile& /*profile*/) const override {
+    return Corrupt(jump2_cfg_x);
+  }
+
+ private:
+  static RtlControlFlowGraph Corrupt(const RtlControlFlowGraph& jump2_cfg_x) {
     RtlControlFlowGraph out = jump2_cfg_x;
     out.pass = RtlPassKind::kSched2;
     if (!out.rpo_blocks.empty()) {
@@ -451,6 +464,113 @@ TEST_F(InvertDoCrossJumpTest, VerifierRejectsCorruptedInverse) {
   RightInverseVerifier broken_verifier(&ctx_, &hooks_, &broken_provider);
   const RightInverseResult res = broken_verifier.VerifyDoCrossJumpRightInverse(cfg);
   EXPECT_FALSE(res.matches);
+}
+
+TEST_F(InvertDoCrossJumpTest, RestoresDeletedNoopCallArgMoveOnlyForUsedArgWithoutExistingRegDead) {
+  // Entry block saves `$16` (`$4`) and `$17` (`$5`) before saving `$31` (`ra`), then calls a
+  // 1-argument `callee($4)` (`call_fusage` has `(use (reg:SI 4 a0))` only; `(set $16 $4)` had its
+  // `REG_DEAD(4)` stripped by `jump.c:remove_death`, while `(set $17 $5)` retains `REG_DEAD(5)`).
+  RtlControlFlowGraph cfg;
+  cfg.pass = RtlPassKind::kJump2;
+  cfg.sideband.outgoing_args_size = 16;
+  cfg.sideband.basic_block_live_at_start[0] = {4, 5, 29, 31};
+  cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 29 sp) (minus:SI (reg:SI 29 sp) (const_int 32)))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 16))) (reg:SI 16 s0))",
+                    "(set (reg:SI 16 s0) (reg:SI 4 a0))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))) (reg:SI 17 s1))",
+                    "(set (reg:SI 17 s1) (reg:SI 5 a1)) (expr_list:REG_DEAD (reg:SI 5 a1) (nil))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 24))) (reg:SI 31 ra))",
+                    "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"one_arg_fn\"))) "
+                    "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 16 s0))) "
+                    "(expr_list:REG_DEAD (reg:SI 16 s0) (nil))",
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 17 s1))) "
+                    "(expr_list:REG_DEAD (reg:SI 17 s1) (nil))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(set (reg:SI 31 ra) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 24))))",
+                    "(set (reg:SI 17 s1) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))))",
+                    "(set (reg:SI 16 s0) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 16))))",
+                    "(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int 32)))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  cfg.rpo_blocks[0].rtl_insns[6].has_explicit_call_fusage = true;
+  cfg.rpo_blocks[0].rtl_insns[6].call_fusage = {
+      RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kSi, 4)),
+  };
+
+  const RtlControlFlowGraph pre = InvertDoCrossJump(cfg);
+  ASSERT_EQ(pre.rpo_blocks.size(), 1u);
+  ASSERT_EQ(pre.rpo_blocks[0].instructions.size(), 16u);
+  EXPECT_EQ(pre.rpo_blocks[0].instructions[2],
+            "(set (reg:SI 16 s0) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+  EXPECT_EQ(pre.rpo_blocks[0].instructions[4],
+            "(set (reg:SI 17 s1) (reg:SI 5 a1)) (expr_list:REG_DEAD (reg:SI 5 a1) (nil))");
+  EXPECT_EQ(pre.rpo_blocks[0].instructions[6], "(set (reg:SI 4 a0) (reg:SI 16 s0))");
+  ASSERT_EQ(pre.rpo_blocks[0].rtl_insns[7].call_fusage.size(), 1u);
+
+  const RightInverseResult res = verifier_.VerifyDoCrossJumpRightInverse(cfg);
+  EXPECT_TRUE(res.matches) << res.diff_detail;
+}
+
+TEST_F(InvertDoCrossJumpTest, RestoresDeletedNoopMdOutputReloadAndPassesRightInverse) {
+  // 1. Exact `.11.jump2` image (`REG_DEAD (reg:DI 64)` on `ashift:DI`, none on `mfhi/mflo`):
+  //    must satisfy `VerifyDoCrossJumpRightInverse` directly.
+  RtlControlFlowGraph cfg_jump2;
+  cfg_jump2.pass = RtlPassKind::kJump2;
+  cfg_jump2.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 65 lo) (reg:SI 4 a0))",
+                    "(set (reg:SI 4 a0) (ashiftrt:SI (reg:SI 4 a0) (const_int 31)))",
+                    "(set (reg:SI 64 hi) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                    "(set (reg:SI 6 a2) (ashift:SI (reg:SI 6 a2) (const_int 16)))",
+                    "(set (reg:DI 10 t2) (reg:DI 64 hi))",
+                    "(set (reg:SI 5 a1) (ashiftrt:SI (reg:SI 6 a2) (const_int 16)))",
+                    "(set (reg:SI 4 a0) (ashiftrt:SI (reg:SI 6 a2) (const_int 31))) "
+                    "(expr_list:REG_DEAD (reg:SI 6 a2) (nil))",
+                    "(parallel[ (set (reg:DI 2 v0) (ashift:DI (reg:DI 10 t2) (const_int 4))) "
+                    "(clobber (reg:SI 6 a2)) ] ) (expr_list:REG_DEAD (reg:DI 10 t2) "
+                    "(expr_list:REG_DEAD (reg:DI 64 hi) (nil)))",
+                    "(parallel[ (set (reg/i:DI 2 v0) (minus:DI (reg:DI 2 v0) (reg:DI 4 a0))) "
+                    "(clobber (reg:SI 6 a2)) ] ) (expr_list:REG_DEAD (reg:DI 4 a0) (nil))",
+                    "(use (reg/i:DI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+
+  const CompilationProfile profile{.optimize_level = 2, .c_flags = {"-O2", "-mips1"}};
+  const RtlControlFlowGraph pre_jump2 = InvertDoCrossJump(cfg_jump2, profile);
+  ASSERT_EQ(pre_jump2.rpo_blocks.size(), 1u);
+  ASSERT_EQ(pre_jump2.rpo_blocks[0].instructions.size(), 12u);
+  EXPECT_EQ(pre_jump2.rpo_blocks[0].instructions[7], "(set (reg:DI 64 hi) (reg:DI 10 t2))");
+
+  const RightInverseResult res = verifier_.VerifyDoCrossJumpRightInverse(cfg_jump2);
+  EXPECT_TRUE(res.matches) << res.diff_detail;
+
+  // 2. Stage 1 reconstructed-liveness input (`REG_DEAD (reg:DI 64)` on `mfhi/mflo`):
+  //    must also restore `(set (reg:DI 64 hi) (reg:DI 10 t2))` and attach
+  //    `REG_DEAD (reg:DI 64)` onto `ashift:DI` for Stage 3 `sched2`.
+  RtlControlFlowGraph cfg_stage1 = cfg_jump2;
+  cfg_stage1.rpo_blocks[0].instructions[4] =
+      "(set (reg:DI 10 t2) (reg:DI 64 hi)) (expr_list:REG_DEAD (reg:DI 64 hi) (nil))";
+  cfg_stage1.rpo_blocks[0].instructions[7] =
+      "(parallel[ (set (reg:DI 2 v0) (ashift:DI (reg:DI 10 t2) (const_int 4))) "
+      "(clobber (reg:SI 6 a2)) ] ) (expr_list:REG_DEAD (reg:DI 10 t2) (nil))";
+  cfg_stage1.rpo_blocks[0].SyncRtlInsnsFromInstructions();
+
+  const RtlControlFlowGraph pre_stage1 = InvertDoCrossJump(cfg_stage1, profile);
+  ASSERT_EQ(pre_stage1.rpo_blocks.size(), 1u);
+  ASSERT_EQ(pre_stage1.rpo_blocks[0].instructions.size(), 12u);
+  EXPECT_EQ(pre_stage1.rpo_blocks[0].instructions[7], "(set (reg:DI 64 hi) (reg:DI 10 t2))");
+  const auto replayed = hooks_.ExecuteSubfunctionBoundary(SubfunctionId::kDoCrossJump, pre_stage1,
+                                                          {}, 2, {"-O2", "-mips1"});
+  EXPECT_TRUE(replayed.post_state.CompareAgainst(cfg_jump2).MatchesExactly());
 }
 
 class DoCrossJumpCorpusTest : public ::testing::TestWithParam<RoundTripTestCase> {

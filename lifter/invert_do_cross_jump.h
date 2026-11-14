@@ -18,6 +18,8 @@ namespace rom_nom_nom::lifter {
 // Returns an empty `RtlControlFlowGraph` if `jump2_cfg_x` has no basic blocks
 // or contains malformed RTL instruction patterns or out-of-range edges.
 RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& jump2_cfg_x);
+RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& jump2_cfg_x,
+                                      const CompilationProfile& profile);
 
 }  // namespace rom_nom_nom::lifter
 

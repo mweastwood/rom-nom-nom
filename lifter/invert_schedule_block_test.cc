@@ -1,8 +1,10 @@
 #include "lifter/invert_schedule_block.h"
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
+#include "core/compiler_flags.h"
 #include "core/round_trip_test_cases.h"
 #include "core/rtl_cfg.h"
 #include "core/rtl_expr.h"
@@ -11,6 +13,7 @@
 #include "gcc_harness/right_inverse_verifier.h"
 #include "gcc_harness/subfunction_inverse_provider.h"
 #include "gtest/gtest.h"
+#include "lifter/reconstruct_hard_reg_liveness.h"
 
 namespace rom_nom_nom::lifter {
 namespace {
@@ -20,6 +23,19 @@ class ProductionScheduleBlockProvider final : public gcc_harness::SubfunctionInv
   RtlControlFlowGraph InvertScheduleBlock(
       const RtlControlFlowGraph& scheduled_cfg_x) const override {
     return lifter::InvertScheduleBlock(scheduled_cfg_x);
+  }
+
+  RtlControlFlowGraph InvertScheduleBlock(const RtlControlFlowGraph& scheduled_cfg_x,
+                                          const CompilationProfile& profile) const override {
+    return lifter::InvertScheduleBlock(scheduled_cfg_x, profile);
+  }
+
+  RtlControlFlowGraph InvertSched2PostReload(const RtlControlFlowGraph& scheduled_cfg_x,
+                                             const CompilationProfile& profile,
+                                             bool sched2_enabled) const override {
+    RtlControlFlowGraph cfg =
+        sched2_enabled ? lifter::InvertScheduleBlock(scheduled_cfg_x, profile) : scheduled_cfg_x;
+    return InvertThreadPrologueAndEpilogueInsns(cfg, profile);
   }
 };
 
@@ -344,6 +360,13 @@ TEST_F(InvertScheduleBlockTest, PostReloadPrologueFpSetupInterleavedWithBodyLoad
         const RtlControlFlowGraph& scheduled_cfg_x) const override {
       return InvertThreadPrologueAndEpilogueInsns(lifter::InvertScheduleBlock(scheduled_cfg_x));
     }
+    RtlControlFlowGraph InvertSched2PostReload(const RtlControlFlowGraph& scheduled_cfg_x,
+                                               const CompilationProfile& profile,
+                                               bool sched2_enabled) const override {
+      RtlControlFlowGraph cfg =
+          sched2_enabled ? lifter::InvertScheduleBlock(scheduled_cfg_x, profile) : scheduled_cfg_x;
+      return InvertThreadPrologueAndEpilogueInsns(cfg, profile);
+    }
   };
   PrologueAndSched2Provider prologue_provider;
   gcc_harness::RightInverseVerifier prologue_verifier(&ctx_, &hooks_, &prologue_provider);
@@ -387,6 +410,10 @@ TEST_F(InvertScheduleBlockTest, UpdateFlowInfoReMergesSplitLargeIntMoveAndUpdate
     RtlControlFlowGraph InvertScheduleBlock(
         const RtlControlFlowGraph& scheduled_cfg_x) const override {
       return InvertUpdateFlowInfo(lifter::InvertScheduleBlock(scheduled_cfg_x));
+    }
+    RtlControlFlowGraph InvertScheduleBlock(const RtlControlFlowGraph& scheduled_cfg_x,
+                                            const CompilationProfile& profile) const override {
+      return InvertUpdateFlowInfo(lifter::InvertScheduleBlock(scheduled_cfg_x, profile));
     }
   };
   UpdateFlowInfoAndSched1Provider ufi_provider;
@@ -570,6 +597,10 @@ TEST_F(InvertScheduleBlockTest, VerifierRejectsCorruptedScheduleBlockProvider) {
       }
       return bad;
     }
+    RtlControlFlowGraph InvertScheduleBlock(const RtlControlFlowGraph& scheduled_cfg_x,
+                                            const CompilationProfile& /*profile*/) const override {
+      return InvertScheduleBlock(scheduled_cfg_x);
+    }
   };
 
   RtlControlFlowGraph sched2_cfg;
@@ -710,6 +741,13 @@ TEST_F(InvertScheduleBlockTest,
         const RtlControlFlowGraph& scheduled_cfg_x) const override {
       return InvertThreadPrologueAndEpilogueInsns(lifter::InvertScheduleBlock(scheduled_cfg_x));
     }
+    RtlControlFlowGraph InvertSched2PostReload(const RtlControlFlowGraph& scheduled_cfg_x,
+                                               const CompilationProfile& profile,
+                                               bool sched2_enabled) const override {
+      RtlControlFlowGraph cfg =
+          sched2_enabled ? lifter::InvertScheduleBlock(scheduled_cfg_x, profile) : scheduled_cfg_x;
+      return InvertThreadPrologueAndEpilogueInsns(cfg, profile);
+    }
   };
   PrologueAndSched2Provider prologue_provider;
   gcc_harness::RightInverseVerifier prologue_verifier(&ctx_, &hooks_, &prologue_provider);
@@ -772,6 +810,207 @@ TEST_F(InvertScheduleBlockTest,
   EXPECT_TRUE(di_sb_res.matches) << di_sb_res.diff_detail;
 }
 
+TEST_F(InvertScheduleBlockTest, PrologueSmallStructShiftsZeroAndNonZeroFrameRoundTrip) {
+  // 1. `tsize == 0` leaf function taking 1-byte (`$4 >> 24`) and 2-byte (`$5 >> 16`) structs.
+  const std::string leaf_src = R"(
+typedef struct { unsigned char v; } S1;
+typedef struct { unsigned char hi; signed char lo; } S2;
+int sum_small_structs(S1 a, S2 b) {
+  return (int)a.v + (int)b.hi - (int)b.lo;
+}
+)";
+  const auto leaf_trace = hooks_.TraceForwardCompilation(leaf_src, "sum_small_structs",
+                                                         {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"},
+                                                         "prologue_small_struct_leaf");
+  bool checked_leaf = false;
+  for (const auto& snap : leaf_trace.subfunction_snapshots) {
+    if (snap.subfunction_id != gcc_harness::SubfunctionId::kScheduleBlockSched2) {
+      continue;
+    }
+    checked_leaf = true;
+    const RtlControlFlowGraph lifted =
+        InvertThreadPrologueAndEpilogueInsns(InvertScheduleBlock(snap.post_state));
+    ASSERT_EQ(lifted.sideband.prologue_args.size(), 2u);
+    EXPECT_EQ(lifted.sideband.prologue_args[0].byte_size, 1);
+    EXPECT_EQ(lifted.sideband.prologue_args[1].byte_size, 2);
+    const auto replayed = hooks_.ExecuteSubfunctionBoundary(snap, lifted);
+    const auto cmp = replayed.post_state.CompareAgainst(snap.post_state);
+    EXPECT_TRUE(cmp.MatchesExactly()) << cmp.mismatch_detail;
+  }
+  EXPECT_TRUE(checked_leaf);
+
+  // 2. `tsize > 0` function taking a 3-byte (`BLKmode`, `$4 >> 8`) struct.
+  const std::string blk_src = R"(
+typedef struct { unsigned char r, g, b; } S3;
+int sum_rgb_struct(S3 c, int scale) {
+  return ((int)c.r + (int)c.g + (int)c.b) * scale;
+}
+)";
+  const auto blk_trace = hooks_.TraceForwardCompilation(blk_src, "sum_rgb_struct",
+                                                        {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"},
+                                                        "prologue_small_struct_blk");
+  bool checked_blk = false;
+  for (const auto& snap : blk_trace.subfunction_snapshots) {
+    if (snap.subfunction_id != gcc_harness::SubfunctionId::kScheduleBlockSched2) {
+      continue;
+    }
+    checked_blk = true;
+    const RtlControlFlowGraph lifted =
+        InvertThreadPrologueAndEpilogueInsns(InvertScheduleBlock(snap.post_state));
+    ASSERT_EQ(lifted.sideband.prologue_args.size(), 1u);
+    EXPECT_EQ(lifted.sideband.prologue_args[0].byte_size, 3);
+    const auto replayed = hooks_.ExecuteSubfunctionBoundary(snap, lifted);
+    const auto cmp = replayed.post_state.CompareAgainst(snap.post_state);
+    EXPECT_TRUE(cmp.MatchesExactly()) << cmp.mismatch_detail;
+  }
+  EXPECT_TRUE(checked_blk);
+}
+
+TEST_F(InvertScheduleBlockTest, PrologueVariadicHomeStoresZeroAndNonZeroFrameRoundTrip) {
+  const std::string var_src = R"(
+typedef char* va_list;
+#define va_start(ap, last) ((ap) = (va_list)&(last) + 4)
+#define va_arg(ap, type) (((type*)((ap) += 4))[-1])
+#define va_end(ap) ((void)0)
+int var_sum(int base, int count, ...) {
+  va_list ap;
+  int i, total = base;
+  va_start(ap, count);
+  for (i = 0; i < count; ++i) {
+    total += va_arg(ap, int);
+  }
+  va_end(ap);
+  return total;
+}
+)";
+  for (const auto& flags : {std::vector<std::string>{"-O0", "-mips2", "-mcpu=r4000", "-Wa,-g"},
+                            std::vector<std::string>{"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"}}) {
+    const auto trace = hooks_.TraceForwardCompilation(var_src, "var_sum", flags, "prologue_var");
+    bool checked = false;
+    for (const auto& snap : trace.subfunction_snapshots) {
+      if (snap.subfunction_id != gcc_harness::SubfunctionId::kScheduleBlockSched2) {
+        continue;
+      }
+      checked = true;
+      RtlControlFlowGraph unsched =
+          (snap.optimize_level >= 2) ? InvertScheduleBlock(snap.post_state) : snap.post_state;
+      const RtlControlFlowGraph lifted = InvertThreadPrologueAndEpilogueInsns(unsched);
+      EXPECT_TRUE(lifted.sideband.is_variadic);
+      ASSERT_EQ(lifted.sideband.prologue_args.size(), 2u);
+      const auto replayed = hooks_.ExecuteSubfunctionBoundary(snap, lifted);
+      const auto cmp = replayed.post_state.CompareAgainst(snap.post_state);
+      EXPECT_TRUE(cmp.MatchesExactly()) << cmp.mismatch_detail;
+    }
+    EXPECT_TRUE(checked);
+  }
+}
+
+TEST_F(InvertScheduleBlockTest, PrologueLargeStackFrameOver32KbRoundTrip) {
+  const std::string large_src = R"(
+extern int sink_buf(int* buf, int n);
+int large_frame_fn(int seed) {
+  int big_buf[8500];
+  big_buf[0] = seed;
+  big_buf[8499] = seed + 1;
+  return sink_buf(big_buf, 8500) + seed;
+}
+)";
+  for (const auto& flags : {std::vector<std::string>{"-O1", "-mips2", "-mcpu=r4000", "-Wa,-g"},
+                            std::vector<std::string>{"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"}}) {
+    const auto trace =
+        hooks_.TraceForwardCompilation(large_src, "large_frame_fn", flags, "prologue_large_frame");
+    bool checked = false;
+    for (const auto& snap : trace.subfunction_snapshots) {
+      if (snap.subfunction_id != gcc_harness::SubfunctionId::kScheduleBlockSched2) {
+        continue;
+      }
+      checked = true;
+      RtlControlFlowGraph unsched =
+          (snap.optimize_level >= 2) ? InvertScheduleBlock(snap.post_state) : snap.post_state;
+      const RtlControlFlowGraph lifted = InvertThreadPrologueAndEpilogueInsns(unsched);
+      EXPECT_GE(lifted.sideband.frame_size_bytes, 34000);
+      EXPECT_FALSE(lifted.sideband.is_leaf_function);
+      // Verify no `$sp` subtraction remains in entry block 0 before replay.
+      for (const std::string& pat_str : lifted.rpo_blocks[0].instructions) {
+        auto parsed = ParsePatternAndNotes(pat_str);
+        ASSERT_TRUE(parsed.ok());
+        if (parsed->pattern.IsSet() && parsed->pattern.SetDest().IsReg()) {
+          EXPECT_NE(parsed->pattern.SetDest().RegNo(), 29);
+        }
+      }
+      const auto replayed = hooks_.ExecuteSubfunctionBoundary(snap, lifted);
+      const auto cmp = replayed.post_state.CompareAgainst(snap.post_state);
+      EXPECT_TRUE(cmp.MatchesExactly()) << cmp.mismatch_detail;
+    }
+    EXPECT_TRUE(checked);
+  }
+}
+
+TEST_F(InvertScheduleBlockTest, Sched2RestoresNoConflictExtendClobberAndHiLoSubregDependency) {
+  // Post-reload `kSched2` block with a 2-insn `zero_extendsidi2` into `(reg:DI 2 v0)` and an
+  // `extendsidi2` into `(reg:DI 64 hi)` (`mtlo` separated from `mthi` by `sched2`'s 3-cycle
+  // `imuldiv` output latency): `InvertScheduleBlock` restores `(clobber (reg:DI 2 v0))`,
+  // `(clobber (reg:DI 64 hi))`, and `(subreg:SI (reg:DI 64 hi) 1)` on `mtlo`, and round-trips
+  // cleanly through GCC's `schedule_insns`.
+  RtlControlFlowGraph sched2_cfg;
+  sched2_cfg.pass = RtlPassKind::kSched2;
+  sched2_cfg.sideband.is_leaf_function = true;
+  sched2_cfg.sideband.basic_block_live_at_start[0] = {4, 6, 29, 31};
+  sched2_cfg.rpo_blocks.resize(1);
+  sched2_cfg.rpo_blocks[0].id = 0;
+  sched2_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 65 lo) (reg:SI 6 a2))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg:SI 7 a3) (ashiftrt:SI (reg:SI 6 a2) (const_int 31))) "
+      "(expr_list:REG_DEAD (reg:SI 6 a2) (nil))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg:SI 3 v1) (reg:SI 4 a0)) "
+      "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 2 v0) (const_int 0))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg:SI 64 hi) (reg:SI 7 a3)) "
+      "(expr_list:REG_DEAD (reg:SI 7 a3) (nil))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg:DI 8 t0) (reg:DI 64 hi)) "
+      "(expr_list:REG_DEAD (reg:DI 64 hi) (nil))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg/i:DI 2 v0) (plus:DI (reg:DI 2 v0) (reg:DI 8 t0))) "
+      "(expr_list:REG_DEAD (reg:DI 8 t0) (nil))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(use (reg/i:DI 2 v0)) (expr_list:REG_DEAD (reg/i:DI 2 v0) (nil))");
+
+  const RtlControlFlowGraph unscheduled = InvertScheduleBlock(sched2_cfg);
+  ASSERT_EQ(unscheduled.BlockCount(), 1u);
+  EXPECT_EQ(unscheduled.pass, RtlPassKind::kGreg);
+
+  size_t di_v0_clobber_count = 0;
+  size_t di_hilo_clobber_count = 0;
+  bool saw_mtlo_subreg = false;
+  for (const std::string& pat_str : unscheduled.rpo_blocks[0].instructions) {
+    auto parsed = ParsePatternAndNotes(pat_str);
+    ASSERT_TRUE(parsed.ok());
+    const std::string bare = parsed->pattern.ToGccPrintRtlString();
+    if (bare == "(clobber (reg:DI 2 v0))") {
+      ++di_v0_clobber_count;
+    } else if (bare == "(clobber (reg:DI 64 hi))") {
+      ++di_hilo_clobber_count;
+    } else if (bare == "(set (subreg:SI (reg:DI 64 hi) 1) (reg:SI 6 a2))") {
+      saw_mtlo_subreg = true;
+    }
+  }
+  EXPECT_EQ(di_v0_clobber_count, 1u);
+  EXPECT_EQ(di_hilo_clobber_count, 1u);
+  EXPECT_TRUE(saw_mtlo_subreg);
+
+  const RtlControlFlowGraph scheduled_with_clobbers =
+      hooks_
+          .ExecuteSubfunctionBoundary(gcc_harness::SubfunctionId::kScheduleBlockSched2, unscheduled,
+                                      {}, 2, {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"})
+          .post_state;
+  const gcc_harness::RightInverseResult stage_res =
+      verifier_.VerifySched2StageRightInverse(scheduled_with_clobbers);
+  EXPECT_TRUE(stage_res.matches) << stage_res.diff_detail;
+}
+
 class InvertScheduleBlockCorpusTest : public ::testing::TestWithParam<RoundTripTestCase> {
  protected:
   gcc_harness::GccContext ctx_;
@@ -799,6 +1038,13 @@ TEST_P(InvertScheduleBlockCorpusTest, Sched1AndSched2BoundaryRightInverseMatches
           verifier_.VerifySubfunctionBoundaryRightInverse(snap);
       EXPECT_TRUE(res.matches) << "kScheduleBlockSched2 failed for " << tc.test_name << ": "
                                << res.diff_detail;
+      if (ParseCompilationProfileFlags(trace.stage0_input.profile).RunsSched2()) {
+        hooks_.ApplyCompilationProfile(trace.stage0_input.profile);
+        const gcc_harness::RightInverseResult sched_only_res =
+            verifier_.VerifySched2StageRightInverse(snap.post_state);
+        EXPECT_TRUE(sched_only_res.matches) << "VerifySched2StageRightInverse failed for "
+                                            << tc.test_name << ": " << sched_only_res.diff_detail;
+      }
     }
   }
   EXPECT_TRUE(found_sched1);

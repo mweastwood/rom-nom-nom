@@ -19,6 +19,8 @@ namespace rom_nom_nom::lifter {
 // Returns an empty `RtlControlFlowGraph` if `scheduled_cfg` is empty or
 // structurally invalid.
 RtlControlFlowGraph InvertScheduleBlock(const RtlControlFlowGraph& scheduled_cfg);
+RtlControlFlowGraph InvertScheduleBlock(const RtlControlFlowGraph& scheduled_cfg,
+                                        const CompilationProfile& profile);
 
 // Inverts `sched.c:update_flow_info` after pre-allocation `try_split` in Stage
 // 6 (`RtlPassKind::kSched`): re-merges split 32-bit `large_int` immediate moves
@@ -30,12 +32,14 @@ RtlControlFlowGraph InvertUpdateFlowInfo(const RtlControlFlowGraph& scheduled_cf
 
 // Inverts `function.c:thread_prologue_and_epilogue_insns` /
 // `mips.c:mips_expand_prologue` in post-reload Stage 3 (`RtlPassKind::kSched2`):
-// extracts stack frame size, saved GPR/FPR masks, leaf status, and
-// hard-frame-pointer usage into `sideband` (`frame_size_bytes`,
-// `saved_gpr_regnos`, `saved_fpr_regnos`, `frame_pointer_needed`,
-// `is_leaf_function`) and strips the prologue instructions from the entry
-// basic block.
+// recovers `< 4`-byte by-value struct shift specs (`prologue_args`), variadic
+// GP argument home stores (`is_variadic`, `prologue_args`), stack frame size
+// (including `> 32KB` `$12`/`$13` large-frame sequences), saved GPR/FPR sets,
+// leaf status, and hard-frame-pointer usage into `sideband`, and strips all
+// prologue instructions from the entry basic block.
 RtlControlFlowGraph InvertThreadPrologueAndEpilogueInsns(const RtlControlFlowGraph& scheduled_cfg);
+RtlControlFlowGraph InvertThreadPrologueAndEpilogueInsns(const RtlControlFlowGraph& scheduled_cfg,
+                                                         const CompilationProfile& profile);
 
 }  // namespace rom_nom_nom::lifter
 

@@ -1333,23 +1333,21 @@ RightInverseResult RightInverseVerifier::VerifySuffixRightInverse(
 
   if (target_rank <= PassPipelineRank(RtlPassKind::kJump2)) {
     if (dbr_enabled) {
-      y = inverses_->InvertDbrSchedule(y);
+      y = inverses_->InvertDbrSchedule(y, effective_profile);
       if (y.rpo_blocks.empty()) return step_fail("InvertDbrSchedule");
     }
     y.pass = RtlPassKind::kJump2;
   }
   if (target_rank <= PassPipelineRank(RtlPassKind::kSched2)) {
     if (opt_enabled) {
-      y = inverses_->InvertDoCrossJump(y);
+      y = inverses_->InvertDoCrossJump(y, effective_profile);
       if (y.rpo_blocks.empty()) return step_fail("InvertDoCrossJump");
     }
     y.pass = RtlPassKind::kSched2;
   }
   if (target_rank <= PassPipelineRank(RtlPassKind::kGreg)) {
-    if (sched2_enabled) {
-      y = inverses_->InvertScheduleBlock(y);
-      if (y.rpo_blocks.empty()) return step_fail("InvertScheduleBlock (sched2)");
-    }
+    y = inverses_->InvertSched2PostReload(y, effective_profile, sched2_enabled);
+    if (y.rpo_blocks.empty()) return step_fail("InvertSched2PostReload");
     y.pass = RtlPassKind::kGreg;
   }
   if (target_rank <= PassPipelineRank(RtlPassKind::kLreg)) {
@@ -1374,7 +1372,7 @@ RightInverseResult RightInverseVerifier::VerifySuffixRightInverse(
   }
   if (target_rank <= PassPipelineRank(RtlPassKind::kCombine)) {
     if (sched1_enabled) {
-      y = inverses_->InvertScheduleBlock(y);
+      y = inverses_->InvertScheduleBlock(y, effective_profile);
       if (y.rpo_blocks.empty()) return step_fail("InvertScheduleBlock (sched1)");
     }
     y.pass = RtlPassKind::kCombine;
@@ -1534,9 +1532,12 @@ RightInverseResult RightInverseVerifier::VerifyFillEagerDelaySlotsRightInverse(
 
 RightInverseResult RightInverseVerifier::VerifyFillSimpleDelaySlotsRightInverse(
     const RtlControlFlowGraph& scheduled_cfg_x) const {
+  const CompilationProfile profile = hooks_->ActiveCompilationProfile();
   return VerifyRtlPassRightInverse(
       scheduled_cfg_x,
-      [this](const RtlControlFlowGraph& x) { return inverses_->InvertFillSimpleDelaySlots(x); },
+      [this, &profile](const RtlControlFlowGraph& x) {
+        return inverses_->InvertFillSimpleDelaySlots(x, profile);
+      },
       [](GccContext* /*ctx*/, FunctionHooks* hooks) {
         hooks->RunFillSimpleDelaySlots(/*non_jumps_p=*/0);
       },
@@ -1545,8 +1546,12 @@ RightInverseResult RightInverseVerifier::VerifyFillSimpleDelaySlotsRightInverse(
 
 RightInverseResult RightInverseVerifier::VerifyDbrStageRightInverse(
     const RtlControlFlowGraph& dbr_cfg_x) const {
+  const CompilationProfile profile = hooks_->ActiveCompilationProfile();
   return VerifyRtlPassRightInverse(
-      dbr_cfg_x, [this](const RtlControlFlowGraph& x) { return inverses_->InvertDbrSchedule(x); },
+      dbr_cfg_x,
+      [this, &profile](const RtlControlFlowGraph& x) {
+        return inverses_->InvertDbrSchedule(x, profile);
+      },
       [](GccContext* /*ctx*/, FunctionHooks* hooks) { hooks->RunDbrSchedule(); },
       RtlPassKind::kDbr);
 }
@@ -1557,8 +1562,12 @@ RightInverseResult RightInverseVerifier::VerifyDbrStageRightInverse(
 
 RightInverseResult RightInverseVerifier::VerifyDoCrossJumpRightInverse(
     const RtlControlFlowGraph& jump2_cfg_x) const {
+  const CompilationProfile profile = hooks_->ActiveCompilationProfile();
   return VerifyRtlPassRightInverse(
-      jump2_cfg_x, [this](const RtlControlFlowGraph& x) { return inverses_->InvertDoCrossJump(x); },
+      jump2_cfg_x,
+      [this, &profile](const RtlControlFlowGraph& x) {
+        return inverses_->InvertDoCrossJump(x, profile);
+      },
       [](GccContext* /*ctx*/, FunctionHooks* hooks) {
         hooks->RunJumpOptimize(/*cross_jump=*/1, /*noop_moves=*/1,
                                /*after_regscan=*/0);
@@ -1577,27 +1586,40 @@ RightInverseResult RightInverseVerifier::VerifyJump2CrossJumpStageRightInverse(
 
 RightInverseResult RightInverseVerifier::VerifyScheduleBlockRightInverse(
     const RtlControlFlowGraph& scheduled_cfg_x) const {
+  const CompilationProfile profile = hooks_->ActiveCompilationProfile();
   return VerifyRtlPassRightInverse(
       scheduled_cfg_x,
-      [this](const RtlControlFlowGraph& x) { return inverses_->InvertScheduleBlock(x); },
+      [this, &profile](const RtlControlFlowGraph& x) {
+        return inverses_->InvertScheduleBlock(x, profile);
+      },
       [](GccContext* /*ctx*/, FunctionHooks* hooks) { hooks->RunScheduleBlock(0); },
       scheduled_cfg_x.pass);
 }
 
 RightInverseResult RightInverseVerifier::VerifySched2StageRightInverse(
     const RtlControlFlowGraph& sched2_cfg_x) const {
+  const CompilationProfile profile = hooks_->ActiveCompilationProfile();
   return VerifyRtlPassRightInverse(
       sched2_cfg_x,
-      [this](const RtlControlFlowGraph& x) { return inverses_->InvertScheduleBlock(x); },
-      [](GccContext* /*ctx*/, FunctionHooks* hooks) { hooks->RunScheduleInsns(); },
+      [this, &profile](const RtlControlFlowGraph& x) {
+        return inverses_->InvertScheduleBlock(x, profile);
+      },
+      [](GccContext* /*ctx*/, FunctionHooks* hooks) {
+        if (optimize > 0 && flag_schedule_insns_after_reload != 0) {
+          hooks->RunScheduleInsns();
+        }
+      },
       RtlPassKind::kSched2);
 }
 
 RightInverseResult RightInverseVerifier::VerifySched1StageRightInverse(
     const RtlControlFlowGraph& sched1_cfg_x) const {
+  const CompilationProfile profile = hooks_->ActiveCompilationProfile();
   return VerifyRtlPassRightInverse(
       sched1_cfg_x,
-      [this](const RtlControlFlowGraph& x) { return inverses_->InvertScheduleBlock(x); },
+      [this, &profile](const RtlControlFlowGraph& x) {
+        return inverses_->InvertScheduleBlock(x, profile);
+      },
       [](GccContext* /*ctx*/, FunctionHooks* hooks) { hooks->RunScheduleInsns(); },
       RtlPassKind::kSched);
 }
@@ -2519,8 +2541,8 @@ RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
       break;
   }
 
-  hooks_->ApplyCompilationProfile(
-      CompilationProfile{snap.optimize_level, snap.c_flags, snap.gp_symbol_sizes});
+  const CompilationProfile snap_profile{snap.optimize_level, snap.c_flags, snap.gp_symbol_sizes};
+  hooks_->ApplyCompilationProfile(snap_profile);
 
   RtlControlFlowGraph cand_pre = snap.post_state;
   switch (snap.subfunction_id) {
@@ -2770,8 +2792,12 @@ RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
       cand_pre = inverses_->InvertTryCombine(snap.post_state);
       break;
     case SubfunctionId::kScheduleBlockSched1:
+      cand_pre = inverses_->InvertScheduleBlock(snap.post_state, snap_profile);
+      break;
     case SubfunctionId::kScheduleBlockSched2:
-      cand_pre = inverses_->InvertScheduleBlock(snap.post_state);
+      cand_pre = inverses_->InvertSched2PostReload(
+          snap.post_state, snap_profile,
+          snap.optimize_level > 0 && flag_schedule_insns_after_reload != 0);
       break;
     case SubfunctionId::kUpdateEquivRegs:
       cand_pre = inverses_->InvertUpdateEquivRegs(snap.post_state);
@@ -2789,10 +2815,10 @@ RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
       cand_pre = inverses_->InvertAlterReg(snap.post_state);
       break;
     case SubfunctionId::kDoCrossJump:
-      cand_pre = inverses_->InvertDoCrossJump(snap.post_state);
+      cand_pre = inverses_->InvertDoCrossJump(snap.post_state, snap_profile);
       break;
     case SubfunctionId::kFillSimpleDelaySlots:
-      cand_pre = inverses_->InvertFillSimpleDelaySlots(snap.post_state);
+      cand_pre = inverses_->InvertFillSimpleDelaySlots(snap.post_state, snap_profile);
       break;
     case SubfunctionId::kFillEagerDelaySlots:
       cand_pre = inverses_->InvertFillEagerDelaySlots(snap.post_state);

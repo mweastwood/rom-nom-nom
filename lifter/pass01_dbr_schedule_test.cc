@@ -94,8 +94,18 @@ class ProductionPass01InverseProvider final : public SubfunctionInverseProvider 
     return lifter::InvertFillSimpleDelaySlots(dbr_simple_cfg_x);
   }
 
+  RtlControlFlowGraph InvertFillSimpleDelaySlots(const RtlControlFlowGraph& dbr_simple_cfg_x,
+                                                 const CompilationProfile& profile) const override {
+    return lifter::InvertFillSimpleDelaySlots(dbr_simple_cfg_x, profile);
+  }
+
   RtlControlFlowGraph InvertDbrSchedule(const RtlControlFlowGraph& dbr_cfg_x) const override {
     return lifter::InvertPass01DbrSchedule(dbr_cfg_x);
+  }
+
+  RtlControlFlowGraph InvertDbrSchedule(const RtlControlFlowGraph& dbr_cfg_x,
+                                        const CompilationProfile& profile) const override {
+    return lifter::InvertPass01DbrSchedule(dbr_cfg_x, profile);
   }
 };
 
@@ -277,6 +287,15 @@ TEST_F(Pass01DbrScheduleTest, SyntheticNegativeMalformedCfgAndCorruptedInverse) 
   class BrokenDbrProvider final : public SubfunctionInverseProvider {
    public:
     RtlControlFlowGraph InvertDbrSchedule(const RtlControlFlowGraph& dbr_cfg_x) const override {
+      return Corrupt(dbr_cfg_x);
+    }
+    RtlControlFlowGraph InvertDbrSchedule(const RtlControlFlowGraph& dbr_cfg_x,
+                                          const CompilationProfile& /*profile*/) const override {
+      return Corrupt(dbr_cfg_x);
+    }
+
+   private:
+    static RtlControlFlowGraph Corrupt(const RtlControlFlowGraph& dbr_cfg_x) {
       RtlControlFlowGraph bad = dbr_cfg_x;
       if (!bad.rpo_blocks.empty()) {
         bad.rpo_blocks[0].instructions = {
@@ -408,7 +427,8 @@ TEST_P(Pass01DbrScheduleRoundTripTest, RoundTrip2480Cases) {
 
   // 2. Whole-stage `InvertPass01DbrSchedule` (`provider->InvertDbrSchedule`)
   // composition right-inverse on `.12.dbr`.
-  const RtlControlFlowGraph pre_dbr = provider->InvertDbrSchedule(post_dbr);
+  const RtlControlFlowGraph pre_dbr =
+      provider->InvertDbrSchedule(post_dbr, trace.stage0_input.profile);
   ASSERT_FALSE(pre_dbr.rpo_blocks.empty()) << "Empty InvertPass01DbrSchedule for " << tc.test_name;
   EXPECT_EQ(pre_dbr.pass, RtlPassKind::kJump2);
 

@@ -505,27 +505,7 @@ bool IsAnyRegLiveAtBlockEntry(const RtlControlFlowGraph& out, absl::Span<const i
                               size_t start_b) {
   bool gp64 = false;
   bool fp64 = false;
-  for (const auto& blk : out.rpo_blocks) {
-    for (const std::string& s : blk.instructions) {
-      auto parsed = ParsePatternAndNotes(s);
-      if (!parsed.ok()) {
-        continue;
-      }
-      parsed->pattern.Visit([&](const RtlExpr& node) {
-        if (node.IsReg() && node.RegNo() >= 32 && node.RegNo() < 64 && (node.RegNo() % 2) == 1) {
-          fp64 = true;
-        }
-        if (node.IsSet() && node.SetDest().IsReg() && node.SetDest().RegNo() < 32 &&
-            node.SetSrc().mode == RtlMachineMode::kDi &&
-            (node.SetSrc().op == RtlOp::kPlus || node.SetSrc().op == RtlOp::kMinus ||
-             node.SetSrc().op == RtlOp::kAshift || node.SetSrc().op == RtlOp::kAshiftrt ||
-             node.SetSrc().op == RtlOp::kLshiftrt || node.SetSrc().op == RtlOp::kSignExtend ||
-             node.SetSrc().op == RtlOp::kZeroExtend)) {
-          gp64 = true;
-        }
-      });
-    }
-  }
+  DetectMipsRegisterWidthFlags(out, /*profile=*/nullptr, &gp64, &fp64);
 
   auto is_reg_used_at_fn_exit = [&](int r, bool include_epilogue_delay) -> bool {
     if (include_epilogue_delay && out.sideband.epilogue_delay_pattern.has_value()) {
@@ -2133,7 +2113,8 @@ bool ShouldPlaceFallthroughTrampBeforeFinalUse(const RtlControlFlowGraph& out, s
 
 }  // namespace
 
-RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eager_cfg_x) {
+RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eager_cfg_x,
+                                              const CompilationProfile& profile) {
   if (!IsValidCfg(dbr_eager_cfg_x)) {
     return {};
   }
@@ -3048,8 +3029,13 @@ RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eag
 
   SynchronizeCanonicalLabels(&out);
   out.SyncAllBlocksPreservingMachineInsns(dbr_eager_cfg_x.rpo_blocks);
-  RecomputePostReloadLiveAtStart(&out);
+  RecomputePostReloadLiveAtStart(&out, profile);
   return out;
+}
+
+RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eager_cfg_x) {
+  const CompilationProfile default_profile{.optimize_level = 2};
+  return InvertFillEagerDelaySlots(dbr_eager_cfg_x, default_profile);
 }
 
 }  // namespace rom_nom_nom::lifter

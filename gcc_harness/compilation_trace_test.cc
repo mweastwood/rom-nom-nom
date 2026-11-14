@@ -939,5 +939,53 @@ int step31_end_to_end_probe(struct Elem* items, int n, int bias, int mode_flag) 
   EXPECT_EQ(replayed_trace.final_machine_words, forward_trace.final_machine_words);
 }
 
+TEST(CompilationTraceTest,
+     BoundedLoopSignificantLatchRegReadBeforeOverwriteMatchesMonolithicFlowAnalysis) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+
+  constexpr std::string_view kSource = R"(
+int bounded_copy_probe(char* dst, int capacity, int select_alt) {
+  const char* src = select_alt ? "alpha" : "beta_string";
+  int i = 0;
+  if (capacity <= 0) {
+    return 0;
+  }
+  while (i + 1 < capacity && src[i] != 0) {
+    dst[i] = src[i];
+    i++;
+  }
+  dst[i] = 0;
+  return i;
+}
+)";
+
+  const std::vector<std::string> flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"};
+  const FunctionCompilationTrace forward_trace =
+      hooks.TraceForwardCompilation(kSource, "bounded_copy_probe", flags, "bounded_copy_probe_O2");
+  ASSERT_EQ(forward_trace.subfunction_snapshots.size(), 35u);
+  VerifyTraceCompletenessAndReplayability(&ctx, &hooks, forward_trace, /*optimize_level=*/2);
+
+  const RtlControlFlowGraph& cse2_cfg = forward_trace.pass_snapshots.at(RtlPassKind::kCse2);
+  const RtlControlFlowGraph& granular_flow = forward_trace.pass_snapshots.at(RtlPassKind::kFlow);
+  ctx.BeginFunction("bounded_copy_probe");
+  hooks.ApplyCompilationProfile(forward_trace.stage0_input.profile);
+  Rtx cse2_head = ctx.MaterializeFromCfg(cse2_cfg);
+  ASSERT_NE(cse2_head, nullptr);
+  hooks.RunFlowAnalysis(cse2_head, 0);
+  const RtlControlFlowGraph monolithic_flow = ctx.DematerializeToCfg(cse2_head, RtlPassKind::kFlow);
+
+  const RtlCfgPassComparison cmp = granular_flow.CompareAgainst(monolithic_flow);
+  EXPECT_TRUE(cmp.MatchesExactly()) << cmp.mismatch_detail;
+  EXPECT_EQ(granular_flow.sideband.basic_block_live_at_start,
+            monolithic_flow.sideband.basic_block_live_at_start);
+  EXPECT_EQ(granular_flow.sideband.reg_n_refs, monolithic_flow.sideband.reg_n_refs);
+  EXPECT_EQ(granular_flow.sideband.reg_n_sets, monolithic_flow.sideband.reg_n_sets);
+  EXPECT_EQ(granular_flow.sideband.reg_n_deaths, monolithic_flow.sideband.reg_n_deaths);
+  EXPECT_EQ(granular_flow.sideband.reg_live_length, monolithic_flow.sideband.reg_live_length);
+  EXPECT_EQ(granular_flow.sideband.reg_n_calls_crossed,
+            monolithic_flow.sideband.reg_n_calls_crossed);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::gcc_harness

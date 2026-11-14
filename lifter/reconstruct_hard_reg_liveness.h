@@ -3,10 +3,31 @@
 
 #include <cstddef>
 
+#include "core/compiler_flags.h"
 #include "core/rtl_cfg.h"
 #include "core/rtl_expr.h"
 
 namespace rom_nom_nom::lifter {
+
+// Returns the byte width of `mode` under GCC 2.7.2 MIPS `machmode.def`.
+int MipsModeByteSize(RtlMachineMode mode);
+
+// Mirrors GCC 2.7.2 `HARD_REGNO_NREGS(regno, mode)` (`mips.h:1395`).
+int MipsHardRegNregs(int regno, RtlMachineMode mode, bool gp64, bool fp64);
+
+// Determines MIPS 64-bit GPR (`gp64`) and FPR (`fp64`) width flags from
+// `profile` (when non-null) or by inspecting `cfg`'s structured RTL.
+void DetectMipsRegisterWidthFlags(const RtlControlFlowGraph& cfg, const CompilationProfile* profile,
+                                  bool* gp64, bool* fp64);
+
+// Parses `profile.optimize_level` and `profile.c_flags` into `ParsedCompilerFlags`.
+ParsedCompilerFlags ParseCompilationProfileFlags(const CompilationProfile& profile);
+
+// Populates `RtlInsn::call_fusage` and `has_explicit_call_fusage = true` via
+// inter-block MIPS O32/N32 argument dataflow for any `CALL_INSN` (or `SEQUENCE`
+// call head) in `cfg` that lacks explicit `CALL_INSN_FUNCTION_USAGE`. Leaves
+// calls that already carry `has_explicit_call_fusage == true` untouched.
+void ReconstructMissingCallFusage(RtlControlFlowGraph* cfg, const CompilationProfile& profile);
 
 // Reconstructs post-reload MIPS hard-register liveness and return-value uses on
 // a Stage 0 (`kDbr`) CFG lifted from machine words / assembly:
@@ -24,12 +45,23 @@ namespace rom_nom_nom::lifter {
 void ReconstructPostDbrHardRegLivenessAndReturnUse(RtlControlFlowGraph* cfg,
                                                    const CompilationProfile& profile);
 
-// Recomputes `cfg->sideband.basic_block_live_at_start` for an optimized
-// post-reload (`cfg->sideband.reg_renumber.empty()`, no pseudo-registers) CFG
-// without mutating any instruction patterns or `REG_NOTES`. Leaves `-O0` (empty
-// `basic_block_live_at_start` with no post-flow/reorg indicators) and
-// pre-reload CFGs untouched.
+// Recomputes `cfg->sideband.basic_block_live_at_start` for a post-reload
+// (`cfg->pass > RtlPassKind::kGreg`, no pseudo-registers) CFG under `profile`
+// without mutating any instruction patterns or `REG_NOTES`. When
+// `profile.optimize_level == 0`, clears `basic_block_live_at_start`; leaves
+// pre-`sched2` (`<= kGreg`) and pseudo-register CFGs untouched.
+void RecomputePostReloadLiveAtStart(RtlControlFlowGraph* cfg, const CompilationProfile& profile);
 void RecomputePostReloadLiveAtStart(RtlControlFlowGraph* cfg);
+
+// Resolves any `reorg.c:918-920` `(expr_list:REG_DEAD (const_int 0) ...)`
+// delay-slot markers on unpacked post-reload top-level instructions back into
+// `(expr_list:REG_DEAD (reg:<mode> <regno>) ...)` notes (and restores notes
+// shifted by `reorg.c:2283-2306` `update_reg_dead_notes`), returning
+// immediately without mutating `cfg` when `profile.optimize_level == 0` or no
+// `(REG_DEAD (const_int 0))` notes are present.
+void ResolvePostReloadConstZeroRegDeadNotes(RtlControlFlowGraph* cfg,
+                                            const CompilationProfile& profile);
+void ResolvePostReloadConstZeroRegDeadNotes(RtlControlFlowGraph* cfg);
 
 // Computes post-reload hard-register live-in sets purely from `cfg`'s
 // instructions, control-flow edges, and frame/epilogue metadata (ignoring

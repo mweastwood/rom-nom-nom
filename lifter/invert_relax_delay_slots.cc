@@ -1184,7 +1184,8 @@ void InvertRelaxUncondAndMergedDelaySlots(RtlControlFlowGraph* out_ptr,
 
 }  // namespace
 
-RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed_cfg_x) {
+RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed_cfg_x,
+                                          const CompilationProfile& profile) {
   if (!IsValidCfg(dbr_relaxed_cfg_x)) {
     return {};
   }
@@ -1960,8 +1961,13 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
     out.rpo_blocks[b].id = static_cast<uint32_t>(b);
     out.rpo_blocks[b].SyncRtlInsnsFromInstructions();
   }
-  RecomputePostReloadLiveAtStart(&out);
+  RecomputePostReloadLiveAtStart(&out, profile);
   return out;
+}
+
+RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed_cfg_x) {
+  const CompilationProfile default_profile{.optimize_level = 2};
+  return InvertRelaxDelaySlots(dbr_relaxed_cfg_x, default_profile);
 }
 
 }  // namespace rom_nom_nom::lifter

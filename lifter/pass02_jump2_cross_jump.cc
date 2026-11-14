@@ -10,7 +10,12 @@ namespace rom_nom_nom::lifter {
 // (`jump.c:do_cross_jump` + `jump.c:find_cross_jump`):
 //   1. `InvertDoCrossJump`
 RtlControlFlowGraph InvertPass02Jump2CrossJump(const RtlControlFlowGraph& jump2_cfg_x) {
-  RtlControlFlowGraph cfg = InvertDoCrossJump(jump2_cfg_x);
+  return InvertPass02Jump2CrossJump(jump2_cfg_x, CompilationProfile{.optimize_level = 2});
+}
+
+RtlControlFlowGraph InvertPass02Jump2CrossJump(const RtlControlFlowGraph& jump2_cfg_x,
+                                               const CompilationProfile& profile) {
+  RtlControlFlowGraph cfg = InvertDoCrossJump(jump2_cfg_x, profile);
   if (cfg.rpo_blocks.empty()) {
     return {};
   }

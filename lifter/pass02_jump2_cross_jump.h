@@ -18,9 +18,16 @@ namespace rom_nom_nom::lifter {
 // `jump2_cfg_x` is empty or contains invalid / malformed RTL patterns or CFG
 // edges.
 RtlControlFlowGraph InvertPass02Jump2CrossJump(const RtlControlFlowGraph& jump2_cfg_x);
+RtlControlFlowGraph InvertPass02Jump2CrossJump(const RtlControlFlowGraph& jump2_cfg_x,
+                                               const CompilationProfile& profile);
 
 inline RtlControlFlowGraph InvertJump2CrossJump(const RtlControlFlowGraph& jump2_cfg_x) {
   return InvertPass02Jump2CrossJump(jump2_cfg_x);
+}
+
+inline RtlControlFlowGraph InvertJump2CrossJump(const RtlControlFlowGraph& jump2_cfg_x,
+                                                const CompilationProfile& profile) {
+  return InvertPass02Jump2CrossJump(jump2_cfg_x, profile);
 }
 
 }  // namespace rom_nom_nom::lifter

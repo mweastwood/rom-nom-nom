@@ -21,6 +21,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
+#include "core/compiler_flags.h"
 #include "core/rtl_cfg.h"
 #include "lifter/invert_gas_append_insn.h"
 #include "lifter/invert_gas_mips_ip.h"
@@ -2150,7 +2151,8 @@ std::vector<std::string> CollapseGasMacrosAndFlattenLines(
   // If no relocations, jump tables, constant pool entries, or linked `base_vram`
   // are present, delegate to the pure-word macro collapse path.
   if (stage0_input.relocations.empty() && stage0_input.jump_tables.empty() &&
-      stage0_input.constant_pool.empty() && stage0_input.base_vram == 0u) {
+      stage0_input.constant_pool.empty() && stage0_input.base_vram == 0u &&
+      stage0_input.profile.c_flags.empty()) {
     return CollapseGasMacrosAndFlattenLines(raw_items);
   }
 
@@ -2342,6 +2344,9 @@ std::vector<std::string> CollapseGasMacrosAndFlattenLines(
     return line;
   };
 
+  const ParsedCompilerFlags parsed_flags = ParsedCompilerFlags::Parse(stage0_input.profile.c_flags);
+  const int mips_isa = parsed_flags.mips_isa;
+
   // Pass 1: collapse relocation-free multi-word `InvertGasMacro` expansions
   // (`M_DIV_3`, `M_REM_3`, `M_DIVU_3`, `M_REMU_3`, `M_LI`) and resolve `jal` /
   // `$gp`-relative / literal relocations.
@@ -2443,10 +2448,28 @@ std::vector<std::string> CollapseGasMacrosAndFlattenLines(
           !IsBranchOrJumpWord(item.word) && !IsBranchOrJumpWord(raw_items[i + 1].word)) {
         if (!reloc_by_word.contains(item.word_index) &&
             !reloc_by_word.contains(raw_items[i + 1].word_index)) {
+          if (mips_isa < 2) {
+            const uint32_t w0 = item.word;
+            const uint32_t w1 = raw_items[i + 1].word;
+            const uint32_t op0 = Opcode(w0);
+            const uint32_t op1 = Opcode(w1);
+            if ((op0 == 0x31u || op0 == 0x39u) && op1 == op0 && Rs(w1) == Rs(w0) &&
+                (Rt(w1) % 2u) == 0u && Rt(w0) == Rt(w1) + 1u && Simm16(w0) <= 0x7fff - 4 &&
+                Simm16(w1) == Simm16(w0) + 4) {
+              item.line = absl::StrFormat("%s $f%u,%d($%u)", op0 == 0x31u ? "l.d" : "s.d", Rt(w1),
+                                          static_cast<int>(Simm16(w0)), Rs(w0));
+              item.unswapped_from_branch = false;
+              items.push_back(std::move(item));
+              ++i;
+              continue;
+            }
+          }
           const uint32_t pair[2] = {item.word, raw_items[i + 1].word};
           const std::string macro_asm = InvertGasMacro(pair);
+          const bool is_li_int =
+              absl::StartsWith(macro_asm, "li ") || absl::StartsWith(macro_asm, "li\t");
           if (!macro_asm.empty() &&
-              (absl::StartsWith(macro_asm, "li ") || absl::StartsWith(macro_asm, "li\t") ||
+              ((is_li_int && (!parsed_flags.RunsSched1() || Rt(item.word) == 1u)) ||
                absl::StartsWith(macro_asm, "li.s "))) {
             item.line = macro_asm;
             item.unswapped_from_branch = false;
@@ -2676,6 +2699,53 @@ std::vector<std::string> CollapseGasMacrosAndFlattenLines(
               continue;
             }
           }
+        }
+      }
+
+      // Split `%lo(sym)($breg)` paired `l.d` / `s.d` (`mips_isa == 1`).
+      if (mips_isa < 2 && i + 1 < items.size() && items[i + 1].kind == AsmItemKind::kReorderInsn) {
+        auto lo0_it = reloc_by_word.find(item.word_index);
+        auto lo1_it = reloc_by_word.find(items[i + 1].word_index);
+        const Stage0Relocation* r0 = (lo0_it != reloc_by_word.end()) ? lo0_it->second : nullptr;
+        const Stage0Relocation* r1 = (lo1_it != reloc_by_word.end()) ? lo1_it->second : nullptr;
+        if (r0 != nullptr && r1 != nullptr && r0->kind == Stage0RelocKind::kMipsLo16 &&
+            r1->kind == Stage0RelocKind::kMipsLo16 && Rs(item.word) == Rs(items[i + 1].word)) {
+          const int breg = static_cast<int>(Rs(item.word));
+          std::string mnem0;
+          std::string reg0;
+          int32_t off0 = 0;
+          std::string even_fpreg;
+          if (ParseAnyMemInsnWithBase(item.line, breg, &mnem0, &reg0, &off0) &&
+              MatchPairedFpDoubleReloc(items[i + 1].line, breg, mnem0, reg0, r0, r1, &even_fpreg)) {
+            item.line =
+                absl::StrFormat("%s %s,%%lo(%s)($%d)", mnem0 == "l.s" ? "l.d" : "s.d", even_fpreg,
+                                format_sym_addend(r0->symbol_name, r0->addend), breg);
+            item.unswapped_from_branch = false;
+            collapsed.push_back(std::move(item));
+            ++i;
+            continue;
+          }
+        }
+      }
+
+      // Relocation-free paired `l.d` / `s.d` (`mips_isa == 1`) exposed after un-swapping `-Wa,-O2`.
+      if (mips_isa < 2 && i + 1 < items.size() && items[i + 1].kind == AsmItemKind::kReorderInsn &&
+          !IsBranchOrJumpWord(item.word) && !IsBranchOrJumpWord(items[i + 1].word) &&
+          !reloc_by_word.contains(item.word_index) &&
+          !reloc_by_word.contains(items[i + 1].word_index)) {
+        const uint32_t w0 = item.word;
+        const uint32_t w1 = items[i + 1].word;
+        const uint32_t op0 = Opcode(w0);
+        const uint32_t op1 = Opcode(w1);
+        if ((op0 == 0x31u || op0 == 0x39u) && op1 == op0 && Rs(w1) == Rs(w0) &&
+            (Rt(w1) % 2u) == 0u && Rt(w0) == Rt(w1) + 1u && Simm16(w0) <= 0x7fff - 4 &&
+            Simm16(w1) == Simm16(w0) + 4) {
+          item.line = absl::StrFormat("%s $f%u,%d($%u)", op0 == 0x31u ? "l.d" : "s.d", Rt(w1),
+                                      static_cast<int>(Simm16(w0)), Rs(w0));
+          item.unswapped_from_branch = false;
+          collapsed.push_back(std::move(item));
+          ++i;
+          continue;
         }
       }
 
