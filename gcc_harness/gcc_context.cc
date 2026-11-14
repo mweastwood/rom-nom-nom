@@ -2911,9 +2911,15 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
     emit_note(nullptr, kNoteInsnFunctionBeg);
   }
   ResetVirtualRegisterFlags();
-  if (regno_pointer_flag != nullptr) {
-    for (int r = kFirstPseudoRegister + 4; r < regno_pointer_flag_length; ++r) {
-      regno_pointer_flag[r] = 0;
+  if (regno_pointer_flag != nullptr && regno_pointer_flag_length > 0) {
+    std::memset(regno_pointer_flag, 0, static_cast<size_t>(regno_pointer_flag_length));
+    for (Rtx sreg :
+         {stack_pointer_rtx, frame_pointer_rtx, arg_pointer_rtx, virtual_incoming_args_rtx,
+          virtual_stack_vars_rtx, virtual_stack_dynamic_rtx, virtual_outgoing_args_rtx}) {
+      if (sreg != nullptr && sreg->fld[0].rtint >= 0 &&
+          sreg->fld[0].rtint < regno_pointer_flag_length) {
+        regno_pointer_flag[sreg->fld[0].rtint] = 1;
+      }
     }
   }
   if (regno_reg_rtx != nullptr) {
@@ -3427,15 +3433,15 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
   max_regno = max_reg_num();
   const int alloc_regs = std::max(max_regno, target_max_regno) + 16;
 
-  if (!has_sequence) {
-    std::vector<int> explicit_ptr_regnos;
-    if (regno_pointer_flag != nullptr) {
-      for (int r = 0; r < regno_pointer_flag_length; ++r) {
-        if (regno_pointer_flag[r] != 0) {
-          explicit_ptr_regnos.push_back(r);
-        }
+  std::vector<int> explicit_ptr_regnos;
+  if (regno_pointer_flag != nullptr) {
+    for (int r = 0; r < regno_pointer_flag_length; ++r) {
+      if (regno_pointer_flag[r] != 0) {
+        explicit_ptr_regnos.push_back(r);
       }
     }
+  }
+  if (!has_sequence) {
     restore_reg_data(first);
     if (regno_reg_rtx != nullptr) {
       for (Rtx vreg : {virtual_incoming_args_rtx, virtual_stack_vars_rtx, virtual_stack_dynamic_rtx,
@@ -3446,28 +3452,21 @@ Rtx GccContext::MaterializeFromCfg(const RtlControlFlowGraph& cfg, bool reset_fu
       }
     }
     reg_scan(first, max_reg_num(), 0);
-    if (regno_pointer_flag != nullptr) {
-      std::memset(regno_pointer_flag, 0, static_cast<size_t>(regno_pointer_flag_length));
-      for (int regno : explicit_ptr_regnos) {
-        if (regno >= 0 && regno < regno_pointer_flag_length) {
-          regno_pointer_flag[regno] = 1;
-        }
-      }
-      for (int regno : cfg.sideband.pointer_regnos) {
-        if (regno >= 0 && regno < regno_pointer_flag_length) {
-          regno_pointer_flag[regno] = 1;
-        }
-      }
-    }
   } else {
-    if (regno_pointer_flag != nullptr) {
-      for (int regno : cfg.sideband.pointer_regnos) {
-        if (regno >= 0 && regno < regno_pointer_flag_length) {
-          regno_pointer_flag[regno] = 1;
-        }
+    reg_scan(nullptr, max_reg_num(), 0);
+  }
+  if (regno_pointer_flag != nullptr && regno_pointer_flag_length > 0) {
+    std::memset(regno_pointer_flag, 0, static_cast<size_t>(regno_pointer_flag_length));
+    for (int regno : explicit_ptr_regnos) {
+      if (regno >= 0 && regno < regno_pointer_flag_length) {
+        regno_pointer_flag[regno] = 1;
       }
     }
-    reg_scan(nullptr, max_reg_num(), 0);
+    for (int regno : cfg.sideband.pointer_regnos) {
+      if (regno >= 0 && regno < regno_pointer_flag_length) {
+        regno_pointer_flag[regno] = 1;
+      }
+    }
   }
 
   PopulateMaterializedSidebandState(cfg, first, num_blocks, alloc_regs);

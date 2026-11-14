@@ -1351,7 +1351,7 @@ RightInverseResult RightInverseVerifier::VerifySuffixRightInverse(
     y.pass = RtlPassKind::kGreg;
   }
   if (target_rank <= PassPipelineRank(RtlPassKind::kLreg)) {
-    y = inverses_->InvertAlterReg(y);
+    y = inverses_->InvertAlterReg(y, effective_profile);
     if (y.rpo_blocks.empty()) return step_fail("InvertAlterReg");
     y = inverses_->InvertReload(y);
     if (y.rpo_blocks.empty()) return step_fail("InvertReload");
@@ -1639,11 +1639,12 @@ RightInverseResult RightInverseVerifier::VerifySchedStageRightInverse(
 
 RightInverseResult RightInverseVerifier::VerifyAlterRegRightInverse(
     const RtlControlFlowGraph& allocated_cfg_x) const {
+  const CompilationProfile profile = hooks_->ActiveCompilationProfile();
   std::vector<int> altered_regnos;
   return VerifyRtlPassRightInverse(
       allocated_cfg_x,
-      [this, &altered_regnos](const RtlControlFlowGraph& x) {
-        RtlControlFlowGraph lifted_y = inverses_->InvertAlterReg(x, /*pseudo_regno=*/72);
+      [this, &profile, &altered_regnos](const RtlControlFlowGraph& x) {
+        RtlControlFlowGraph lifted_y = inverses_->InvertAlterReg(x, profile, /*pseudo_regno=*/72);
         altered_regnos.clear();
         for (const auto& [regno, _] : lifted_y.sideband.reg_renumber) {
           if (regno >= kMipsFirstPseudoRegister) {
@@ -1741,10 +1742,11 @@ RightInverseResult RightInverseVerifier::VerifyGlobalAllocRightInverse(
 
 RightInverseResult RightInverseVerifier::VerifyGlobalReloadStageRightInverse(
     const RtlControlFlowGraph& greg_cfg_x) const {
+  const CompilationProfile profile = hooks_->ActiveCompilationProfile();
   return VerifyRtlPassRightInverse(
       greg_cfg_x,
-      [this](const RtlControlFlowGraph& x) {
-        RtlControlFlowGraph pre_alter = inverses_->InvertAlterReg(x, /*pseudo_regno=*/72);
+      [this, &profile](const RtlControlFlowGraph& x) {
+        RtlControlFlowGraph pre_alter = inverses_->InvertAlterReg(x, profile, /*pseudo_regno=*/72);
         if (!x.rpo_blocks.empty() && pre_alter.rpo_blocks.empty()) {
           return RtlControlFlowGraph{};
         }
@@ -2812,7 +2814,7 @@ RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
       cand_pre = inverses_->InvertReload(snap.post_state);
       break;
     case SubfunctionId::kAlterReg:
-      cand_pre = inverses_->InvertAlterReg(snap.post_state);
+      cand_pre = inverses_->InvertAlterReg(snap.post_state, snap_profile);
       break;
     case SubfunctionId::kDoCrossJump:
       cand_pre = inverses_->InvertDoCrossJump(snap.post_state, snap_profile);

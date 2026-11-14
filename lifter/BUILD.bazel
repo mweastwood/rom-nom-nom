@@ -686,11 +686,15 @@ cc_library(
     hdrs = ["invert_alter_reg.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":reconstruct_hard_reg_liveness",
+        "//core:compiler_flags",
         "//core:rtl_cfg",
         "//core:rtl_expr",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/container:inlined_vector",
         "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
@@ -702,8 +706,14 @@ cc_test(
     shard_count = 32,
     deps = [
         ":invert_alter_reg",
+        ":pass00_final_and_gas",
+        ":pass01_dbr_schedule",
+        ":pass02_jump2_cross_jump",
+        ":pass03_sched2_post_reload",
+        "//core:compiler_flags",
         "//core:round_trip_test_cases",
         "//core:rtl_cfg",
+        "//core:rtl_expr",
         "//gcc_harness:function_hooks",
         "//gcc_harness:gcc_context",
         "//gcc_harness:right_inverse_verifier",

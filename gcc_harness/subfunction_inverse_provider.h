@@ -268,6 +268,15 @@ class SubfunctionInverseProvider {
   RtlControlFlowGraph InvertAlterReg(const RtlControlFlowGraph& x) const {
     return InvertAlterReg(x, 72);
   }
+  virtual RtlControlFlowGraph InvertAlterReg(const RtlControlFlowGraph& x,
+                                             const CompilationProfile& /*profile*/,
+                                             int pseudo_regno) const {
+    return InvertAlterReg(x, pseudo_regno);
+  }
+  RtlControlFlowGraph InvertAlterReg(const RtlControlFlowGraph& x,
+                                     const CompilationProfile& profile) const {
+    return InvertAlterReg(x, profile, 72);
+  }
 
   // 13b. Inverse of `reload1.c:reload`.
   virtual RtlControlFlowGraph InvertReload(const RtlControlFlowGraph& /*x*/) const { return {}; }
