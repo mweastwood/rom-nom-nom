@@ -34,11 +34,13 @@ struct ParsedCompilerFlags {
   bool flag_caller_saves = true;
   bool flag_inline_functions = false;
   bool flag_peephole = true;
+  bool flag_float_store = false;
 
   // Target MIPS architecture & ABI flags (`config/mips/mips.h`).
   int mips_isa = 3;
   std::string mcpu = "vr4300";
   bool signed_char = true;
+  bool flag_single_float = false;
   int small_data_threshold = 0;
 
   // KMC binutils 2.6 assembler (`-Wa,...`) flags.

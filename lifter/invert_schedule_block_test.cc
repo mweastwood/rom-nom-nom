@@ -627,6 +627,7 @@ TEST_F(InvertScheduleBlockTest, VerifierRejectsCorruptedScheduleBlockProvider) {
 }
 
 TEST_F(InvertScheduleBlockTest, MultiBlockFallthroughPreservesLabelsWithoutLiveAtStartSideband) {
+  hooks_.ApplyCompilationProfile({.optimize_level = 2, .c_flags = {}});
   RtlControlFlowGraph sched2_cfg;
   sched2_cfg.pass = RtlPassKind::kSched2;
   ASSERT_TRUE(sched2_cfg.sideband.basic_block_live_at_start.empty());
@@ -1009,6 +1010,70 @@ TEST_F(InvertScheduleBlockTest, Sched2RestoresNoConflictExtendClobberAndHiLoSubr
   const gcc_harness::RightInverseResult stage_res =
       verifier_.VerifySched2StageRightInverse(scheduled_with_clobbers);
   EXPECT_TRUE(stage_res.matches) << stage_res.diff_detail;
+}
+
+TEST_F(InvertScheduleBlockTest,
+       Sched2HighPressureDivModPostCallAluAndOutgoingStackArgsRightInverse) {
+  // Exercises all three post-reload `sched2` unscheduling transforms via `RightInverseVerifier`:
+  //   1. `UnscheduleDelayedHiLoReloads`: `divmoddisi4` `mfhi`/`mflo` output reloads delayed across
+  //      independent instructions by `imuldiv` latency;
+  //   2. `UnschedulePostCallHoistedCalleeSavedAlu`: post-call hoisted callee-saved ALU + adjacent
+  //      single-use reload load sunk back before their shared loop consumer;
+  //   3. `UnscheduleSunkPreCallStackStores`: pre-call spilled stack-arg stores + `sched.c:1740`
+  //      `pending_lists_length > 32` `mem/u` prologue load & `-mips1` callee-saved `[load, alu]`
+  //      pairs restored to canonical `.09.greg` order.
+  const std::string src = R"(
+int ProbeCall(int a, int b);
+int EightArgSink(int a, int b, int c, int d, int e, int f, int g, int h);
+
+int DivModSpillPressure(const int* p, int d1, int d2) {
+  int v0 = p[0], v1 = p[1], v2 = p[2], v3 = p[3], v4 = p[4], v5 = p[5];
+  int q1 = v0 / d1, r1 = v0 % d1;
+  int q2 = (v1 + q1) / d2, r2 = (v2 + r1) % d2;
+  return (q1 ^ r2) + (q2 ^ r1) + v3 + v4 + v5;
+}
+
+int LoopCallReloadPair(const int* arr, int n, int seed) {
+  int s0 = arr[0], s1 = arr[1], s2 = arr[2], s3 = arr[3], s4 = arr[4];
+  int s5 = arr[5], s6 = arr[6], s7 = arr[7], acc = seed, i;
+  for (i = 0; i < n; i++) {
+    int c = ProbeCall(i + s0, acc ^ s7);
+    acc = (acc + c + s1) ^ (s2 + s3 - s4 + s5 - s6);
+  }
+  return acc;
+}
+
+int SpillsPlus8Args(const int* p, int k) {
+  int a0 = p[0] + 1, a1 = p[1] - 2, a2 = p[2] + 3, a3 = p[3] - 4;
+  int a4 = p[4] + 5, a5 = p[5] - 6, a6 = p[6] + 7, a7 = p[7] - 8;
+  int a8 = p[8] + 9, a9 = p[9] - 10, a10 = p[10] + 11, a11 = p[11] - 12;
+  int a12 = p[12] + 13, a13 = p[13] - 14;
+  int r = EightArgSink(a0 ^ k, a1 + k, a2 ^ a8, a3 + a9, a4 ^ a10, a5 + a11, a6 ^ a12, a7 + a13);
+  return r + a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12 + a13;
+}
+)";
+
+  for (const auto& flags : {std::vector<std::string>{"-O2", "-mips1", "-funsigned-char", "-Wa,-O2"},
+                            std::vector<std::string>{"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"}}) {
+    for (const char* fn : {"DivModSpillPressure", "LoopCallReloadPair", "SpillsPlus8Args"}) {
+      const auto trace = hooks_.TraceForwardCompilation(src, fn, flags, "sched2_high_pressure");
+      bool found_sched2 = false;
+      for (const auto& snap : trace.subfunction_snapshots) {
+        if (snap.subfunction_id != gcc_harness::SubfunctionId::kScheduleBlockSched2) {
+          continue;
+        }
+        found_sched2 = true;
+        const gcc_harness::RightInverseResult boundary_res =
+            verifier_.VerifySubfunctionBoundaryRightInverse(snap);
+        EXPECT_TRUE(boundary_res.matches) << fn << ": " << boundary_res.diff_detail;
+        hooks_.ApplyCompilationProfile(trace.stage0_input.profile);
+        const gcc_harness::RightInverseResult stage_res =
+            verifier_.VerifySched2StageRightInverse(snap.post_state);
+        EXPECT_TRUE(stage_res.matches) << fn << ": " << stage_res.diff_detail;
+      }
+      EXPECT_TRUE(found_sched2) << fn;
+    }
+  }
 }
 
 class InvertScheduleBlockCorpusTest : public ::testing::TestWithParam<RoundTripTestCase> {

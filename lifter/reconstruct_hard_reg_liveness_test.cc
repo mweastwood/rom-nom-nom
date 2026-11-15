@@ -1254,5 +1254,193 @@ TEST(ReconstructHardRegLivenessTest,
                                   RtlMachineMode::kRegDead, 3));
 }
 
+TEST(ReconstructHardRegLivenessTest,
+     NonAnnulledBackwardLoopExitDelaySlotReturnAndCallerSavedArgExcludedFromFusage) {
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips2", "-mcpu=r4000"});
+
+  // 1. Non-annulled backward branch `SEQUENCE` writing `$2` (`v0`) in its delay slot on
+  //    fallthrough exit: because the branch is NOT annulled (`jump_insn`, not `jump_insn/u`), its
+  //    delay-slot `SET` to `$2` executes on BOTH the backward loop edge (`B1`) and the fallthrough
+  //    exit edge (`B2`), so `$2` reaches `return_internal` on all paths and
+  //    `(use (reg/i:SI 2 v0))` MUST be emitted!
+  RtlControlFlowGraph loop_exit_cfg;
+  loop_exit_cfg.pass = RtlPassKind::kDbr;
+  loop_exit_cfg.rpo_blocks = {
+      MakeBlock(0, false, {"(set (reg:SI 3 v1) (reg:SI 4 a0))"}, {1}),
+      MakeBlock(1, true,
+                {
+                    "(set (reg:SI 3 v1) (plus:SI (reg:SI 3 v1) (const_int -1)))",
+                    "(sequence [(jump_insn (set (pc) (if_then_else (gt:SI (reg:SI 3 v1) "
+                    "(const_int 0)) (label_ref L0) (pc)))) "
+                    "(insn (set (reg:SI 2 v0) (plus:SI (reg:SI 3 v1) (const_int 10))))])",
+                },
+                {1, 2}),
+      MakeBlock(2, false, {"(parallel[ (return) (use (reg:SI 31 ra)) ] )"}, {}),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&loop_exit_cfg, profile_o2);
+  ASSERT_EQ(loop_exit_cfg.rpo_blocks[2].instructions.size(), 2u);
+  EXPECT_TRUE(
+      IsReturnValueUseInsn(loop_exit_cfg.rpo_blocks[2].instructions[0], 2, RtlMachineMode::kSi));
+  EXPECT_TRUE(
+      InsnHasReturnValueSet(loop_exit_cfg.rpo_blocks[1].instructions[1], 2, RtlMachineMode::kSi));
+
+  // 2. Caller-save preserved `$6` (`a2`) written before a 2-arg `CALL_INSN`, saved to `[sp + 16]`
+  //    before the call, and restored from `[sp + 16]` after the call: `$6` is a caller-saved local
+  //    value across the call, NOT a 3rd call argument, so `call_fusage` contains only `$5` and `$4`
+  //    and excludes `(use (reg:SI 6 a2))`.
+  RtlControlFlowGraph caller_save_a2_cfg;
+  caller_save_a2_cfg.pass = RtlPassKind::kDbr;
+  caller_save_a2_cfg.sideband.frame_size_bytes = 24;
+  caller_save_a2_cfg.sideband.saved_gpr_regnos = {31};
+  caller_save_a2_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 29 sp) (minus:SI (reg:SI 29 sp) (const_int 24)))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))) (reg:SI 31 ra))",
+                    "(set (reg:SI 6 a2) (plus:SI (reg:SI 4 a0) (const_int 9)))",
+                    "(set (reg:SI 4 a0) (const_int 1))",
+                    "(set (reg:SI 5 a1) (const_int 2))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 16))) (reg:SI 6 a2))",
+                    "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref \"two_arg_callee\")) "
+                    "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+                    "(set (reg:SI 6 a2) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 16))))",
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 6 a2)))",
+                    "(set (reg:SI 31 ra) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))))",
+                    "(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int 24)))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&caller_save_a2_cfg, profile_o2);
+  ASSERT_TRUE(caller_save_a2_cfg.rpo_blocks[0].rtl_insns[6].has_explicit_call_fusage);
+  ASSERT_EQ(caller_save_a2_cfg.rpo_blocks[0].rtl_insns[6].call_fusage.size(), 2u);
+  EXPECT_EQ(caller_save_a2_cfg.rpo_blocks[0].rtl_insns[6].call_fusage[0].ToGccPrintRtlString(),
+            "(use (reg:SI 5 a1))");
+  EXPECT_EQ(caller_save_a2_cfg.rpo_blocks[0].rtl_insns[6].call_fusage[1].ToGccPrintRtlString(),
+            "(use (reg:SI 4 a0))");
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     OptimizeSkipAnnulledBranchAndTrailingLoopLatchFallthroughReturnUse) {
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips3", "-mcpu=r4000"});
+
+  // 1. `reorg.c:optimize_skip` annulled branch (`jump_insn/u` + `insn/s`, such as
+  //    `bltzl $2, L0; subu $2, $0, $2; L0: jr $31`) where both taken and fallthrough edges enter
+  //    `b + 1` (`successors = {1, 1}`): `$2` is defined on fallthrough before the branch and
+  //    redefined unread in the annulled delay slot on the taken edge, so `(use (reg/i:SI 2 v0))`
+  //    must be emitted in `B1` (`L0:`) and both `SET`s marked `reg/i`.
+  RtlControlFlowGraph opt_skip_cfg;
+  opt_skip_cfg.pass = RtlPassKind::kDbr;
+  opt_skip_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 2 v0) (reg:SI 4 a0))",
+                    "(sequence [(jump_insn/u (set (pc) (if_then_else (lt:SI (reg:SI 2 v0) "
+                    "(const_int 0)) (label_ref L0) (pc)))) "
+                    "(insn/s (set (reg:SI 2 v0) (neg:SI (reg:SI 2 v0))))])",
+                },
+                {1, 1}),
+      MakeBlock(1, true, {"(parallel[ (return) (use (reg:SI 31 ra)) ] )"}, {}),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&opt_skip_cfg, profile_o2);
+  ASSERT_EQ(opt_skip_cfg.rpo_blocks[1].instructions.size(), 2u);
+  EXPECT_TRUE(
+      IsReturnValueUseInsn(opt_skip_cfg.rpo_blocks[1].instructions[0], 2, RtlMachineMode::kSi));
+  EXPECT_TRUE(
+      InsnHasReturnValueSet(opt_skip_cfg.rpo_blocks[0].instructions[0], 2, RtlMachineMode::kSi));
+  EXPECT_TRUE(
+      InsnHasReturnValueSet(opt_skip_cfg.rpo_blocks[0].instructions[1], 2, RtlMachineMode::kSi));
+
+  // 2. Trailing loop-latch conditional branch `SEQUENCE` (`last_blk` ends in a conditional jump
+  //    whose fallthrough exits into the stripped epilogue):
+  //    `(use (reg/i:SI 2 v0))` must be placed in a new unlabeled fallthrough basic block `B2`
+  //    rather than appended after `JUMP_INSN` inside `B1`.
+  RtlControlFlowGraph trailing_latch_cfg;
+  trailing_latch_cfg.pass = RtlPassKind::kDbr;
+  trailing_latch_cfg.sideband.frame_size_bytes = 16;
+  trailing_latch_cfg.sideband.saved_gpr_regnos = {16};
+  trailing_latch_cfg.rpo_blocks = {
+      MakeBlock(0, false, {"(set (reg:SI 16 s0) (reg:SI 4 a0))"}, {1}),
+      MakeBlock(1, true,
+                {
+                    "(set (reg:SI 16 s0) (plus:SI (reg:SI 16 s0) (const_int -1)))",
+                    "(sequence [(jump_insn (set (pc) (if_then_else (gt:SI (reg:SI 16 s0) "
+                    "(const_int 0)) (label_ref L0) (pc)))) "
+                    "(insn (set (reg:SI 2 v0) (reg:SI 16 s0)))])",
+                },
+                {1}),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&trailing_latch_cfg, profile_o2);
+  ASSERT_EQ(trailing_latch_cfg.rpo_blocks.size(), 3u);
+  EXPECT_EQ(trailing_latch_cfg.rpo_blocks[1].successors, (std::vector<size_t>{1, 2}));
+  ASSERT_EQ(trailing_latch_cfg.rpo_blocks[2].instructions.size(), 1u);
+  EXPECT_TRUE(IsReturnValueUseInsn(trailing_latch_cfg.rpo_blocks[2].instructions[0], 2,
+                                   RtlMachineMode::kSi));
+}
+
+TEST(ReconstructHardRegLivenessTest, KnownLibcallAndFprGprArgSlotExclusion) {
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips2"});
+
+  // 1. `optabs.c` `__fixdfdi` takes only `(reg:DF 44 $f12)` under O32 hard-float:
+  //    pre-call scratch writes to `$4` (`mthi $4`) and `$6/$7` (`adddi3`) must NOT
+  //    enter `CALL_INSN_FUNCTION_USAGE`, so `$4` and `$6/$7` receive `REG_DEAD` on
+  //    their last real non-call uses.
+  RtlControlFlowGraph libcall_cfg;
+  libcall_cfg.pass = RtlPassKind::kDbr;
+  libcall_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 4 a0) (ashiftrt:SI (reg:SI 4 a0) (const_int 31)))",
+                    "(set (reg:SI 64 hi) (reg:SI 4 a0))",
+                    "(set (reg:DI 6 a2) (reg:DI 64 hi))",
+                    "(set (reg:SI 16 s0) (plus:SI (reg:SI 16 s0) (reg:SI 6 a2)))",
+                    "(set (reg:SI 17 s1) (plus:SI (reg:SI 17 s1) (reg:SI 7 a3)))",
+                    "(sequence [(call_insn (parallel [(set (reg:DI 2 v0) (call (mem:SI "
+                    "(symbol_ref:SI (\"__fixdfdi\"))) (const_int 0))) (clobber (reg:SI 31 ra))])) "
+                    "(insn (set (reg:DF 44 $f12) (mult:DF (reg:DF 44 $f12) (reg:DF 32 $f0))))])",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&libcall_cfg, profile_o2);
+  EXPECT_TRUE(
+      TopLevelInsnHasNote(libcall_cfg.rpo_blocks[0].instructions[1], RtlMachineMode::kRegDead, 4));
+  EXPECT_TRUE(
+      TopLevelInsnHasNote(libcall_cfg.rpo_blocks[0].instructions[3], RtlMachineMode::kRegDead, 6));
+  EXPECT_TRUE(
+      TopLevelInsnHasNote(libcall_cfg.rpo_blocks[0].instructions[4], RtlMachineMode::kRegDead, 7));
+  ASSERT_TRUE(libcall_cfg.rpo_blocks[0].rtl_insns[5].has_explicit_call_fusage);
+  ASSERT_EQ(libcall_cfg.rpo_blocks[0].rtl_insns[5].call_fusage.size(), 1u);
+  EXPECT_EQ(libcall_cfg.rpo_blocks[0].rtl_insns[5].call_fusage[0].ToGccPrintRtlString(),
+            "(use (reg:DF 44 $f12))");
+
+  // 2. General user call: `$f12` and `$4` both represent `cum->arg_words == 0`
+  //    (`mips.c:function_arg`) and cannot coexist in `CALL_INSN_FUNCTION_USAGE`.
+  //    When `$4` was consumed before the call and `$f12` was written unread for
+  //    the call, `$4` gets `REG_DEAD` on its consuming instruction and is omitted
+  //    from `call_fusage`.
+  RtlControlFlowGraph user_fp_call_cfg;
+  user_fp_call_cfg.pass = RtlPassKind::kDbr;
+  user_fp_call_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 4 a0) (plus:SI (reg:SI 4 a0) (const_int 1)))",
+                    "(set (mem:SI (reg:SI 16 s0)) (reg:SI 4 a0))",
+                    "(set (reg:DF 44 $f12) (mem:DF (reg:SI 16 s0)))",
+                    "(parallel [(set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI "
+                    "(\"user_df_callee\"))) (const_int 16))) (clobber (reg:SI 31 ra))])",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&user_fp_call_cfg, profile_o2);
+  EXPECT_TRUE(TopLevelInsnHasNote(user_fp_call_cfg.rpo_blocks[0].instructions[1],
+                                  RtlMachineMode::kRegDead, 4));
+  ASSERT_TRUE(user_fp_call_cfg.rpo_blocks[0].rtl_insns[3].has_explicit_call_fusage);
+  ASSERT_EQ(user_fp_call_cfg.rpo_blocks[0].rtl_insns[3].call_fusage.size(), 1u);
+  EXPECT_EQ(user_fp_call_cfg.rpo_blocks[0].rtl_insns[3].call_fusage[0].ToGccPrintRtlString(),
+            "(use (reg:DF 44 $f12))");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::lifter

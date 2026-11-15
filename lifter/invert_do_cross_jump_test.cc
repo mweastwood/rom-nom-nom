@@ -1,13 +1,16 @@
 #include "lifter/invert_do_cross_jump.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "absl/status/statusor.h"
 #include "core/round_trip_test_cases.h"
 #include "core/rtl_cfg.h"
+#include "core/rtl_expr.h"
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
 #include "gcc_harness/right_inverse_verifier.h"
@@ -73,6 +76,26 @@ RtlBasicBlock MakeBlock(uint32_t id, bool has_label, std::vector<std::string> in
   return blk;
 }
 
+bool CfgContainsReturnOp(const RtlControlFlowGraph& cfg) {
+  bool found = false;
+  for (const RtlBasicBlock& blk : cfg.rpo_blocks) {
+    EXPECT_EQ(blk.rtl_insns.size(), blk.instructions.size());
+    for (const RtlInsn& rinsn : blk.rtl_insns) {
+      const absl::StatusOr<RtlExpr> expr = rinsn.ParseExpr();
+      EXPECT_TRUE(expr.ok()) << expr.status();
+      if (!expr.ok()) {
+        continue;
+      }
+      expr->Visit([&](const RtlExpr& node) {
+        if (node.op == RtlOp::kReturn) {
+          found = true;
+        }
+      });
+    }
+  }
+  return found;
+}
+
 class InvertDoCrossJumpTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -123,7 +146,8 @@ TEST_F(InvertDoCrossJumpTest, UnmergesCrossJumpedTailBeforeReturn) {
   EXPECT_EQ(pre.pass, RtlPassKind::kSched2);
   EXPECT_EQ(pre.rpo_blocks[1].instructions.size(), 4u);
   EXPECT_EQ(pre.rpo_blocks[2].instructions.size(), 3u);
-  EXPECT_EQ(pre.rpo_blocks[3].instructions.size(), 3u);
+  EXPECT_EQ(pre.rpo_blocks[3].instructions.size(), 2u);
+  EXPECT_EQ(pre.rpo_blocks[3].instructions.back(), "(use (reg/i:SI 2 v0))");
 
   const RightInverseResult res = verifier_.VerifyDoCrossJumpRightInverse(cfg);
   EXPECT_TRUE(res.matches) << res.diff_detail << "\nexpected:\n"
@@ -239,7 +263,7 @@ TEST_F(InvertDoCrossJumpTest, UnmergesMultiPredecessorCrossJumpedTail) {
   EXPECT_EQ(pre.rpo_blocks[1].instructions.size(), 4u);
   EXPECT_EQ(pre.rpo_blocks[3].instructions.size(), 4u);
   EXPECT_EQ(pre.rpo_blocks[4].instructions.size(), 3u);
-  EXPECT_EQ(pre.rpo_blocks[5].instructions.size(), 3u);
+  EXPECT_EQ(pre.rpo_blocks[5].instructions.size(), 2u);
 
   const RightInverseResult res = verifier_.VerifyDoCrossJumpRightInverse(cfg);
   EXPECT_TRUE(res.matches) << res.diff_detail << "\nexpected:\n"
@@ -363,7 +387,7 @@ TEST_F(InvertDoCrossJumpTest, PreservesJoinBlockWhenPredecessorEndsWithCondition
   const RtlControlFlowGraph pre = InvertDoCrossJump(cfg);
   ASSERT_EQ(pre.rpo_blocks.size(), 3u);
   EXPECT_EQ(pre.pass, RtlPassKind::kSched2);
-  EXPECT_EQ(pre.rpo_blocks[2].instructions.size(), 3u);
+  EXPECT_EQ(pre.rpo_blocks[2].instructions.size(), 2u);
 
   const RightInverseResult res = verifier_.VerifyDoCrossJumpRightInverse(cfg);
   EXPECT_TRUE(res.matches) << res.diff_detail << "\nexpected:\n"
@@ -547,7 +571,7 @@ TEST_F(InvertDoCrossJumpTest, RestoresDeletedNoopMdOutputReloadAndPassesRightInv
   const CompilationProfile profile{.optimize_level = 2, .c_flags = {"-O2", "-mips1"}};
   const RtlControlFlowGraph pre_jump2 = InvertDoCrossJump(cfg_jump2, profile);
   ASSERT_EQ(pre_jump2.rpo_blocks.size(), 1u);
-  ASSERT_EQ(pre_jump2.rpo_blocks[0].instructions.size(), 12u);
+  ASSERT_EQ(pre_jump2.rpo_blocks[0].instructions.size(), 11u);
   EXPECT_EQ(pre_jump2.rpo_blocks[0].instructions[7], "(set (reg:DI 64 hi) (reg:DI 10 t2))");
 
   const RightInverseResult res = verifier_.VerifyDoCrossJumpRightInverse(cfg_jump2);
@@ -566,11 +590,172 @@ TEST_F(InvertDoCrossJumpTest, RestoresDeletedNoopMdOutputReloadAndPassesRightInv
 
   const RtlControlFlowGraph pre_stage1 = InvertDoCrossJump(cfg_stage1, profile);
   ASSERT_EQ(pre_stage1.rpo_blocks.size(), 1u);
-  ASSERT_EQ(pre_stage1.rpo_blocks[0].instructions.size(), 12u);
+  ASSERT_EQ(pre_stage1.rpo_blocks[0].instructions.size(), 11u);
   EXPECT_EQ(pre_stage1.rpo_blocks[0].instructions[7], "(set (reg:DI 64 hi) (reg:DI 10 t2))");
   const auto replayed = hooks_.ExecuteSubfunctionBoundary(SubfunctionId::kDoCrossJump, pre_stage1,
                                                           {}, 2, {"-O2", "-mips1"});
   EXPECT_TRUE(replayed.post_state.CompareAgainst(cfg_jump2).MatchesExactly());
+}
+
+TEST_F(InvertDoCrossJumpTest,
+       UnexpandsZeroFramePostReloadTrailingReturnInsnAndPassesBoundaryRightInverse) {
+  // In KMC GCC 2.7.2 MIPS (`mips.md:5928-5941`, `jump.c:289-306`), `.10.sched2`
+  // never contains `return_internal`; `jump2` (`SubfunctionId::kDoCrossJump`)
+  // appends it at the end of a `simple_epilogue_p()` leaf function. Verify
+  // `InvertDoCrossJump` strips the trailing `return_internal` (including `$31`
+  // from `saved_gpr_regnos`) and satisfies both `VerifyDoCrossJumpRightInverse`
+  // and `VerifySubfunctionBoundaryRightInverse(SubfunctionId::kDoCrossJump)`.
+  RtlControlFlowGraph leaf_cfg;
+  leaf_cfg.pass = RtlPassKind::kJump2;
+  leaf_cfg.sideband.saved_gpr_regnos = {2, 4, 31};
+  leaf_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {"(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) "
+                 "(label_ref L0) (pc)))"},
+                {2, 1}),
+      MakeBlock(1, false,
+                {
+                    "(set (reg:SI 6 a2) (const_int 1))",
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 5 a1) (const_int 7)))",
+                    "(set (pc) (label_ref L1))",
+                },
+                {3}),
+      MakeBlock(2, true,
+                {
+                    "(set (reg:SI 6 a2) (const_int 2))",
+                    "(set (reg/i:SI 2 v0) (const_int 9))",
+                },
+                {3}),
+      MakeBlock(3, true, {"(use (reg/i:SI 2 v0))", "(parallel[ (return) (use (reg:SI 31 ra)) ] )"},
+                {}),
+  };
+
+  const RtlControlFlowGraph lifted_leaf = InvertDoCrossJump(leaf_cfg);
+  ASSERT_EQ(lifted_leaf.rpo_blocks.size(), 4u);
+  ASSERT_EQ(lifted_leaf.rpo_blocks[3].instructions.size(), 1u);
+  EXPECT_EQ(lifted_leaf.rpo_blocks[3].instructions[0], "(use (reg/i:SI 2 v0))");
+  EXPECT_FALSE(lifted_leaf.rpo_blocks[3].has_trailing_barrier);
+  EXPECT_EQ(std::find(lifted_leaf.sideband.saved_gpr_regnos.begin(),
+                      lifted_leaf.sideband.saved_gpr_regnos.end(), 31),
+            lifted_leaf.sideband.saved_gpr_regnos.end());
+
+  const RightInverseResult leaf_res = verifier_.VerifyDoCrossJumpRightInverse(leaf_cfg);
+  EXPECT_TRUE(leaf_res.matches) << leaf_res.diff_detail;
+
+  // Negative check: at `-O0` (`jump2` skipped) or when `frame_size_bytes > 0`
+  // (`!simple_epilogue_p()`), trailing `return_internal` is not un-expanded.
+  const RtlControlFlowGraph o0_lifted =
+      InvertDoCrossJump(leaf_cfg, CompilationProfile{.optimize_level = 0});
+  ASSERT_EQ(o0_lifted.rpo_blocks.size(), 4u);
+  EXPECT_EQ(o0_lifted.rpo_blocks[3].instructions.size(), 2u);
+
+  RtlControlFlowGraph framed_cfg = leaf_cfg;
+  framed_cfg.sideband.frame_size_bytes = 8;
+  const RtlControlFlowGraph framed_lifted = InvertDoCrossJump(framed_cfg);
+  ASSERT_EQ(framed_lifted.rpo_blocks.size(), 4u);
+  EXPECT_EQ(framed_lifted.rpo_blocks[3].instructions.size(), 2u);
+
+  // Also verify on a real compiled `SubfunctionId::kDoCrossJump` boundary
+  // snapshot of a zero-frame leaf (`int branch_or(int a, int b) { return a || b; }`)
+  // that `snap.post_state` contains `return_internal`, `InvertDoCrossJump`
+  // strips all `(return)` instructions to `.10.sched2` form, and
+  // `VerifySubfunctionBoundaryRightInverse(snap)` passes (`matches == true`).
+  RoundTripTestCase branch_or_tc;
+  branch_or_tc.test_name = "SyntheticZeroFrameDisjunctionLeaf";
+  branch_or_tc.function_name = "branch_or";
+  branch_or_tc.original_c = "int branch_or(int a, int b) { return a || b; }\n";
+  branch_or_tc.options.c_flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"};
+  const auto trace = hooks_.TraceForwardCompilation(branch_or_tc);
+  bool found_snap = false;
+  for (const auto& snap : trace.subfunction_snapshots) {
+    if (snap.subfunction_id != SubfunctionId::kDoCrossJump) {
+      continue;
+    }
+    found_snap = true;
+    const CompilationProfile prof{snap.optimize_level, snap.c_flags, snap.gp_symbol_sizes};
+    const RtlControlFlowGraph inverted = InvertDoCrossJump(snap.post_state, prof);
+    ASSERT_FALSE(inverted.rpo_blocks.empty());
+    EXPECT_FALSE(CfgContainsReturnOp(inverted)) << inverted.FormatSummary();
+    const RightInverseResult sub_res = verifier_.VerifySubfunctionBoundaryRightInverse(snap);
+    EXPECT_TRUE(sub_res.matches) << sub_res.diff_detail;
+  }
+  EXPECT_TRUE(found_snap);
+}
+
+TEST_F(InvertDoCrossJumpTest,
+       UnexpandsSingleInteriorReturnBeforeTrailingBackwardJumpAndPreservesMultiReturnAssembly) {
+  // 1. When fresh Stage 1 -> Stage 2 composition on a zero-frame leaf with an
+  //    out-of-line trailing backward jump (`B2 -> B1`) leaves the single
+  //    `return_internal` in interior block `B1` (`ret_b < n - 1`),
+  //    `InvertDoCrossJump` replaces `B1`'s `return_internal` with a structured
+  //    jump `(set (pc) (label_ref L2))` to synthesized exit block `B3`
+  //    containing `(use (reg/i:SI 2 v0))`, and replaying through
+  //    `SubfunctionId::kDoCrossJump` produces a canonical `.11.jump2` CFG that
+  //    satisfies `VerifyDoCrossJumpRightInverse`.
+  RtlControlFlowGraph interior_ret_cfg;
+  interior_ret_cfg.pass = RtlPassKind::kJump2;
+  interior_ret_cfg.sideband.saved_gpr_regnos = {2, 4, 31};
+  interior_ret_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {"(set (reg/i:SI 2 v0) (const_int 1))",
+                 "(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) "
+                 "(label_ref L1) (pc)))"},
+                {2, 1}),
+      MakeBlock(1, true,
+                {
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+      MakeBlock(2, true,
+                {
+                    "(set (reg/i:SI 2 v0) (ne:SI (reg:SI 5 a1) (const_int 0)))",
+                    "(set (pc) (label_ref L0))",
+                },
+                {1}),
+  };
+
+  const RtlControlFlowGraph lifted = InvertDoCrossJump(interior_ret_cfg);
+  ASSERT_EQ(lifted.rpo_blocks.size(), 4u) << lifted.FormatSummary();
+  EXPECT_FALSE(CfgContainsReturnOp(lifted)) << lifted.FormatSummary();
+  EXPECT_EQ(lifted.rpo_blocks[1].instructions.back(), "(set (pc) (label_ref L2))");
+  EXPECT_EQ(lifted.rpo_blocks[1].successors, std::vector<size_t>{3u});
+  EXPECT_TRUE(lifted.rpo_blocks[3].has_label);
+  ASSERT_EQ(lifted.rpo_blocks[3].instructions.size(), 1u);
+  EXPECT_EQ(lifted.rpo_blocks[3].instructions[0], "(use (reg/i:SI 2 v0))");
+
+  const auto replayed = hooks_.ExecuteSubfunctionBoundary(SubfunctionId::kDoCrossJump, lifted, {},
+                                                          2, {"-O2", "-mips2", "-mcpu=r4000"});
+  const RightInverseResult canon_res = verifier_.VerifyDoCrossJumpRightInverse(replayed.post_state);
+  EXPECT_TRUE(canon_res.matches) << canon_res.diff_detail;
+
+  // 2. Hand-written zero-frame assembly with 2+ `return_internal` blocks
+  //    (`ret_blocks.size() > 1`, which GCC `jump2` cannot synthesize from a
+  //    `return_internal`-free `.10.sched2`) preserves both `return_internal`s
+  //    and satisfies `VerifyDoCrossJumpRightInverse` directly.
+  RtlControlFlowGraph multi_ret_cfg;
+  multi_ret_cfg.pass = RtlPassKind::kJump2;
+  multi_ret_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {"(set (pc) (if_then_else (ne:SI (reg:SI 4 a0) (const_int 0)) "
+                 "(label_ref L0) (pc)))"},
+                {2, 1}),
+      MakeBlock(1, false,
+                {
+                    "(set (reg/i:SI 2 v0) (const_int -1))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+      MakeBlock(2, true,
+                {
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 4 a0) (const_int 5))) "
+                    "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  const RightInverseResult multi_res = verifier_.VerifyDoCrossJumpRightInverse(multi_ret_cfg);
+  EXPECT_TRUE(multi_res.matches) << multi_res.diff_detail;
 }
 
 class DoCrossJumpCorpusTest : public ::testing::TestWithParam<RoundTripTestCase> {

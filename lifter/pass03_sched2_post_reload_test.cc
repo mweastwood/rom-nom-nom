@@ -747,6 +747,211 @@ TEST_P(Pass03Sched2PostReloadRoundTripTest, RoundTrip4172Cases) {
     EXPECT_EQ(lifted_y3.sideband.frame_size_bytes,
               (snap.pre_state.sideband.frame_size_bytes + 7) & ~7)
         << "Fresh Pass00..Pass03 frame_size_bytes mismatch for " << tc.test_name;
+
+    // Verify that `lifted_y3`:
+    // 1. Never emits a spurious exit `(use (reg/i ...))` when `.09.greg` (`snap.pre_state`) has
+    //    none, and always recovers `(use (reg/i ...))` whenever `.09.greg` has one and `lifted_y3`
+    //    contains a binary-observable unread non-call write to the return register reaching exit
+    //    (e.g., a non-annulled backward-branch delay-slot write to `$v0` on a fallthrough loop
+    //    exit; pure tail-call-like returns `return Callee(...);` with bare `(call ...)` and returns
+    //    whose `$v0` is also consumed by a trailing store `*out = v0; return v0;` are
+    //    binary-indistinguishable from `void` functions).
+    // 2. Never introduces spurious standalone note-only blocks after a single non-jump fallthrough
+    //    predecessor (`NOTE_INSN_LOOP_BEG`).
+    auto find_return_value_use_reg = [](const RtlControlFlowGraph& g) -> int {
+      for (const RtlBasicBlock& blk : g.rpo_blocks) {
+        for (const std::string& pat_s : blk.instructions) {
+          auto pn = ParsePatternAndNotes(pat_s);
+          if (pn.ok() && pn->pattern.op == RtlOp::kUse && pn->pattern.children.size() == 1 &&
+              pn->pattern.children[0].IsReg() && pn->pattern.children[0].flags.integrated) {
+            return pn->pattern.children[0].RegNo();
+          }
+        }
+      }
+      return -1;
+    };
+    auto has_unread_noncall_ret_write_to_exit = [](const RtlControlFlowGraph& g,
+                                                   int ret_regno) -> bool {
+      const size_t n_blocks = g.rpo_blocks.size();
+      if (ret_regno < 0 || n_blocks == 0) {
+        return false;
+      }
+      auto expr_mentions_reg = [ret_regno](const RtlExpr& e) -> bool {
+        bool hit = false;
+        e.Visit([&](const RtlExpr& n) {
+          if (n.IsReg() && n.RegNo() == ret_regno) {
+            hit = true;
+          }
+        });
+        return hit;
+      };
+      auto step_insn = [&](const RtlExpr& pat, bool* is_call, bool* sets_ret,
+                           bool* kills_or_reads) {
+        *is_call = false;
+        *sets_ret = false;
+        *kills_or_reads = false;
+        pat.Visit([&](const RtlExpr& n) {
+          if (n.op == RtlOp::kCall) {
+            *is_call = true;
+          }
+        });
+        auto inspect_elem = [&](const RtlExpr& elem) {
+          if (elem.op == RtlOp::kNote ||
+              (elem.op == RtlOp::kUse && elem.children.size() == 1 && elem.children[0].IsReg() &&
+               elem.children[0].flags.integrated)) {
+            return;
+          }
+          if (elem.IsSet()) {
+            const RtlExpr& dst = elem.SetDest();
+            const RtlExpr& src = elem.SetSrc();
+            const RtlExpr* dst_reg =
+                dst.IsReg() ? &dst
+                            : ((dst.IsSubreg() && !dst.children.empty() && dst.children[0].IsReg())
+                                   ? &dst.children[0]
+                                   : nullptr);
+            if (dst_reg != nullptr && dst_reg->RegNo() == ret_regno) {
+              *sets_ret = true;
+              *kills_or_reads = true;
+            } else if (expr_mentions_reg(dst)) {
+              *kills_or_reads = true;
+            }
+            if (expr_mentions_reg(src)) {
+              *kills_or_reads = true;
+            }
+            return;
+          }
+          if (expr_mentions_reg(elem)) {
+            *kills_or_reads = true;
+          }
+        };
+        if (pat.IsParallel()) {
+          for (const RtlExpr& ch : pat.children) {
+            inspect_elem(ch);
+          }
+        } else if (pat.op == RtlOp::kSequence) {
+          for (const RtlExpr& wrapper : pat.children) {
+            if (!wrapper.children.empty()) {
+              inspect_elem(wrapper.children[0]);
+            }
+          }
+        } else {
+          inspect_elem(pat);
+        }
+        if (*is_call) {
+          *kills_or_reads = true;
+        }
+      };
+
+      std::vector<bool> in_unread(n_blocks, false);
+      bool changed = true;
+      while (changed) {
+        changed = false;
+        for (size_t rev = n_blocks; rev > 0; --rev) {
+          const size_t b = rev - 1;
+          const RtlBasicBlock& blk = g.rpo_blocks[b];
+          bool cur = blk.successors.empty();
+          for (size_t sb : blk.successors) {
+            if (sb < n_blocks && in_unread[sb]) {
+              cur = true;
+            }
+          }
+          for (size_t i = blk.instructions.size(); i > 0; --i) {
+            auto pn = ParsePatternAndNotes(blk.instructions[i - 1]);
+            if (!pn.ok() || pn->pattern.op == RtlOp::kNote) {
+              continue;
+            }
+            bool is_call = false;
+            bool sets_ret = false;
+            bool kills_or_reads = false;
+            step_insn(pn->pattern, &is_call, &sets_ret, &kills_or_reads);
+            if (kills_or_reads) {
+              cur = false;
+            }
+          }
+          if (cur != in_unread[b]) {
+            in_unread[b] = cur;
+            changed = true;
+          }
+        }
+      }
+
+      for (size_t b = 0; b < n_blocks; ++b) {
+        const RtlBasicBlock& blk = g.rpo_blocks[b];
+        bool cur = blk.successors.empty();
+        for (size_t sb : blk.successors) {
+          if (sb < n_blocks && in_unread[sb]) {
+            cur = true;
+          }
+        }
+        for (size_t i = blk.instructions.size(); i > 0; --i) {
+          auto pn = ParsePatternAndNotes(blk.instructions[i - 1]);
+          if (!pn.ok() || pn->pattern.op == RtlOp::kNote) {
+            continue;
+          }
+          bool is_call = false;
+          bool sets_ret = false;
+          bool kills_or_reads = false;
+          step_insn(pn->pattern, &is_call, &sets_ret, &kills_or_reads);
+          if (sets_ret && !is_call && cur) {
+            return true;
+          }
+          if (kills_or_reads) {
+            cur = false;
+          }
+        }
+      }
+      return false;
+    };
+    const int lifted_ret_reg = find_return_value_use_reg(lifted_y3);
+    const int expected_ret_reg = find_return_value_use_reg(snap.pre_state);
+    if (lifted_ret_reg >= 0 && expected_ret_reg >= 0) {
+      EXPECT_EQ(lifted_ret_reg, expected_ret_reg)
+          << "Mismatched exit (use (reg/i ...)) register in fresh lifted_y3 for " << tc.test_name
+          << ":\n"
+          << lifted_y3.FormatSummary();
+    } else if (lifted_ret_reg >= 0 && expected_ret_reg < 0) {
+      // A `void` C function (e.g., hoisting a floating-point subtraction into `$f0` ahead of a
+      // guarded call) is binary-identical to a value-returning function only when an unread
+      // non-call write to `lifted_ret_reg` genuinely reaches exit.
+      EXPECT_TRUE(has_unread_noncall_ret_write_to_exit(lifted_y3, lifted_ret_reg))
+          << "Spurious exit (use (reg/i ...)) without unread return write in fresh lifted_y3 for "
+          << tc.test_name << ":\n"
+          << lifted_y3.FormatSummary();
+    } else if (expected_ret_reg >= 0) {
+      EXPECT_FALSE(has_unread_noncall_ret_write_to_exit(lifted_y3, expected_ret_reg))
+          << "Missing observable exit (use (reg/i ...)) in fresh lifted_y3 for " << tc.test_name
+          << ":\n"
+          << lifted_y3.FormatSummary();
+    }
+
+    for (size_t b = 1; b < lifted_y3.rpo_blocks.size(); ++b) {
+      const RtlBasicBlock& blk = lifted_y3.rpo_blocks[b];
+      if (blk.has_label || blk.instructions.empty()) {
+        continue;
+      }
+      bool all_notes = true;
+      for (const std::string& pat_s : blk.instructions) {
+        auto pn = ParsePatternAndNotes(pat_s);
+        if (!pn.ok() || pn->pattern.op != RtlOp::kNote) {
+          all_notes = false;
+          break;
+        }
+      }
+      if (!all_notes) {
+        continue;
+      }
+      const RtlBasicBlock& prev = lifted_y3.rpo_blocks[b - 1];
+      if (prev.successors.size() == 1 && prev.successors[0] == b && !prev.instructions.empty()) {
+        auto prev_last = ParsePatternAndNotes(prev.instructions.back());
+        const bool prev_ends_in_jump =
+            prev_last.ok() &&
+            ((prev_last->pattern.IsSet() && prev_last->pattern.SetDest().op == RtlOp::kPc) ||
+             prev_last->pattern.op == RtlOp::kReturn);
+        EXPECT_TRUE(prev_ends_in_jump) << "Spurious standalone note-only fallthrough block B" << b
+                                       << " in fresh lifted_y3 on " << tc.test_name << ":\n"
+                                       << lifted_y3.FormatSummary();
+      }
+    }
   }
   EXPECT_TRUE(found_snap) << "Missing kScheduleBlockSched2 snapshot for " << tc.test_name;
 

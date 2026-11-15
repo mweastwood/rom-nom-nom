@@ -479,5 +479,64 @@ TEST(InvertFillSimpleDelaySlotsUnitTest,
   EXPECT_TRUE(saw_folded_hilo_to_v0);
 }
 
+TEST(InvertFillSimpleDelaySlotsUnitTest, CoalescesSplitAndMultiBatchMovstrsiBlockMoves) {
+  // Stage 0/1 reconstructs split `movstrsi_internal2` (`kind=1`, 16B) + `movstrsi_internal3`
+  // (`kind=2`, 16B) and adjacent multi-batch `movstrsi_internal` (`kind=0`, 8B at `+16`) back into
+  // a single canonical 24B `movstrsi_internal` `PARALLEL` so `fill_simple_delay_slots` / `final`
+  // replays identically.
+  RtlControlFlowGraph cfg;
+  cfg.pass = RtlPassKind::kDbr;
+  cfg.sideband.basic_block_live_at_start[0] = {4, 5, 29, 31};
+  cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(parallel[ (set (mem:BLK (reg:SI 4 a0)) (mem:BLK (reg:SI 5 a1))) "
+                    "(clobber (reg:SI 8 t0)) (clobber (reg:SI 9 t1)) "
+                    "(clobber (reg:SI 10 t2)) (clobber (reg:SI 11 t3)) "
+                    "(use (const_int 16)) (use (const_int 4)) (use (const_int 1)) ] )",
+                    "(parallel[ (set (mem:BLK (reg:SI 4 a0)) (mem:BLK (reg:SI 5 a1))) "
+                    "(clobber (reg:SI 8 t0)) (clobber (reg:SI 9 t1)) "
+                    "(clobber (reg:SI 10 t2)) (clobber (reg:SI 11 t3)) "
+                    "(use (const_int 16)) (use (const_int 4)) (use (const_int 2)) ] )",
+                    "(parallel[ (set (mem:BLK (plus:SI (reg:SI 4 a0) (const_int 16))) "
+                    "(mem:BLK (plus:SI (reg:SI 5 a1) (const_int 16)))) "
+                    "(clobber (reg:SI 8 t0)) (clobber (reg:SI 9 t1)) "
+                    "(clobber (reg:SI 2 v0)) (clobber (reg:SI 2 v0)) "
+                    "(use (const_int 8)) (use (const_int 4)) (use (const_int 0)) ] )",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+
+  const CompilationProfile profile{.optimize_level = 2, .c_flags = {"-O2", "-mips2"}};
+  const RtlControlFlowGraph lifted = InvertFillSimpleDelaySlots(cfg, profile);
+  ASSERT_EQ(lifted.rpo_blocks.size(), 1u);
+  ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 2u) << lifted.FormatSummary();
+  const auto merged_pn = ParsePatternAndNotes(lifted.rpo_blocks[0].instructions[0]);
+  ASSERT_TRUE(merged_pn.ok()) << merged_pn.status();
+  ASSERT_EQ(merged_pn->pattern.op, RtlOp::kParallel);
+  ASSERT_EQ(merged_pn->pattern.children.size(), 8u);
+  EXPECT_EQ(merged_pn->pattern.children[5].children[0].IntVal(), 24);
+  EXPECT_EQ(merged_pn->pattern.children[6].children[0].IntVal(), 4);
+  EXPECT_EQ(merged_pn->pattern.children[7].children[0].IntVal(), 0);
+
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  hooks.ApplyCompilationProfile(profile);
+  ctx.BeginFunction("harness_func");
+  ctx.MaterializeFromCfg(lifted);
+  std::string bad_insn;
+  EXPECT_TRUE(hooks.ValidateMaterializedInsnsRecognizable(&bad_insn)) << bad_insn;
+
+  // Also verify right-inverse replay on a real `kFillSimpleDelaySlots` post-state (`24B` unsplit
+  // `movstrsi_internal` at `-O2 -mips2`).
+  const SubfunctionBoundarySnapshot simple_snap = hooks.ExecuteSubfunctionBoundary(
+      SubfunctionId::kFillSimpleDelaySlots, lifted, {}, profile.optimize_level, profile.c_flags);
+  ProductionFillSimpleDelaySlotsProvider provider;
+  RightInverseVerifier verifier(&ctx, &hooks, &provider);
+  const RightInverseResult res = verifier.VerifySubfunctionBoundaryRightInverse(simple_snap);
+  EXPECT_TRUE(res.matches) << res.diff_detail;
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::lifter

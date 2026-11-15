@@ -38,7 +38,10 @@ void SyncAllBlocks(RtlControlFlowGraph* cfg) {
   }
 }
 
-bool IsValidRecoveredHardRegHome(int hard_reg) {
+bool IsValidRecoveredHardRegHome(int hard_reg, bool fp_is_fixed) {
+  if (hard_reg == 30 && !fp_is_fixed) {
+    return true;
+  }
   return hard_reg == -1 || (hard_reg >= 2 && hard_reg <= 25) || (hard_reg >= 32 && hard_reg <= 63);
 }
 
@@ -1251,6 +1254,54 @@ TEST_F(InvertAlterRegTest, PreservesFixedStatusAndAccumulatorHardRegisters) {
   EXPECT_TRUE(res.matches) << res.diff_detail;
 }
 
+TEST_F(InvertAlterRegTest, LiftsGeneralPurposeS8DisjointWebsWhenFramePointerOmitted) {
+  // When `!frame_pointer_needed` and `-fomit-frame-pointer` holds (`-O1+`),
+  // `$30` (`$s8`) is an allocatable callee-saved GPR (`reload1.c:2365`) whose
+  // disjoint DU webs must be lifted to distinct pseudos (`reg_renumber == 30`)
+  // and verified via `VerifyAlterRegRightInverse`.
+  RtlControlFlowGraph cfg;
+  cfg.pass = RtlPassKind::kGreg;
+  cfg.sideband.frame_size_bytes = 16;
+  cfg.sideband.frame_pointer_needed = false;
+  cfg.sideband.saved_gpr_regnos = {30};
+  cfg.rpo_blocks.push_back(RtlBasicBlock{
+      .id = 0,
+      .instructions =
+          {
+              "(set (reg:SI 30 $fp) (plus:SI (reg:SI 4 a0) (const_int 1)))",
+              "(set (reg:SI 8 t0) (ashift:SI (reg:SI 30 $fp) (const_int 2))) "
+              "(expr_list:REG_DEAD (reg:SI 30 $fp) (nil))",
+              "(set (reg:SI 30 $fp) (minus:SI (reg:SI 5 a1) (const_int 3)))",
+              "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 8 t0) (reg:SI 30 $fp))) "
+              "(expr_list:REG_DEAD (reg:SI 8 t0) (expr_list:REG_DEAD (reg:SI 30 $fp) (nil)))",
+              "(use (reg/i:SI 2 v0))",
+          },
+  });
+  SyncAllBlocks(&cfg);
+
+  const RtlControlFlowGraph lifted = InvertAlterReg(cfg, 72);
+  ASSERT_EQ(lifted.rpo_blocks.size(), 1u);
+  int s8_pseudo_count = 0;
+  for (const auto& [p, hard] : lifted.sideband.reg_renumber) {
+    if (hard == 30) {
+      ++s8_pseudo_count;
+    }
+  }
+  EXPECT_EQ(s8_pseudo_count, 2);
+
+  const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+  EXPECT_TRUE(res.matches) << res.diff_detail;
+
+  // Negative check: under `-fno-omit-frame-pointer` (or `frame_pointer_needed`),
+  // `$30` is fixed as `$fp` and must NOT be lifted to a pseudo.
+  const CompilationProfile no_omit_fp{.optimize_level = 2,
+                                      .c_flags = {"-O2", "-fno-omit-frame-pointer"}};
+  const RtlControlFlowGraph lifted_fixed_fp = InvertAlterReg(cfg, no_omit_fp, 72);
+  for (const auto& [_, hard] : lifted_fixed_fp.sideband.reg_renumber) {
+    EXPECT_NE(hard, 30);
+  }
+}
+
 TEST_F(InvertAlterRegTest, RejectsInvalidAndMalformedInputs) {
   RtlControlFlowGraph empty_cfg;
   EXPECT_TRUE(InvertAlterReg(empty_cfg).rpo_blocks.empty());
@@ -1318,6 +1369,66 @@ TEST_F(InvertAlterRegTest, RejectsInvalidAndMalformedInputs) {
   RtlControlFlowGraph bad_ep_delay_cfg = valid_cfg;
   bad_ep_delay_cfg.sideband.epilogue_delay_pattern = "(set (reg:SI -5) (const_int 0))";
   EXPECT_TRUE(InvertAlterReg(bad_ep_delay_cfg).rpo_blocks.empty());
+}
+
+TEST_F(InvertAlterRegTest, LiftsGeneralPurposeS8CalleeSavedPseudoUnderOmitFramePointer) {
+  // Under `-O1+` (`-fomit-frame-pointer` by default on MIPS when
+  // `frame_pointer_needed == false`), `$30` (`$s8` / `fp`) is a general-purpose
+  // callee-saved register allocated by `local-alloc` / `global_alloc` and
+  // rewritten in-place by `alter_reg`. Verify `InvertAlterReg` lifts `$30` to a
+  // pseudo with `reg_renumber == 30` and satisfies `SubfunctionId::kAlterReg`
+  // right-inverse replay (`matches == true`).
+  SubfunctionBoundarySnapshot snap;
+  snap.subfunction_id = SubfunctionId::kAlterReg;
+  snap.optimize_level = 2;
+  snap.c_flags = {"-O2"};
+  snap.post_state.pass = RtlPassKind::kGreg;
+  snap.post_state.sideband.frame_size_bytes = 24;
+  snap.post_state.sideband.outgoing_args_size = 16;
+  snap.post_state.sideband.frame_pointer_needed = false;
+  snap.post_state.sideband.saved_gpr_regnos = {30, 31};
+  snap.post_state.rpo_blocks.push_back(RtlBasicBlock{
+      .id = 0,
+      .instructions =
+          {
+              "(set (reg:SI 30 $fp) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+              "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"helper\"))) "
+              "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+              "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 30 $fp))) "
+              "(expr_list:REG_DEAD (reg:SI 30 $fp) (nil))",
+              "(use (reg/i:SI 2 v0))",
+          },
+  });
+  SyncAllBlocks(&snap.post_state);
+  snap.post_state.rpo_blocks[0].rtl_insns[1].has_explicit_call_fusage = true;
+  snap.post_state.rpo_blocks[0].rtl_insns[1].call_fusage = {
+      RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kSi, 4)),
+  };
+
+  const CompilationProfile o2_profile{snap.optimize_level, snap.c_flags, {}};
+  const RtlControlFlowGraph lifted = InvertAlterReg(snap.post_state, o2_profile, 80);
+  ASSERT_EQ(lifted.rpo_blocks.size(), 1u);
+  bool found_s8_pseudo = false;
+  for (const auto& [pseudo, hr] : lifted.sideband.reg_renumber) {
+    if (hr == 30) {
+      found_s8_pseudo = true;
+    }
+  }
+  EXPECT_TRUE(found_s8_pseudo);
+
+  const RightInverseResult res = verifier_.VerifySubfunctionBoundaryRightInverse(snap);
+  EXPECT_TRUE(res.matches) << res.diff_detail << "\nexpected:\n"
+                           << res.expected_summary << "\nactual:\n"
+                           << res.actual_summary;
+
+  // Negative check: when `frame_pointer_needed == true`, `$30` is the hardware
+  // frame pointer and must NOT be lifted to a general-purpose pseudo.
+  RtlControlFlowGraph fp_needed_cfg = snap.post_state;
+  fp_needed_cfg.sideband.frame_pointer_needed = true;
+  const RtlControlFlowGraph lifted_fp = InvertAlterReg(fp_needed_cfg, o2_profile, 80);
+  for (const auto& [pseudo, hr] : lifted_fp.sideband.reg_renumber) {
+    EXPECT_NE(hr, 30);
+  }
 }
 
 TEST_F(InvertAlterRegTest, VerifierRejectsCorruptedInverseProvider) {
@@ -1388,11 +1499,18 @@ TEST_P(InvertAlterRegCorpusTest, All4172CasesSatisfyBoundaryAndFreshGregRightInv
                              << res.actual_summary;
 
     const CompilationProfile snap_profile{snap.optimize_level, snap.c_flags, snap.gp_symbol_sizes};
+    ParsedCompilerFlags snap_flags;
+    snap_flags.ApplyOptimizationLevelDefaults(snap.optimize_level);
+    if (!snap.c_flags.empty()) {
+      snap_flags = ParsedCompilerFlags::Parse(snap.c_flags);
+    }
+    const bool snap_fp_is_fixed =
+        !snap_flags.flag_omit_frame_pointer || snap.post_state.sideband.frame_pointer_needed;
     const RtlControlFlowGraph lifted_snap = InvertAlterReg(snap.post_state, snap_profile, 72);
     ASSERT_FALSE(lifted_snap.rpo_blocks.empty()) << "Empty lifted_snap on " << tc.test_name;
     for (const auto& [pseudo, hard] : lifted_snap.sideband.reg_renumber) {
       EXPECT_GE(pseudo, 72) << tc.test_name;
-      EXPECT_TRUE(IsValidRecoveredHardRegHome(hard))
+      EXPECT_TRUE(IsValidRecoveredHardRegHome(hard, snap_fp_is_fixed))
           << "Invalid hard reg " << hard << " on " << tc.test_name;
       if (hard >= 0) {
         ASSERT_TRUE(lifted_snap.sideband.reg_n_sets.contains(pseudo)) << tc.test_name;
@@ -1425,9 +1543,16 @@ TEST_P(InvertAlterRegCorpusTest, All4172CasesSatisfyBoundaryAndFreshGregRightInv
   ASSERT_FALSE(lifted_pre_alter.rpo_blocks.empty())
       << "Empty InvertAlterReg on fresh .09.greg for " << tc.test_name;
 
+  ParsedCompilerFlags fresh_flags;
+  fresh_flags.ApplyOptimizationLevelDefaults(trace.stage0_input.profile.optimize_level);
+  if (!trace.stage0_input.profile.c_flags.empty()) {
+    fresh_flags = ParsedCompilerFlags::Parse(trace.stage0_input.profile.c_flags);
+  }
+  const bool fresh_fp_is_fixed =
+      !fresh_flags.flag_omit_frame_pointer || fresh_greg.sideband.frame_pointer_needed;
   for (const auto& [pseudo, hard] : lifted_pre_alter.sideband.reg_renumber) {
     EXPECT_GE(pseudo, 72) << tc.test_name;
-    EXPECT_TRUE(IsValidRecoveredHardRegHome(hard))
+    EXPECT_TRUE(IsValidRecoveredHardRegHome(hard, fresh_fp_is_fixed))
         << "Invalid hard reg " << hard << " in fresh .09.greg for " << tc.test_name;
     ASSERT_TRUE(lifted_pre_alter.sideband.reg_n_refs.contains(pseudo)) << tc.test_name;
     EXPECT_GE(lifted_pre_alter.sideband.reg_n_refs.at(pseudo), 1) << tc.test_name;

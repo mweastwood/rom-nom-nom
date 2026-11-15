@@ -130,10 +130,18 @@ ParsedCompilerFlags ParsedCompilerFlags::Parse(absl::Span<const std::string> fla
       flags.flag_peephole = true;
     } else if (token == "-fno-peephole") {
       flags.flag_peephole = false;
+    } else if (token == "-ffloat-store") {
+      flags.flag_float_store = true;
+    } else if (token == "-fno-float-store") {
+      flags.flag_float_store = false;
     } else if (token == "-signed-char" || token == "-fsigned-char") {
       flags.signed_char = true;
     } else if (token == "-unsigned-char" || token == "-funsigned-char") {
       flags.signed_char = false;
+    } else if (token == "-msingle-float" || token == "-m4650") {
+      flags.flag_single_float = true;
+    } else if (token == "-mdouble-float") {
+      flags.flag_single_float = false;
     } else if (token == "-mips1") {
       flags.mips_isa = 1;
     } else if (token == "-mips2") {

@@ -5,15 +5,22 @@
 
 namespace rom_nom_nom::lifter {
 
-// Right-inverse $g_{\text{do\_cross\_jump}}$ of GCC 2.7.2's
-// `jump.c:do_cross_jump` + `find_cross_jump` (invoked during Stage 2
-// `.10.sched2 -> .11.jump2` via `jump_optimize(insns, /*cross_jump=*/1, ...)`).
+// Right-inverse $g_{\text{do\_cross\_jump}}$ of GCC 2.7.2's post-reload `jump2`
+// subfunction boundary (`SubfunctionId::kDoCrossJump`,
+// `jump.c:jump_optimize(insns, /*cross_jump=*/1, /*noop_moves=*/1,
+// /*after_regscan=*/0)`).
 //
 // Given a post-`jump2` control-flow graph `jump2_cfg_x` (`RtlPassKind::kJump2`),
 // reconstructs a pre-`jump2` (`.10.sched2`, `RtlPassKind::kSched2`)
-// control-flow graph by un-merging cross-jumped tail instructions from a join
-// block back into its incoming predecessors such that executing
-// `jump_optimize` with `cross_jump = 1` reproduces `jump2_cfg_x` bit-for-bit.
+// control-flow graph by:
+//   1. Un-merging cross-jumped tail instructions (`find_cross_jump` /
+//      `do_cross_jump`) from join blocks back into incoming predecessors,
+//   2. Restoring `noop_moves` death notes and deleted call-arg / HI-LO moves,
+//   3. Un-expanding post-reload `HAVE_return` trailing `return_internal`
+//      insertions (`jump.c:289-306, 2065-2081`) on zero-frame
+//      `simple_epilogue_p()` leaf functions,
+// such that executing `SubfunctionId::kDoCrossJump` reproduces `jump2_cfg_x`
+// bit-for-bit.
 //
 // Returns an empty `RtlControlFlowGraph` if `jump2_cfg_x` has no basic blocks
 // or contains malformed RTL instruction patterns or out-of-range edges.

@@ -703,29 +703,161 @@ void CollectExistingDiEvenRegs(const std::vector<std::vector<RtlPatternAndNotes>
   }
 }
 
+struct ParsedMovstrsiInsn {
+  int dst_base = -1;
+  int64_t dst_off = 0;
+  int src_base = -1;
+  int64_t src_off = 0;
+  int clobbers[4] = {-1, -1, -1, -1};
+  int64_t bytes = 0;
+  int64_t align = 0;
+  int64_t kind = -1;
+};
+
+bool ParseMovstrsiInsn(const RtlExpr& pat, ParsedMovstrsiInsn* out) {
+  if (pat.op != RtlOp::kParallel || pat.children.size() != 8 || !pat.children[0].IsSet()) {
+    return false;
+  }
+  const RtlExpr& dst_mem = pat.children[0].SetDest();
+  const RtlExpr& src_mem = pat.children[0].SetSrc();
+  if (!dst_mem.IsMem() || dst_mem.mode != RtlMachineMode::kBlk || dst_mem.children.size() != 1 ||
+      !src_mem.IsMem() || src_mem.mode != RtlMachineMode::kBlk || src_mem.children.size() != 1) {
+    return false;
+  }
+  ParsedMovstrsiInsn info;
+  if (!ExtractBasePlusConstAddr(dst_mem.children[0], &info.dst_base, &info.dst_off) ||
+      !ExtractBasePlusConstAddr(src_mem.children[0], &info.src_base, &info.src_off)) {
+    return false;
+  }
+  for (size_t k = 0; k < 4; ++k) {
+    const RtlExpr& clob = pat.children[1 + k];
+    if (clob.op != RtlOp::kClobber || clob.children.size() != 1 || !clob.children[0].IsReg()) {
+      return false;
+    }
+    info.clobbers[k] = clob.children[0].RegNo();
+  }
+  for (size_t k = 5; k <= 7; ++k) {
+    if (pat.children[k].op != RtlOp::kUse || pat.children[k].children.size() != 1 ||
+        !pat.children[k].children[0].IsConstInt()) {
+      return false;
+    }
+  }
+  info.bytes = pat.children[5].children[0].int_val;
+  info.align = pat.children[6].children[0].int_val;
+  info.kind = pat.children[7].children[0].int_val;
+  *out = info;
+  return true;
+}
+
+bool TryCoalesceMultiBatchMovstrsiInBlock(std::vector<RtlPatternAndNotes>* insns, bool gp64,
+                                          bool mark_newly_folded_sentinel) {
+  bool changed = false;
+  const int64_t max_move_bytes = 4 * (gp64 ? 8 : 4);
+  size_t i = 0;
+  while (i + 1 < insns->size()) {
+    ParsedMovstrsiInsn a;
+    ParsedMovstrsiInsn b;
+    if (ParseMovstrsiInsn((*insns)[i].pattern, &a) &&
+        ParseMovstrsiInsn((*insns)[i + 1].pattern, &b) && a.kind == 0 && b.kind == 0 &&
+        a.align == b.align && a.bytes == max_move_bytes && b.bytes > 0 &&
+        a.bytes + b.bytes <= 2 * max_move_bytes && a.dst_base == b.dst_base &&
+        a.src_base == b.src_base && b.dst_off == a.dst_off + a.bytes &&
+        b.src_off == a.src_off + a.bytes) {
+      RtlExpr merged = (*insns)[i].pattern;
+      merged.children[5] = RtlExpr::MakeUse(RtlExpr::MakeConstInt(a.bytes + b.bytes));
+      (*insns)[i] = MakeFoldedInsn(std::move(merged), mark_newly_folded_sentinel);
+      insns->erase(insns->begin() + static_cast<ptrdiff_t>(i + 1));
+      changed = true;
+      continue;
+    }
+    ++i;
+  }
+  return changed;
+}
+
 bool TryRecombineAdjacentSplitMovstrsiInBlock(std::vector<RtlPatternAndNotes>* insns,
-                                              bool mark_newly_folded_sentinel) {
+                                              bool mark_newly_folded_sentinel, bool gp64) {
   bool changed = false;
   for (size_t i = 0; i + 1 < insns->size(); ++i) {
     const RtlExpr& p0 = (*insns)[i].pattern;
-    const RtlExpr& p1 = (*insns)[i + 1].pattern;
-    if (!IsMovstrsiSplitPart(p0, 1) || !IsMovstrsiSplitPart(p1, 2)) {
+    if (!IsMovstrsiSplitPart(p0, 1)) {
       continue;
     }
-    bool same_operands = true;
-    for (size_t k = 0; k < 7; ++k) {
-      if (p0.children[k] != p1.children[k]) {
-        same_operands = false;
+    ParsedMovstrsiInsn first;
+    const bool parsed_first = ParseMovstrsiInsn(p0, &first);
+    for (size_t j = i + 1; j < insns->size(); ++j) {
+      const RtlExpr& pj = (*insns)[j].pattern;
+      bool matched = false;
+      if (IsMovstrsiSplitPart(pj, 2)) {
+        bool same_operands = true;
+        for (size_t k = 0; k < 7; ++k) {
+          if (p0.children[k] != pj.children[k]) {
+            same_operands = false;
+            break;
+          }
+        }
+        if (same_operands) {
+          matched = true;
+        } else if (parsed_first) {
+          ParsedMovstrsiInsn second;
+          if (ParseMovstrsiInsn(pj, &second) && second.dst_base == first.dst_base &&
+              second.align == first.align) {
+            if (second.dst_off == first.dst_off && second.bytes == first.bytes) {
+              matched = true;
+            } else if (first.align == 1 && first.bytes >= 4 && (first.bytes % 4) == 0 &&
+                       (first.bytes / 4) <= 4 && second.bytes == 4 &&
+                       second.dst_off == first.dst_off + first.bytes - 4 &&
+                       second.clobbers[0] == first.clobbers[(first.bytes / 4) - 1]) {
+              matched = true;
+            }
+          }
+        }
+      } else if (parsed_first && first.align == 1 && (first.bytes % 4) != 0) {
+        const int64_t used_slots = (first.bytes / 4) + (first.bytes % 4);
+        int sk_reg = -1;
+        int sk_base = -1;
+        int64_t sk_off = -1;
+        int sk_w = 0;
+        if (used_slots >= 1 && used_slots <= 4 &&
+            MatchMovstrStore(pj, &sk_reg, &sk_base, &sk_off, &sk_w) && sk_w == 1 &&
+            sk_base == first.dst_base && sk_off == first.dst_off + first.bytes - 1 &&
+            sk_reg == first.clobbers[used_slots - 1]) {
+          matched = true;
+        }
+      }
+
+      if (matched) {
+        RtlExpr merged = p0;
+        merged.children[7].children[0].int_val = 0;
+        (*insns)[i] = MakeFoldedInsn(std::move(merged), mark_newly_folded_sentinel);
+        insns->erase(insns->begin() + static_cast<ptrdiff_t>(j));
+        changed = true;
+        break;
+      }
+
+      bool has_mem = false;
+      pj.Visit([&](const RtlExpr& n) {
+        if (n.IsMem()) {
+          has_mem = true;
+        }
+      });
+      if (has_mem || pj.op == RtlOp::kSequence || IsAnyJumpOrReturnTopExpr(pj) ||
+          ExprContainsCall(pj) || ExprHasVolatileOrAsm(pj)) {
+        break;
+      }
+      if (parsed_first) {
+        MipsHardRegSet defs_j;
+        MipsHardRegSet uses_j;
+        CollectHardRegDefsAndUses(pj, gp64, /*fp64=*/false, &defs_j, &uses_j);
+        if (defs_j.Test(first.dst_base) || defs_j.Test(first.src_base)) {
+          break;
+        }
+      } else {
         break;
       }
     }
-    if (!same_operands) {
-      continue;
-    }
-    RtlExpr merged = p0;
-    merged.children[7].children[0].int_val = 0;
-    (*insns)[i] = MakeFoldedInsn(std::move(merged), mark_newly_folded_sentinel);
-    insns->erase(insns->begin() + static_cast<ptrdiff_t>(i + 1));
+  }
+  if (TryCoalesceMultiBatchMovstrsiInBlock(insns, gp64, mark_newly_folded_sentinel)) {
     changed = true;
   }
   return changed;
@@ -1786,6 +1918,59 @@ bool TryFoldMovstrsiBlockMovesInBlock(const RtlControlFlowGraph& cfg, size_t b,
       }
     }
   }
+
+  if (TryCoalesceMultiBatchMovstrsiInBlock(insns, options.gp64,
+                                           options.mark_newly_folded_sentinel)) {
+    live_after =
+        ComputeBlockHardRegLiveAfter(cfg, b, *insns, options.gp64, options.fp64, epilogue_delay_pn);
+    changed = true;
+  }
+
+  // Sanitize any padded earlyclobber `"=&d"` scratch operands on
+  // `movstrsi_internal` (`kind == 0`, e.g. `align == 1` moves disassembled by
+  // `InvertFinalScanInsn` where trailing clobber slots were padded with
+  // `src_base`) so all 4 clobber registers are distinct GPRs non-overlapping
+  // `src_base` and `dst_base` (`local-alloc.c:1553-1557`), without perturbing
+  // distinct clobber registers already present in `.12.dbr` snapshots.
+  for (size_t pos = 0; pos < insns->size(); ++pos) {
+    ParsedMovstrsiInsn info;
+    if (!ParseMovstrsiInsn((*insns)[pos].pattern, &info) || info.kind != 0) {
+      continue;
+    }
+    MipsHardRegSet forbidden;
+    forbidden.Set(info.src_base);
+    forbidden.Set(info.dst_base);
+    std::vector<size_t> slots_to_fix;
+    for (size_t k = 0; k < 4; ++k) {
+      const int hr = info.clobbers[k];
+      if (hr < 2 || hr >= 32 || forbidden.Test(hr)) {
+        slots_to_fix.push_back(k);
+      } else {
+        forbidden.Set(hr);
+      }
+    }
+    if (slots_to_fix.empty()) {
+      continue;
+    }
+    RtlExpr updated = (*insns)[pos].pattern;
+    bool all_fixed = true;
+    for (size_t k : slots_to_fix) {
+      const int extra = PickDeadCallerSavedGpr(live_after[pos], forbidden);
+      if (extra < 2) {
+        all_fixed = false;
+        break;
+      }
+      updated.children[1 + k] = RtlExpr::MakeClobber(RtlExpr::MakeReg(RtlMachineMode::kSi, extra));
+      forbidden.Set(extra);
+    }
+    if (all_fixed) {
+      (*insns)[pos] = MakeFoldedInsn(std::move(updated), options.mark_newly_folded_sentinel);
+      live_after = ComputeBlockHardRegLiveAfter(cfg, b, *insns, options.gp64, options.fp64,
+                                                epilogue_delay_pn);
+      changed = true;
+    }
+  }
+
   return changed;
 }
 

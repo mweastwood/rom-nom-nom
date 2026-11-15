@@ -52,17 +52,6 @@ int RegWordsSize(RtlMachineMode mode, bool gp64) {
   return std::max(1, (MipsModeByteSize(mode) + unit_bytes - 1) / unit_bytes);
 }
 
-bool IsCallPattern(const RtlExpr& pat) {
-  if (pat.op == RtlOp::kCall || (pat.IsSet() && pat.SetSrc().op == RtlOp::kCall)) {
-    return true;
-  }
-  if (pat.IsParallel() && !pat.children.empty()) {
-    const RtlExpr& c0 = pat.children[0];
-    return c0.op == RtlOp::kCall || (c0.IsSet() && c0.SetSrc().op == RtlOp::kCall);
-  }
-  return false;
-}
-
 bool IsReturnJumpPattern(const RtlExpr& pat) {
   if (pat.op == RtlOp::kReturn) {
     return true;
@@ -780,6 +769,37 @@ void ReconstructRtlLiveness(RtlControlFlowGraph* cfg, const CompilationProfile& 
     return;
   }
 
+  struct SavedPhantomPseudo {
+    int regno = 0;
+    int refs = 0;
+    int deaths = 0;
+    int live_length = 0;
+  };
+  std::vector<SavedPhantomPseudo> saved_phantoms;
+  if (options.preserve_phantom_pseudos) {
+    for (const auto& [r, refs] : cfg->sideband.reg_n_refs) {
+      if (r < kMipsFirstPseudoRegister || refs <= 0) {
+        continue;
+      }
+      if (auto ren_it = cfg->sideband.reg_renumber.find(r);
+          ren_it != cfg->sideband.reg_renumber.end() && ren_it->second >= 0) {
+        continue;
+      }
+      if (auto set_it = cfg->sideband.reg_n_sets.find(r);
+          set_it != cfg->sideband.reg_n_sets.end() && set_it->second != 0) {
+        continue;
+      }
+      const auto d_it = cfg->sideband.reg_n_deaths.find(r);
+      const auto l_it = cfg->sideband.reg_live_length.find(r);
+      saved_phantoms.push_back(SavedPhantomPseudo{
+          .regno = r,
+          .refs = refs,
+          .deaths = (d_it != cfg->sideband.reg_n_deaths.end()) ? d_it->second : 0,
+          .live_length = (l_it != cfg->sideband.reg_live_length.end()) ? l_it->second : 0,
+      });
+    }
+  }
+
   cfg->sideband.basic_block_live_at_start.clear();
   cfg->sideband.reg_n_refs.clear();
   cfg->sideband.reg_n_sets.clear();
@@ -1275,6 +1295,21 @@ void ReconstructRtlLiveness(RtlControlFlowGraph* cfg, const CompilationProfile& 
     if (env.reg_n_calls_crossed[r] > 0) {
       cfg->sideband.reg_n_calls_crossed[r] = env.reg_n_calls_crossed[r];
     }
+  }
+
+  for (const SavedPhantomPseudo& ph : saved_phantoms) {
+    if (cfg->sideband.reg_n_refs.contains(ph.regno) ||
+        cfg->sideband.reg_n_sets.contains(ph.regno)) {
+      continue;
+    }
+    cfg->sideband.reg_n_refs[ph.regno] = ph.refs;
+    if (ph.deaths != 0) {
+      cfg->sideband.reg_n_deaths[ph.regno] = ph.deaths;
+    }
+    if (ph.live_length > 0) {
+      cfg->sideband.reg_live_length[ph.regno] = ph.live_length;
+    }
+    cfg->sideband.max_regno = std::max(cfg->sideband.max_regno, ph.regno + 1);
   }
 }
 

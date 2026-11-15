@@ -1396,6 +1396,23 @@ void RtlExpr::SetRegNo(int new_regno) {
   }
 }
 
+bool RtlExpr::IsCallPattern() const {
+  if (op == RtlOp::kCall) {
+    return true;
+  }
+  if (op == RtlOp::kSet && children.size() >= 2 && children[1].op == RtlOp::kCall) {
+    return true;
+  }
+  if (op == RtlOp::kParallel) {
+    for (const RtlExpr& elem : children) {
+      if (elem.IsCallPattern()) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 bool RtlExpr::IsComparison() const {
   switch (op) {
     case RtlOp::kEq:

@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -188,17 +189,6 @@ void DetectRegisterWidthFlags(const RtlControlFlowGraph& cfg, const CompilationP
   }
 }
 
-bool IsCallPattern(const RtlExpr& pat) {
-  if (pat.op == RtlOp::kCall || (pat.IsSet() && pat.SetSrc().op == RtlOp::kCall)) {
-    return true;
-  }
-  if (pat.IsParallel() && !pat.children.empty()) {
-    const RtlExpr& c0 = pat.children[0];
-    return c0.op == RtlOp::kCall || (c0.IsSet() && c0.SetSrc().op == RtlOp::kCall);
-  }
-  return false;
-}
-
 bool IsReturnJumpPattern(const RtlExpr& pat) {
   if (pat.op == RtlOp::kReturn) {
     return true;
@@ -209,6 +199,21 @@ bool IsReturnJumpPattern(const RtlExpr& pat) {
   if (pat.op == RtlOp::kSequence && !pat.children.empty() &&
       pat.children[0].op == RtlOp::kJumpInsn && !pat.children[0].children.empty()) {
     return IsReturnJumpPattern(pat.children[0].children[0]);
+  }
+  return false;
+}
+
+bool IsConditionalJumpPattern(const RtlExpr& pat) {
+  if (pat.IsSet() && pat.SetDest().op == RtlOp::kPc) {
+    return pat.SetSrc().op == RtlOp::kIfThenElse;
+  }
+  if (pat.IsParallel() && !pat.children.empty() && pat.children[0].IsSet() &&
+      pat.children[0].SetDest().op == RtlOp::kPc) {
+    return pat.children[0].SetSrc().op == RtlOp::kIfThenElse;
+  }
+  if (pat.op == RtlOp::kSequence && !pat.children.empty() &&
+      pat.children[0].op == RtlOp::kJumpInsn && !pat.children[0].children.empty()) {
+    return IsConditionalJumpPattern(pat.children[0].children[0]);
   }
   return false;
 }
@@ -408,6 +413,14 @@ ElemSummary SummarizeSingleElem(const RtlPatternAndNotes& pn, bool force_call, b
     *pending_arg_defs = 0;
   } else if (pat.op != RtlOp::kNote) {
     *pending_arg_defs &= ~(s.defs & ~s.explicit_sets);
+    if (!fp64) {
+      for (int even_fpr : {44, 46}) {
+        if ((s.explicit_sets & (RegMask{1} << even_fpr)) != 0 &&
+            (s.explicit_sets & (RegMask{1} << (even_fpr + 1))) == 0) {
+          *pending_arg_defs &= ~(RegMask{1} << (even_fpr + 1));
+        }
+      }
+    }
     *pending_arg_defs |= (s.explicit_sets & kArgRegMask);
   }
   return s;
@@ -440,6 +453,118 @@ struct DataflowResult {
   std::vector<RegMask> live_out;
   std::vector<std::vector<InsnSummary>> block_summaries;
 };
+
+std::string ExtractCalleeSymbolRef(const RtlExpr& pat) {
+  const RtlExpr* call_node = nullptr;
+  if (pat.op == RtlOp::kCall) {
+    call_node = &pat;
+  } else if (pat.IsSet() && pat.SetSrc().op == RtlOp::kCall) {
+    call_node = &pat.SetSrc();
+  } else if (pat.IsParallel() && !pat.children.empty()) {
+    const RtlExpr& c0 = pat.children[0];
+    if (c0.op == RtlOp::kCall) {
+      call_node = &c0;
+    } else if (c0.IsSet() && c0.SetSrc().op == RtlOp::kCall) {
+      call_node = &c0.SetSrc();
+    }
+  }
+  if (call_node != nullptr && !call_node->children.empty() && call_node->children[0].IsMem() &&
+      !call_node->children[0].children.empty() &&
+      call_node->children[0].children[0].IsSymbolRef()) {
+    return std::string(call_node->children[0].children[0].SymbolName());
+  }
+  return "";
+}
+
+// Returns the exact `CALL_INSN_FUNCTION_USAGE` argument register mask emitted
+// by KMC GCC 2.7.2 (`optabs.c:1509-1525, 3945-4297` and `mips.c:function_arg`)
+// for compiler-generated `libgcc` optab runtime calls, or `std::nullopt` for
+// user/external function symbols.
+std::optional<RegMask> LookupKnownGccLibcallArgMask(std::string_view sym, bool gp64, bool fp64,
+                                                    const CompilationProfile* profile) {
+  if (sym.size() < 4 || sym.substr(0, 2) != "__") {
+    return std::nullopt;
+  }
+  bool soft_float = false;
+  bool single_float = false;
+  if (profile != nullptr) {
+    std::vector<std::string> tokens;
+    tokens.reserve(profile->c_flags.size() + 1);
+    tokens.push_back(absl::StrCat("-O", profile->optimize_level));
+    tokens.insert(tokens.end(), profile->c_flags.begin(), profile->c_flags.end());
+    const ParsedCompilerFlags flags = ParsedCompilerFlags::Parse(tokens);
+    single_float = flags.flag_single_float;
+    for (const std::string& tok : profile->c_flags) {
+      if (tok == "-msoft-float") {
+        soft_float = true;
+      } else if (tok == "-mhard-float") {
+        soft_float = false;
+      }
+    }
+  }
+
+  // Unary SFmode -> * (`optabs.c:4117, 4131, 4197, 4267-4268, 4283-4284`).
+  if (sym == "__fixsfsi" || sym == "__fixsfdi" || sym == "__fixunssfsi" || sym == "__fixunssfdi" ||
+      sym == "__extendsfdf2" || sym == "__ftruncsf2" || sym == "__negsf2") {
+    return RegBitMask(soft_float ? 4 : 44, RtlMachineMode::kSf, gp64, fp64);
+  }
+  // Unary DFmode -> * (`optabs.c:4117, 4131, 4203, 4271-4272, 4287-4288`).
+  if (sym == "__fixdfsi" || sym == "__fixdfdi" || sym == "__fixunsdfsi" || sym == "__fixunsdfdi" ||
+      sym == "__truncdfsf2" || sym == "__ftruncdf2" || sym == "__negdf2") {
+    return RegBitMask((soft_float || single_float) ? 4 : 44, RtlMachineMode::kDf, gp64, fp64);
+  }
+  // Unary SImode -> * (`optabs.c:4130, 4132-4133, 4251, 4255`).
+  if (sym == "__floatsisf" || sym == "__floatsidf" || sym == "__negsi2" || sym == "__one_cmplsi2" ||
+      sym == "__ffssi2") {
+    return RegBitMask(4, RtlMachineMode::kSi, gp64, fp64);
+  }
+  // Unary DImode -> * (`optabs.c:4130, 4132-4133, 4252, 4256`).
+  if (sym == "__floatdisf" || sym == "__floatdidf" || sym == "__negdi2" || sym == "__one_cmpldi2" ||
+      sym == "__ffsdi2") {
+    return RegBitMask(4, RtlMachineMode::kDi, gp64, fp64);
+  }
+  // Binary SImode (`optabs.c:4104-4137`).
+  if (sym == "__addsi3" || sym == "__subsi3" || sym == "__mulsi3" || sym == "__divsi3" ||
+      sym == "__udivsi3" || sym == "__modsi3" || sym == "__umodsi3" || sym == "__andsi3" ||
+      sym == "__iorsi3" || sym == "__xorsi3" || sym == "__ashlsi3" || sym == "__ashrsi3" ||
+      sym == "__lshrsi3" || sym == "__cmpsi2" || sym == "__ucmpsi2") {
+    return RegBitMask(4, RtlMachineMode::kSi, gp64, fp64) |
+           RegBitMask(5, RtlMachineMode::kSi, gp64, fp64);
+  }
+  // Binary DImode shifts take `(DImode, word_mode)` (`optabs.c:1509-1515`).
+  if (sym == "__ashldi3" || sym == "__ashrdi3" || sym == "__lshrdi3") {
+    return RegBitMask(4, RtlMachineMode::kDi, gp64, fp64) |
+           RegBitMask(gp64 ? 5 : 6, gp64 ? RtlMachineMode::kDi : RtlMachineMode::kSi, gp64, fp64);
+  }
+  // Binary DImode non-shift (`optabs.c:4104-4137`).
+  if (sym == "__adddi3" || sym == "__subdi3" || sym == "__muldi3" || sym == "__divdi3" ||
+      sym == "__udivdi3" || sym == "__moddi3" || sym == "__umoddi3" || sym == "__anddi3" ||
+      sym == "__iordi3" || sym == "__xordi3" || sym == "__cmpdi2" || sym == "__ucmpdi2" ||
+      sym == "__mindi3" || sym == "__maxdi3" || sym == "__umindi3" || sym == "__umaxdi3") {
+    return RegBitMask(4, RtlMachineMode::kDi, gp64, fp64) |
+           RegBitMask(gp64 ? 5 : 6, RtlMachineMode::kDi, gp64, fp64);
+  }
+  // Binary SFmode (`optabs.c:4105-4138, 4223-4228`).
+  if (sym == "__addsf3" || sym == "__subsf3" || sym == "__mulsf3" || sym == "__divsf3" ||
+      sym == "__eqsf2" || sym == "__nesf2" || sym == "__gtsf2" || sym == "__gesf2" ||
+      sym == "__ltsf2" || sym == "__lesf2" || sym == "__cmpsf2") {
+    return soft_float ? (RegBitMask(4, RtlMachineMode::kSf, gp64, fp64) |
+                         RegBitMask(5, RtlMachineMode::kSf, gp64, fp64))
+                      : (RegBitMask(44, RtlMachineMode::kSf, gp64, fp64) |
+                         RegBitMask(46, RtlMachineMode::kSf, gp64, fp64));
+  }
+  // Binary DFmode (`optabs.c:4105-4138, 4230-4235`).
+  if (sym == "__adddf3" || sym == "__subdf3" || sym == "__muldf3" || sym == "__divdf3" ||
+      sym == "__eqdf2" || sym == "__nedf2" || sym == "__gtdf2" || sym == "__gedf2" ||
+      sym == "__ltdf2" || sym == "__ledf2" || sym == "__cmpdf2") {
+    return (soft_float || single_float)
+               ? (RegBitMask(4, RtlMachineMode::kDf, gp64, fp64) |
+                  RegBitMask(gp64 ? 5 : 6, RtlMachineMode::kDf, gp64, fp64))
+               : (RegBitMask(44, RtlMachineMode::kDf, gp64, fp64) |
+                  RegBitMask(46, RtlMachineMode::kDf, gp64, fp64));
+  }
+  return std::nullopt;
+}
 
 // Accounts for `jump.c:434-465` (`jump_optimize` with `noop_moves = 1`), which
 // deletes redundant `(set (reg:M arg_reg) (reg:M saved_reg))` moves before
@@ -488,7 +613,10 @@ void InferEntryFirstCallDeletedNoopArgMoves(const CompilationProfile* profile,
     pre_elems.push_back(PreCallElem{&isum.single, &isum.top_pn});
   }
 
-  if (!b0_ok || first_call_elem == nullptr || first_call_pn->has_explicit_call_fusage) {
+  if (!b0_ok || first_call_elem == nullptr || first_call_pn->has_explicit_call_fusage ||
+      LookupKnownGccLibcallArgMask(ExtractCalleeSymbolRef(first_call_pn->pattern), res->gp64,
+                                   res->fp64, profile)
+          .has_value()) {
     return;
   }
 
@@ -738,6 +866,629 @@ void InferEntryFirstCallDeletedNoopArgMoves(const CompilationProfile* profile,
   }
 }
 
+// Identifies argument hard registers (`$4..$7`, `$f12..$f15`) that are
+// caller-saved and restored across an unannotated `CALL_INSN` (`caller-save.c`).
+// By `local-alloc.c` and `global.c:global_conflicts`, an outgoing call argument
+// register `r` is live into `CALL_INSN` and conflicts with every call-crossing
+// pseudo, so `caller-save` can never save/restore an actual outgoing argument
+// of that call. Excluding such caller-saved registers prevents pre-call writes
+// to `r` (`pending_arg_defs`) from synthesizing spurious `call_fusage` uses.
+std::vector<std::vector<RegMask>> ComputeCallerSavedArgMasks(const DataflowResult& res,
+                                                             const CompilationProfile* profile) {
+  const size_t n_blocks = res.block_summaries.size();
+  std::vector<std::vector<RegMask>> out(n_blocks);
+  for (size_t b = 0; b < n_blocks; ++b) {
+    out[b].assign(res.block_summaries[b].size(), 0);
+  }
+  if (profile != nullptr) {
+    std::vector<std::string> effective_flags;
+    effective_flags.reserve(profile->c_flags.size() + 1);
+    effective_flags.push_back(absl::StrCat("-O", profile->optimize_level));
+    effective_flags.insert(effective_flags.end(), profile->c_flags.begin(), profile->c_flags.end());
+    const ParsedCompilerFlags flags = ParsedCompilerFlags::Parse(effective_flags);
+    if (flags.opt_level <= 0 || !flags.flag_caller_saves) {
+      return out;
+    }
+  }
+
+  auto extract_stack_mem = [](const RtlExpr& mem, int* out_base, int64_t* out_off,
+                              int64_t* out_sz) -> bool {
+    if (mem.op != RtlOp::kMem || mem.flags.volatil || mem.children.size() != 1) {
+      return false;
+    }
+    const RtlExpr& addr = mem.children[0];
+    int base = -1;
+    int64_t off = 0;
+    if (addr.op == RtlOp::kReg) {
+      base = addr.RegNo();
+    } else if (addr.op == RtlOp::kPlus && addr.children.size() == 2 &&
+               addr.children[0].op == RtlOp::kReg && addr.children[1].op == RtlOp::kConstInt) {
+      base = addr.children[0].RegNo();
+      off = addr.children[1].IntVal();
+    } else {
+      return false;
+    }
+    if ((base != 29 && base != 30) || off < 0) {
+      return false;
+    }
+    *out_base = base;
+    *out_off = off;
+    *out_sz = ModeByteSize(mem.mode);
+    return *out_sz > 0;
+  };
+
+  auto match_arg_save = [&](const RtlExpr& pat, int* out_base, int64_t* out_off, int64_t* out_sz,
+                            int* out_reg, RtlMachineMode* out_mode) -> bool {
+    if (!pat.IsSet()) return false;
+    const RtlExpr& dst = pat.SetDest();
+    const RtlExpr& src = pat.SetSrc();
+    if (dst.op != RtlOp::kMem || dst.flags.Any() || src.op != RtlOp::kReg || src.flags.Any() ||
+        dst.mode != src.mode) {
+      return false;
+    }
+    const int r = src.RegNo();
+    const RegMask bits = RegBitMask(r, src.mode, res.gp64, res.fp64);
+    if (bits == 0 || (bits & ~kArgRegMask) != 0) {
+      return false;
+    }
+    if (!extract_stack_mem(dst, out_base, out_off, out_sz) || *out_off < 16) {
+      return false;
+    }
+    *out_reg = r;
+    *out_mode = src.mode;
+    return true;
+  };
+
+  auto match_arg_restore = [&](const RtlExpr& pat, int* out_base, int64_t* out_off, int64_t* out_sz,
+                               int* out_reg, RtlMachineMode* out_mode) -> bool {
+    if (!pat.IsSet()) return false;
+    const RtlExpr& dst = pat.SetDest();
+    const RtlExpr& src = pat.SetSrc();
+    if (dst.op != RtlOp::kReg || dst.flags.Any() || src.op != RtlOp::kMem || src.flags.Any() ||
+        dst.mode != src.mode) {
+      return false;
+    }
+    const int r = dst.RegNo();
+    const RegMask bits = RegBitMask(r, dst.mode, res.gp64, res.fp64);
+    if (bits == 0 || (bits & ~kArgRegMask) != 0) {
+      return false;
+    }
+    if (!extract_stack_mem(src, out_base, out_off, out_sz) || *out_off < 16) {
+      return false;
+    }
+    *out_reg = r;
+    *out_mode = dst.mode;
+    return true;
+  };
+
+  struct SlotAccess {
+    int base = -1;
+    int64_t off = 0;
+    int64_t sz = 0;
+    int reg = -1;
+    RtlMachineMode mode = RtlMachineMode::kNone;
+    bool is_save = false;
+    bool is_restore = false;
+  };
+  std::vector<SlotAccess> all_stack_accesses;
+  absl::flat_hash_set<int64_t> addr_taken_offsets;
+  bool has_volatile_stack_mem = false;
+
+  auto scan_non_mem_addrs = [&](auto& self, const RtlExpr& expr, bool top_sp_fp_set) -> void {
+    if (expr.op == RtlOp::kMem) {
+      if (expr.flags.volatil && !expr.children.empty()) {
+        const RtlExpr& a = expr.children[0];
+        if ((a.op == RtlOp::kReg && (a.RegNo() == 29 || a.RegNo() == 30)) ||
+            (a.op == RtlOp::kPlus && !a.children.empty() && a.children[0].op == RtlOp::kReg &&
+             (a.children[0].RegNo() == 29 || a.children[0].RegNo() == 30))) {
+          has_volatile_stack_mem = true;
+        }
+      }
+      return;
+    }
+    if (!top_sp_fp_set && expr.op == RtlOp::kPlus && expr.children.size() == 2 &&
+        expr.children[0].op == RtlOp::kReg &&
+        (expr.children[0].RegNo() == 29 || expr.children[0].RegNo() == 30) &&
+        expr.children[1].op == RtlOp::kConstInt) {
+      addr_taken_offsets.insert(expr.children[1].IntVal());
+      return;
+    }
+    for (const RtlExpr& ch : expr.children) {
+      self(self, ch, false);
+    }
+  };
+
+  auto inspect_elem_pat = [&](const RtlExpr& pat) {
+    const bool is_sp_fp_set = pat.IsSet() && pat.SetDest().op == RtlOp::kReg &&
+                              (pat.SetDest().RegNo() == 29 || pat.SetDest().RegNo() == 30);
+    scan_non_mem_addrs(scan_non_mem_addrs, pat, is_sp_fp_set);
+
+    int base = -1;
+    int64_t off = 0;
+    int64_t sz = 0;
+    int reg = -1;
+    RtlMachineMode mode = RtlMachineMode::kNone;
+    if (match_arg_save(pat, &base, &off, &sz, &reg, &mode)) {
+      all_stack_accesses.push_back({base, off, sz, reg, mode, true, false});
+      return;
+    }
+    if (match_arg_restore(pat, &base, &off, &sz, &reg, &mode)) {
+      all_stack_accesses.push_back({base, off, sz, reg, mode, false, true});
+      return;
+    }
+    pat.Visit([&](const RtlExpr& n) {
+      int mb = -1;
+      int64_t mo = 0;
+      int64_t ms = 0;
+      if (extract_stack_mem(n, &mb, &mo, &ms)) {
+        all_stack_accesses.push_back({mb, mo, ms, -1, RtlMachineMode::kNone, false, false});
+      }
+    });
+  };
+
+  for (size_t b = 0; b < n_blocks; ++b) {
+    for (const InsnSummary& isum : res.block_summaries[b]) {
+      if (!isum.valid) continue;
+      if (isum.is_sequence) {
+        inspect_elem_pat(isum.head_pn.pattern);
+        inspect_elem_pat(isum.slot_pn.pattern);
+      } else {
+        inspect_elem_pat(isum.top_pn.pattern);
+      }
+    }
+  }
+  if (has_volatile_stack_mem) {
+    return out;
+  }
+
+  struct PureCsSlot {
+    int base = -1;
+    int64_t off = 0;
+    int64_t sz = 0;
+    int reg = -1;
+    RtlMachineMode mode = RtlMachineMode::kNone;
+  };
+  std::vector<PureCsSlot> pure_slots;
+  for (const SlotAccess& cand : all_stack_accesses) {
+    if (!cand.is_save || addr_taken_offsets.contains(cand.off)) {
+      continue;
+    }
+    bool already_added = false;
+    for (const PureCsSlot& ps : pure_slots) {
+      if (ps.base == cand.base && ps.off == cand.off && ps.sz == cand.sz) {
+        already_added = true;
+        break;
+      }
+    }
+    if (already_added) continue;
+
+    bool pure = true;
+    bool saw_restore = false;
+    for (const SlotAccess& other : all_stack_accesses) {
+      if (other.off < cand.off + cand.sz && cand.off < other.off + other.sz) {
+        if ((!other.is_save && !other.is_restore) || other.base != cand.base ||
+            other.off != cand.off || other.sz != cand.sz || other.reg != cand.reg ||
+            other.mode != cand.mode) {
+          pure = false;
+          break;
+        }
+        if (other.is_restore) {
+          saw_restore = true;
+        }
+      }
+    }
+    if (pure && saw_restore) {
+      pure_slots.push_back({cand.base, cand.off, cand.sz, cand.reg, cand.mode});
+    }
+  }
+  if (pure_slots.empty()) {
+    return out;
+  }
+
+  struct FlatBlockElem {
+    const ElemSummary* esum = nullptr;
+    const RtlPatternAndNotes* pn = nullptr;
+    size_t insn_idx = 0;
+    bool is_target_call = false;
+  };
+  for (size_t b = 0; b < n_blocks; ++b) {
+    std::vector<FlatBlockElem> flat;
+    flat.reserve(res.block_summaries[b].size() * 2);
+    for (size_t i = 0; i < res.block_summaries[b].size(); ++i) {
+      const InsnSummary& isum = res.block_summaries[b][i];
+      if (!isum.valid) continue;
+      if (isum.is_sequence) {
+        if (isum.is_call_seq) {
+          flat.push_back({&isum.slot, &isum.slot_pn, i, false});
+          flat.push_back({&isum.head, &isum.head_pn, i, !isum.head_pn.has_explicit_call_fusage});
+        } else {
+          flat.push_back({&isum.head, &isum.head_pn, i, false});
+          flat.push_back({&isum.slot, &isum.slot_pn, i, false});
+        }
+      } else {
+        flat.push_back({&isum.single, &isum.top_pn, i,
+                        isum.single.is_call && !isum.top_pn.has_explicit_call_fusage});
+      }
+    }
+    for (size_t pos = 0; pos < flat.size(); ++pos) {
+      if (!flat[pos].is_target_call) continue;
+      for (const PureCsSlot& slot : pure_slots) {
+        const RegMask arg_bits = RegBitMask(slot.reg, slot.mode, res.gp64, res.fp64) & kArgRegMask;
+        bool found_pre_save = false;
+        for (size_t rev = pos; rev > 0; --rev) {
+          const FlatBlockElem& prev = flat[rev - 1];
+          int b_in = -1, r_in = -1;
+          int64_t o_in = 0, s_in = 0;
+          RtlMachineMode m_in = RtlMachineMode::kNone;
+          if (match_arg_save(prev.pn->pattern, &b_in, &o_in, &s_in, &r_in, &m_in) &&
+              b_in == slot.base && o_in == slot.off && r_in == slot.reg && m_in == slot.mode) {
+            found_pre_save = true;
+            break;
+          }
+          if (prev.esum->is_call || (prev.esum->defs & arg_bits) != 0) {
+            break;
+          }
+        }
+        if (!found_pre_save) continue;
+
+        bool found_post_restore = false;
+        for (size_t fwd = pos + 1; fwd < flat.size(); ++fwd) {
+          const FlatBlockElem& next = flat[fwd];
+          int b_in = -1, r_in = -1;
+          int64_t o_in = 0, s_in = 0;
+          RtlMachineMode m_in = RtlMachineMode::kNone;
+          if (match_arg_restore(next.pn->pattern, &b_in, &o_in, &s_in, &r_in, &m_in) &&
+              b_in == slot.base && o_in == slot.off && r_in == slot.reg && m_in == slot.mode) {
+            found_post_restore = true;
+            break;
+          }
+          if (next.esum->is_call || (next.esum->defs & arg_bits) != 0) {
+            break;
+          }
+        }
+        if (found_post_restore) {
+          out[b][flat[pos].insn_idx] |= arg_bits;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+void RefineCallArgumentFusageAcrossCfg(
+    const RtlControlFlowGraph& cfg, const CompilationProfile* profile,
+    const std::vector<std::vector<RegMask>>& caller_saved_arg_masks, DataflowResult* res_ptr) {
+  DataflowResult& res = *res_ptr;
+  const size_t n_blocks = cfg.rpo_blocks.size();
+  // Refine `CALL_INSN` argument register uses (`$4..$7`, `$f12..$f15`) across
+  // CFG edges and incoming function parameters:
+  // 1) Propagate explicit outgoing argument defs set in a predecessor block or
+  //    branch delay slot (e.g., `(insn/s (set a0 ...))` on edge `B1 -> B3`) into
+  //    the successor's first call.
+  // 2) Propagate incoming parameter registers (`incoming_param_regs`) that reach
+  //    a direct `symbol_ref` call unclobbered when another call to the same
+  //    callee in the function explicitly passes those argument registers (or
+  //    when MIPS O32 positional argument ordering requires the leading arg reg).
+  if (n_blocks == 0) {
+    return;
+  }
+
+  // Apply exact `optabs.c` argument register masks to unannotated compiler
+  // `libgcc` runtime calls before CFG propagation so pre-call scratch GPR/FPR
+  // writes never pollute `CALL_INSN_FUNCTION_USAGE`.
+  for (size_t b = 0; b < n_blocks; ++b) {
+    for (InsnSummary& isum : res.block_summaries[b]) {
+      if (!isum.valid) continue;
+      auto apply_known_libcall = [&](ElemSummary* call_elem, const RtlPatternAndNotes& call_pn) {
+        if (call_pn.has_explicit_call_fusage) {
+          return;
+        }
+        const std::optional<RegMask> known_mask = LookupKnownGccLibcallArgMask(
+            ExtractCalleeSymbolRef(call_pn.pattern), res.gp64, res.fp64, profile);
+        if (!known_mask.has_value()) {
+          return;
+        }
+        ElemSummary direct_only;
+        AnalyzePatternAst(call_pn.pattern, res.gp64, res.fp64, &direct_only);
+        call_elem->arg_fusage_uses = *known_mask;
+        call_elem->uses = direct_only.uses | *known_mask;
+      };
+      if (isum.is_sequence && isum.is_call_seq) {
+        apply_known_libcall(&isum.head, isum.head_pn);
+      } else if (!isum.is_sequence && isum.single.is_call) {
+        apply_known_libcall(&isum.single, isum.top_pn);
+      }
+    }
+  }
+
+  auto close_o32_arg_prefix = [&](RegMask args, RegMask allowed_valid) -> RegMask {
+    RegMask out_args = args;
+    const bool has_fp_lead = ((out_args & ((RegMask{1} << 44) | (RegMask{1} << 46))) != 0);
+    if ((out_args & (RegMask{1} << 46)) != 0) {
+      out_args |= (RegMask{1} << 44) & allowed_valid;
+    }
+    if ((out_args & (RegMask{1} << 7)) != 0) {
+      out_args |= (RegMask{1} << 6) & allowed_valid;
+    }
+    if (!has_fp_lead) {
+      if ((out_args & (RegMask{1} << 6)) != 0) {
+        out_args |= (RegMask{1} << 5) & allowed_valid;
+      }
+      if ((out_args & (RegMask{1} << 5)) != 0) {
+        out_args |= (RegMask{1} << 4) & allowed_valid;
+      }
+    }
+    return out_args;
+  };
+
+  auto dead_arg_mask_from_notes = [&](const RtlPatternAndNotes& pn) -> RegMask {
+    RegMask dead = 0;
+    for (const RtlRegNote& note : pn.reg_notes) {
+      if (note.kind == RtlMachineMode::kRegDead && note.datum.IsReg()) {
+        dead |= RegBitMask(note.datum.RegNo(), note.datum.mode, res.gp64, res.fp64) & kArgRegMask;
+      }
+    }
+    return dead;
+  };
+
+  // Backward non-call read reachability to identify incoming parameter regs at B0.
+  std::vector<RegMask> noncall_arg_in(n_blocks, 0);
+  {
+    auto step_noncall_bwd = [](const ElemSummary& e, RegMask cur) -> RegMask {
+      if (e.is_call) {
+        return 0;
+      }
+      return ((cur & ~e.defs) | (e.uses & kArgRegMask)) & kArgRegMask;
+    };
+    bool changed_nc = true;
+    while (changed_nc) {
+      changed_nc = false;
+      for (size_t rev = n_blocks; rev > 0; --rev) {
+        const size_t b = rev - 1;
+        RegMask cur = 0;
+        for (size_t sb : cfg.rpo_blocks[b].successors) {
+          if (sb < n_blocks) {
+            cur |= noncall_arg_in[sb];
+          }
+        }
+        for (auto it = res.block_summaries[b].rbegin(); it != res.block_summaries[b].rend(); ++it) {
+          if (!it->valid) continue;
+          if (it->is_sequence) {
+            if (it->is_call_seq) {
+              cur = step_noncall_bwd(it->slot, step_noncall_bwd(it->head, cur));
+            } else if (it->is_annulled_target_seq && b + 1 < n_blocks &&
+                       std::find(cfg.rpo_blocks[b].successors.begin(),
+                                 cfg.rpo_blocks[b].successors.end(),
+                                 b + 1) != cfg.rpo_blocks[b].successors.end()) {
+              RegMask taken_nc = 0;
+              for (size_t sb : cfg.rpo_blocks[b].successors) {
+                if (sb != b + 1 && sb < n_blocks) {
+                  taken_nc |= noncall_arg_in[sb];
+                }
+              }
+              const RegMask ft_nc = noncall_arg_in[b + 1];
+              cur = step_noncall_bwd(it->head, step_noncall_bwd(it->slot, taken_nc) | ft_nc);
+            } else {
+              cur = step_noncall_bwd(it->head, step_noncall_bwd(it->slot, cur));
+            }
+          } else {
+            cur = step_noncall_bwd(it->single, cur);
+          }
+        }
+        if (cur != noncall_arg_in[b]) {
+          noncall_arg_in[b] = cur;
+          changed_nc = true;
+        }
+      }
+    }
+  }
+  const RegMask incoming_param_regs = close_o32_arg_prefix(noncall_arg_in[0], kArgRegMask);
+
+  std::vector<bool> arg_reachable(n_blocks, false);
+  {
+    std::vector<size_t> wl = {0};
+    arg_reachable[0] = true;
+    while (!wl.empty()) {
+      const size_t u = wl.back();
+      wl.pop_back();
+      for (size_t v : cfg.rpo_blocks[u].successors) {
+        if (v < n_blocks && !arg_reachable[v]) {
+          arg_reachable[v] = true;
+          wl.push_back(v);
+        }
+      }
+    }
+  }
+
+  auto step_arg_elem = [&](const ElemSummary& e, const RtlPatternAndNotes& pn, RegMask* must_valid,
+                           RegMask* may_explicit) {
+    if (e.is_call) {
+      *must_valid = 0;
+      *may_explicit = 0;
+      return;
+    }
+    if (pn.pattern.op == RtlOp::kNote) {
+      return;
+    }
+    const RegMask dead_notes = dead_arg_mask_from_notes(pn) & ~e.explicit_sets;
+    RegMask clobbered = (e.defs & ~e.explicit_sets) | dead_notes;
+    if (!res.fp64) {
+      for (int even_fpr : {44, 46}) {
+        if ((e.explicit_sets & (RegMask{1} << even_fpr)) != 0 &&
+            (e.explicit_sets & (RegMask{1} << (even_fpr + 1))) == 0) {
+          clobbered |= (RegMask{1} << (even_fpr + 1));
+        }
+      }
+    }
+    *must_valid = ((*must_valid & ~clobbered) | (e.explicit_sets & kArgRegMask)) & kArgRegMask;
+    if (profile != nullptr) {
+      const RegMask read_without_set = (e.uses & kArgRegMask) & ~e.explicit_sets;
+      *may_explicit &= ~read_without_set;
+    }
+    *may_explicit = ((*may_explicit & ~clobbered) | (e.explicit_sets & kArgRegMask)) & kArgRegMask;
+  };
+
+  std::vector<RegMask> must_valid_in(n_blocks, kArgRegMask);
+  std::vector<RegMask> may_explicit_in(n_blocks, 0);
+  std::vector<bool> has_arg_init(n_blocks, false);
+  must_valid_in[0] = incoming_param_regs;
+  has_arg_init[0] = true;
+
+  bool changed_arg_fwd = true;
+  while (changed_arg_fwd) {
+    changed_arg_fwd = false;
+    std::vector<RegMask> next_valid_in(n_blocks, kArgRegMask);
+    std::vector<RegMask> next_explicit_in(n_blocks, 0);
+    std::vector<bool> next_init(n_blocks, false);
+    next_valid_in[0] = incoming_param_regs;
+    next_init[0] = true;
+
+    for (size_t b = 0; b < n_blocks; ++b) {
+      if (!arg_reachable[b] || !has_arg_init[b]) {
+        continue;
+      }
+      RegMask cur_valid = must_valid_in[b];
+      RegMask cur_explicit = may_explicit_in[b];
+      RegMask ft_valid = 0;
+      RegMask ft_explicit = 0;
+      RegMask taken_valid = 0;
+      RegMask taken_explicit = 0;
+      bool split_edges = false;
+      const size_t n_insns = res.block_summaries[b].size();
+      const bool is_cond = (cfg.rpo_blocks[b].successors.size() >= 2);
+
+      for (size_t i = 0; i < n_insns; ++i) {
+        const InsnSummary& isum = res.block_summaries[b][i];
+        if (!isum.valid) continue;
+        if (isum.is_sequence && !isum.is_call_seq && is_cond && i + 1 == n_insns &&
+            isum.is_annulled_target_seq) {
+          step_arg_elem(isum.head, isum.head_pn, &cur_valid, &cur_explicit);
+          ft_valid = cur_valid;
+          ft_explicit = cur_explicit;
+          taken_valid = cur_valid;
+          taken_explicit = cur_explicit;
+          step_arg_elem(isum.slot, isum.slot_pn, &taken_valid, &taken_explicit);
+          split_edges = true;
+          break;
+        }
+        if (isum.is_sequence) {
+          if (isum.is_call_seq) {
+            step_arg_elem(isum.slot, isum.slot_pn, &cur_valid, &cur_explicit);
+            step_arg_elem(isum.head, isum.head_pn, &cur_valid, &cur_explicit);
+          } else {
+            step_arg_elem(isum.head, isum.head_pn, &cur_valid, &cur_explicit);
+            step_arg_elem(isum.slot, isum.slot_pn, &cur_valid, &cur_explicit);
+          }
+        } else {
+          step_arg_elem(isum.single, isum.top_pn, &cur_valid, &cur_explicit);
+        }
+      }
+
+      for (size_t sb : cfg.rpo_blocks[b].successors) {
+        if (sb >= n_blocks || !arg_reachable[sb]) continue;
+        const RegMask edge_valid =
+            split_edges ? ((sb == b + 1) ? ft_valid : taken_valid) : cur_valid;
+        const RegMask edge_explicit =
+            split_edges ? ((sb == b + 1) ? ft_explicit : taken_explicit) : cur_explicit;
+        next_valid_in[sb] &= edge_valid;
+        next_explicit_in[sb] |= edge_explicit;
+        next_init[sb] = true;
+      }
+    }
+
+    for (size_t b = 0; b < n_blocks; ++b) {
+      if (!arg_reachable[b]) continue;
+      if (next_init[b] != has_arg_init[b] || next_valid_in[b] != must_valid_in[b] ||
+          next_explicit_in[b] != may_explicit_in[b]) {
+        has_arg_init[b] = next_init[b];
+        must_valid_in[b] = next_valid_in[b];
+        may_explicit_in[b] = next_explicit_in[b];
+        changed_arg_fwd = true;
+      }
+    }
+  }
+
+  absl::flat_hash_map<std::string, RegMask> callee_observed_args;
+  for (int pass_idx = 0; pass_idx < 2; ++pass_idx) {
+    for (size_t b = 0; b < n_blocks; ++b) {
+      if (!arg_reachable[b] || !has_arg_init[b]) {
+        continue;
+      }
+      RegMask cur_valid = must_valid_in[b];
+      RegMask cur_explicit = may_explicit_in[b];
+      for (size_t i = 0; i < res.block_summaries[b].size(); ++i) {
+        InsnSummary& isum = res.block_summaries[b][i];
+        if (!isum.valid) continue;
+        auto process_call = [&](ElemSummary* call_elem, const RtlPatternAndNotes& call_pn) {
+          const std::string sym = ExtractCalleeSymbolRef(call_pn.pattern);
+          if (call_pn.has_explicit_call_fusage ||
+              LookupKnownGccLibcallArgMask(sym, res.gp64, res.fp64, profile).has_value()) {
+            step_arg_elem(*call_elem, call_pn, &cur_valid, &cur_explicit);
+            return;
+          }
+          const RegMask cs_mask = caller_saved_arg_masks[b][i];
+          const RegMask call_valid = cur_valid & ~cs_mask;
+          const RegMask base_explicit =
+              (call_elem->arg_fusage_uses | (call_valid & cur_explicit)) & ~cs_mask;
+          const RegMask closed_explicit = close_o32_arg_prefix(base_explicit, call_valid);
+          if (pass_idx == 0) {
+            if (!sym.empty()) {
+              callee_observed_args[sym] |= closed_explicit;
+            }
+          } else {
+            RegMask inferred = closed_explicit;
+            if (!sym.empty()) {
+              if (auto it = callee_observed_args.find(sym); it != callee_observed_args.end()) {
+                inferred |= (call_valid & it->second);
+              }
+            }
+            RegMask candidate = (call_elem->arg_fusage_uses | inferred) & ~cs_mask;
+            // In KMC GCC 2.7.2 (`mips.c:function_arg`), `$f12` (reg 44) and
+            // `$a0` (reg 4) both correspond to `cum->arg_words == 0` and are
+            // mutually exclusive on every call. If pre-call scratch writes put
+            // both into `candidate`, keep the unread outgoing argument write
+            // (`cur_explicit`) and drop the already-consumed scratch register.
+            if ((candidate & (RegMask{1} << 44)) != 0 && (candidate & (RegMask{1} << 4)) != 0) {
+              const bool f12_unread = (cur_explicit & (RegMask{1} << 44)) != 0;
+              const bool r4_unread = (cur_explicit & (RegMask{1} << 4)) != 0;
+              if (f12_unread && !r4_unread) {
+                candidate &= ~(RegMask{1} << 4);
+                if (!res.gp64 && !res.fp64 && (candidate & (RegMask{1} << 45)) != 0 &&
+                    (cur_explicit & (RegMask{1} << 5)) == 0) {
+                  candidate &= ~(RegMask{1} << 5);
+                }
+              } else if (r4_unread && !f12_unread) {
+                candidate &= ~(RegMask{0xF} << 44);
+              }
+            }
+            ElemSummary direct_only;
+            AnalyzePatternAst(call_pn.pattern, res.gp64, res.fp64, &direct_only);
+            call_elem->arg_fusage_uses = candidate;
+            call_elem->uses = direct_only.uses | candidate;
+          }
+          step_arg_elem(*call_elem, call_pn, &cur_valid, &cur_explicit);
+        };
+
+        if (isum.is_sequence) {
+          if (isum.is_call_seq) {
+            step_arg_elem(isum.slot, isum.slot_pn, &cur_valid, &cur_explicit);
+            process_call(&isum.head, isum.head_pn);
+          } else {
+            step_arg_elem(isum.head, isum.head_pn, &cur_valid, &cur_explicit);
+            step_arg_elem(isum.slot, isum.slot_pn, &cur_valid, &cur_explicit);
+          }
+        } else if (isum.single.is_call) {
+          process_call(&isum.single, isum.top_pn);
+        } else {
+          step_arg_elem(isum.single, isum.top_pn, &cur_valid, &cur_explicit);
+        }
+      }
+    }
+  }
+
+  InferEntryFirstCallDeletedNoopArgMoves(profile, &res);
+}
+
 DataflowResult RunHardRegDataflow(const RtlControlFlowGraph& cfg, const CompilationProfile* profile,
                                   bool dbr_post_simple_markers = false) {
   DataflowResult res;
@@ -768,9 +1519,17 @@ DataflowResult RunHardRegDataflow(const RtlControlFlowGraph& cfg, const Compilat
     bool ends_with_ret_insn = false;
     if (!blk.instructions.empty()) {
       auto last_p = ParsePatternAndNotes(blk.instructions.back());
-      if (last_p.ok() && IsReturnJumpPattern(last_p->pattern)) {
-        ends_with_ret_insn = true;
-        res.can_exit[b] = true;
+      if (last_p.ok()) {
+        if (IsReturnJumpPattern(last_p->pattern)) {
+          ends_with_ret_insn = true;
+          res.can_exit[b] = true;
+        } else if (b + 1 == n_blocks && blk.successors.size() == 1 &&
+                   IsConditionalJumpPattern(last_p->pattern)) {
+          // Final RPO block ending in a conditional branch whose fallthrough
+          // block was empty after epilogue stripping (e.g., loop latch exiting
+          // into the epilogue on fallthrough).
+          res.can_exit[b] = true;
+        }
       }
     }
     res.uses_epilogue_delay_at_exit[b] =
@@ -831,294 +1590,28 @@ DataflowResult RunHardRegDataflow(const RtlControlFlowGraph& cfg, const Compilat
     }
   }
 
-  // Refine `CALL_INSN` argument register uses (`$4..$7`, `$f12..$f15`) across
-  // CFG edges and incoming function parameters:
-  // 1) Propagate explicit outgoing argument defs set in a predecessor block or
-  //    branch delay slot (e.g., `(insn/s (set a0 ...))` on edge `B1 -> B3`) into
-  //    the successor's first call.
-  // 2) Propagate incoming parameter registers (`incoming_param_regs`) that reach
-  //    a direct `symbol_ref` call unclobbered when another call to the same
-  //    callee in the function explicitly passes those argument registers (or
-  //    when MIPS O32 positional argument ordering requires the leading arg reg).
-  if (n_blocks > 0) {
-    auto extract_callee_sym = [](const RtlExpr& pat) -> std::string {
-      const RtlExpr* call_node = nullptr;
-      if (pat.op == RtlOp::kCall) {
-        call_node = &pat;
-      } else if (pat.IsSet() && pat.SetSrc().op == RtlOp::kCall) {
-        call_node = &pat.SetSrc();
-      } else if (pat.IsParallel() && !pat.children.empty()) {
-        const RtlExpr& c0 = pat.children[0];
-        if (c0.op == RtlOp::kCall) {
-          call_node = &c0;
-        } else if (c0.IsSet() && c0.SetSrc().op == RtlOp::kCall) {
-          call_node = &c0.SetSrc();
-        }
-      }
-      if (call_node != nullptr && !call_node->children.empty() && call_node->children[0].IsMem() &&
-          !call_node->children[0].children.empty() &&
-          call_node->children[0].children[0].IsSymbolRef()) {
-        return std::string(call_node->children[0].children[0].SymbolName());
-      }
-      return "";
-    };
-
-    auto close_o32_arg_prefix = [&](RegMask args, RegMask allowed_valid) -> RegMask {
-      RegMask out_args = args;
-      const bool has_fp_lead = ((out_args & ((RegMask{1} << 44) | (RegMask{1} << 46))) != 0);
-      if ((out_args & (RegMask{1} << 46)) != 0) {
-        out_args |= (RegMask{1} << 44) & allowed_valid;
-      }
-      if ((out_args & (RegMask{1} << 7)) != 0) {
-        out_args |= (RegMask{1} << 6) & allowed_valid;
-      }
-      if (!has_fp_lead) {
-        if ((out_args & (RegMask{1} << 6)) != 0) {
-          out_args |= (RegMask{1} << 5) & allowed_valid;
-        }
-        if ((out_args & (RegMask{1} << 5)) != 0) {
-          out_args |= (RegMask{1} << 4) & allowed_valid;
-        }
-      }
-      return out_args;
-    };
-
-    auto dead_arg_mask_from_notes = [&](const RtlPatternAndNotes& pn) -> RegMask {
-      RegMask dead = 0;
-      for (const RtlRegNote& note : pn.reg_notes) {
-        if (note.kind == RtlMachineMode::kRegDead && note.datum.IsReg()) {
-          dead |= RegBitMask(note.datum.RegNo(), note.datum.mode, res.gp64, res.fp64) & kArgRegMask;
-        }
-      }
-      return dead;
-    };
-
-    // Backward non-call read reachability to identify incoming parameter regs at B0.
-    std::vector<RegMask> noncall_arg_in(n_blocks, 0);
-    {
-      auto step_noncall_bwd = [](const ElemSummary& e, RegMask cur) -> RegMask {
-        if (e.is_call) {
-          return 0;
-        }
-        return ((cur & ~e.defs) | (e.uses & kArgRegMask)) & kArgRegMask;
+  const std::vector<std::vector<RegMask>> caller_saved_arg_masks =
+      ComputeCallerSavedArgMasks(res, profile);
+  for (size_t b = 0; b < n_blocks; ++b) {
+    for (size_t i = 0; i < res.block_summaries[b].size(); ++i) {
+      const RegMask cs_mask = caller_saved_arg_masks[b][i];
+      if (cs_mask == 0) continue;
+      InsnSummary& isum = res.block_summaries[b][i];
+      auto strip_cs_from_call = [&](ElemSummary* call_elem, const RtlPatternAndNotes& call_pn) {
+        ElemSummary direct_only;
+        AnalyzePatternAst(call_pn.pattern, res.gp64, res.fp64, &direct_only);
+        call_elem->arg_fusage_uses &= ~cs_mask;
+        call_elem->uses = (call_elem->uses & ~cs_mask) | (direct_only.uses & cs_mask);
       };
-      bool changed_nc = true;
-      while (changed_nc) {
-        changed_nc = false;
-        for (size_t rev = n_blocks; rev > 0; --rev) {
-          const size_t b = rev - 1;
-          RegMask cur = 0;
-          for (size_t sb : cfg.rpo_blocks[b].successors) {
-            if (sb < n_blocks) {
-              cur |= noncall_arg_in[sb];
-            }
-          }
-          for (auto it = res.block_summaries[b].rbegin(); it != res.block_summaries[b].rend();
-               ++it) {
-            if (!it->valid) continue;
-            if (it->is_sequence) {
-              if (it->is_call_seq) {
-                cur = step_noncall_bwd(it->slot, step_noncall_bwd(it->head, cur));
-              } else if (it->is_annulled_target_seq && b + 1 < n_blocks &&
-                         std::find(cfg.rpo_blocks[b].successors.begin(),
-                                   cfg.rpo_blocks[b].successors.end(),
-                                   b + 1) != cfg.rpo_blocks[b].successors.end()) {
-                RegMask taken_nc = 0;
-                for (size_t sb : cfg.rpo_blocks[b].successors) {
-                  if (sb != b + 1 && sb < n_blocks) {
-                    taken_nc |= noncall_arg_in[sb];
-                  }
-                }
-                const RegMask ft_nc = noncall_arg_in[b + 1];
-                cur = step_noncall_bwd(it->head, step_noncall_bwd(it->slot, taken_nc) | ft_nc);
-              } else {
-                cur = step_noncall_bwd(it->head, step_noncall_bwd(it->slot, cur));
-              }
-            } else {
-              cur = step_noncall_bwd(it->single, cur);
-            }
-          }
-          if (cur != noncall_arg_in[b]) {
-            noncall_arg_in[b] = cur;
-            changed_nc = true;
-          }
-        }
+      if (isum.is_sequence && isum.is_call_seq) {
+        strip_cs_from_call(&isum.head, isum.head_pn);
+      } else if (!isum.is_sequence && isum.single.is_call) {
+        strip_cs_from_call(&isum.single, isum.top_pn);
       }
     }
-    const RegMask incoming_param_regs = close_o32_arg_prefix(noncall_arg_in[0], kArgRegMask);
-
-    std::vector<bool> arg_reachable(n_blocks, false);
-    {
-      std::vector<size_t> wl = {0};
-      arg_reachable[0] = true;
-      while (!wl.empty()) {
-        const size_t u = wl.back();
-        wl.pop_back();
-        for (size_t v : cfg.rpo_blocks[u].successors) {
-          if (v < n_blocks && !arg_reachable[v]) {
-            arg_reachable[v] = true;
-            wl.push_back(v);
-          }
-        }
-      }
-    }
-
-    auto step_arg_elem = [&](const ElemSummary& e, const RtlPatternAndNotes& pn,
-                             RegMask* must_valid, RegMask* may_explicit) {
-      if (e.is_call) {
-        *must_valid = 0;
-        *may_explicit = 0;
-        return;
-      }
-      if (pn.pattern.op == RtlOp::kNote) {
-        return;
-      }
-      const RegMask dead_notes = dead_arg_mask_from_notes(pn) & ~e.explicit_sets;
-      const RegMask clobbered = (e.defs & ~e.explicit_sets) | dead_notes;
-      *must_valid = ((*must_valid & ~clobbered) | (e.explicit_sets & kArgRegMask)) & kArgRegMask;
-      if (profile != nullptr) {
-        const RegMask read_without_set = (e.uses & kArgRegMask) & ~e.explicit_sets;
-        *may_explicit &= ~read_without_set;
-      }
-      *may_explicit =
-          ((*may_explicit & ~clobbered) | (e.explicit_sets & kArgRegMask)) & kArgRegMask;
-    };
-
-    std::vector<RegMask> must_valid_in(n_blocks, kArgRegMask);
-    std::vector<RegMask> may_explicit_in(n_blocks, 0);
-    std::vector<bool> has_arg_init(n_blocks, false);
-    must_valid_in[0] = incoming_param_regs;
-    has_arg_init[0] = true;
-
-    bool changed_arg_fwd = true;
-    while (changed_arg_fwd) {
-      changed_arg_fwd = false;
-      std::vector<RegMask> next_valid_in(n_blocks, kArgRegMask);
-      std::vector<RegMask> next_explicit_in(n_blocks, 0);
-      std::vector<bool> next_init(n_blocks, false);
-      next_valid_in[0] = incoming_param_regs;
-      next_init[0] = true;
-
-      for (size_t b = 0; b < n_blocks; ++b) {
-        if (!arg_reachable[b] || !has_arg_init[b]) {
-          continue;
-        }
-        RegMask cur_valid = must_valid_in[b];
-        RegMask cur_explicit = may_explicit_in[b];
-        RegMask ft_valid = 0;
-        RegMask ft_explicit = 0;
-        RegMask taken_valid = 0;
-        RegMask taken_explicit = 0;
-        bool split_edges = false;
-        const size_t n_insns = res.block_summaries[b].size();
-        const bool is_cond = (cfg.rpo_blocks[b].successors.size() >= 2);
-
-        for (size_t i = 0; i < n_insns; ++i) {
-          const InsnSummary& isum = res.block_summaries[b][i];
-          if (!isum.valid) continue;
-          if (isum.is_sequence && !isum.is_call_seq && is_cond && i + 1 == n_insns &&
-              isum.is_annulled_target_seq) {
-            step_arg_elem(isum.head, isum.head_pn, &cur_valid, &cur_explicit);
-            ft_valid = cur_valid;
-            ft_explicit = cur_explicit;
-            taken_valid = cur_valid;
-            taken_explicit = cur_explicit;
-            step_arg_elem(isum.slot, isum.slot_pn, &taken_valid, &taken_explicit);
-            split_edges = true;
-            break;
-          }
-          if (isum.is_sequence) {
-            if (isum.is_call_seq) {
-              step_arg_elem(isum.slot, isum.slot_pn, &cur_valid, &cur_explicit);
-              step_arg_elem(isum.head, isum.head_pn, &cur_valid, &cur_explicit);
-            } else {
-              step_arg_elem(isum.head, isum.head_pn, &cur_valid, &cur_explicit);
-              step_arg_elem(isum.slot, isum.slot_pn, &cur_valid, &cur_explicit);
-            }
-          } else {
-            step_arg_elem(isum.single, isum.top_pn, &cur_valid, &cur_explicit);
-          }
-        }
-
-        for (size_t sb : cfg.rpo_blocks[b].successors) {
-          if (sb >= n_blocks || !arg_reachable[sb]) continue;
-          const RegMask edge_valid =
-              split_edges ? ((sb == b + 1) ? ft_valid : taken_valid) : cur_valid;
-          const RegMask edge_explicit =
-              split_edges ? ((sb == b + 1) ? ft_explicit : taken_explicit) : cur_explicit;
-          next_valid_in[sb] &= edge_valid;
-          next_explicit_in[sb] |= edge_explicit;
-          next_init[sb] = true;
-        }
-      }
-
-      for (size_t b = 0; b < n_blocks; ++b) {
-        if (!arg_reachable[b]) continue;
-        if (next_init[b] != has_arg_init[b] || next_valid_in[b] != must_valid_in[b] ||
-            next_explicit_in[b] != may_explicit_in[b]) {
-          has_arg_init[b] = next_init[b];
-          must_valid_in[b] = next_valid_in[b];
-          may_explicit_in[b] = next_explicit_in[b];
-          changed_arg_fwd = true;
-        }
-      }
-    }
-
-    absl::flat_hash_map<std::string, RegMask> callee_observed_args;
-    for (int pass_idx = 0; pass_idx < 2; ++pass_idx) {
-      for (size_t b = 0; b < n_blocks; ++b) {
-        if (!arg_reachable[b] || !has_arg_init[b]) {
-          continue;
-        }
-        RegMask cur_valid = must_valid_in[b];
-        RegMask cur_explicit = may_explicit_in[b];
-        for (size_t i = 0; i < res.block_summaries[b].size(); ++i) {
-          InsnSummary& isum = res.block_summaries[b][i];
-          if (!isum.valid) continue;
-          auto process_call = [&](ElemSummary* call_elem, const RtlPatternAndNotes& call_pn) {
-            if (call_pn.has_explicit_call_fusage) {
-              step_arg_elem(*call_elem, call_pn, &cur_valid, &cur_explicit);
-              return;
-            }
-            const std::string sym = extract_callee_sym(call_pn.pattern);
-            const RegMask base_explicit = call_elem->arg_fusage_uses | (cur_valid & cur_explicit);
-            const RegMask closed_explicit = close_o32_arg_prefix(base_explicit, cur_valid);
-            if (pass_idx == 0) {
-              if (!sym.empty()) {
-                callee_observed_args[sym] |= closed_explicit;
-              }
-            } else {
-              RegMask inferred = closed_explicit;
-              if (!sym.empty()) {
-                if (auto it = callee_observed_args.find(sym); it != callee_observed_args.end()) {
-                  inferred |= (cur_valid & it->second);
-                }
-              }
-              call_elem->arg_fusage_uses |= inferred;
-              call_elem->uses |= inferred;
-            }
-            step_arg_elem(*call_elem, call_pn, &cur_valid, &cur_explicit);
-          };
-
-          if (isum.is_sequence) {
-            if (isum.is_call_seq) {
-              step_arg_elem(isum.slot, isum.slot_pn, &cur_valid, &cur_explicit);
-              process_call(&isum.head, isum.head_pn);
-            } else {
-              step_arg_elem(isum.head, isum.head_pn, &cur_valid, &cur_explicit);
-              step_arg_elem(isum.slot, isum.slot_pn, &cur_valid, &cur_explicit);
-            }
-          } else if (isum.single.is_call) {
-            process_call(&isum.single, isum.top_pn);
-          } else {
-            step_arg_elem(isum.single, isum.top_pn, &cur_valid, &cur_explicit);
-          }
-        }
-      }
-    }
-
-    InferEntryFirstCallDeletedNoopArgMoves(profile, &res);
   }
+
+  RefineCallArgumentFusageAcrossCfg(cfg, profile, caller_saved_arg_masks, &res);
 
   res.live_at_exit = (RegMask{1} << 29) | (RegMask{1} << 31) | any_integrated_ret;
   if (cfg.sideband.frame_pointer_needed) {
@@ -1246,7 +1739,12 @@ DataflowResult RunHardRegDataflow(const RtlControlFlowGraph& cfg, const Compilat
         RegMask cur_unread = must_unread_in[b];
         RegMask cur_noncall = may_noncall_in[b];
         const size_t n_insns = res.block_summaries[b].size();
-        const bool is_cond_branch_blk = (cfg.rpo_blocks[b].successors.size() >= 2);
+        const bool is_cond_branch_blk =
+            (cfg.rpo_blocks[b].successors.size() >= 2) ||
+            (res.can_exit[b] && !cfg.rpo_blocks[b].successors.empty()) ||
+            (!res.block_summaries[b].empty() &&
+             res.block_summaries[b].back().is_annulled_target_seq &&
+             !cfg.rpo_blocks[b].successors.empty());
 
         RegMask taken_def = 0;
         RegMask taken_unread = 0;
@@ -1288,7 +1786,16 @@ DataflowResult RunHardRegDataflow(const RtlControlFlowGraph& cfg, const Compilat
               ft_def = (raw_def & ~stolen_tgt) | (h_def & ~isum.slot.defs);
               ft_unread = raw_unread & ~stolen_tgt;
               ft_noncall = raw_noncall & ~stolen_tgt;
-              taken_def = (raw_def & ~stolen_ft) | (h_def & ~isum.slot.defs);
+              // On a non-annulled conditional branch `SEQUENCE`, the delay-slot
+              // instruction executes unconditionally on both the fallthrough
+              // and taken edges (`reorg.c`), so `taken_def` includes any
+              // register defined by `isum.slot` even if `ft_live_no_exit` also
+              // reads it on the fallthrough path (e.g., a loop/goto countdown
+              // setting `$v0` in the branch delay slot before branching to exit).
+              // `taken_unread` and `taken_noncall` stay masked by `~stolen_ft`
+              // so fallthrough-only writes do not false-positive on `void`
+              // functions.
+              taken_def = raw_def;
               taken_unread = raw_unread & ~stolen_ft;
               taken_noncall = raw_noncall & ~stolen_ft;
             }
@@ -1321,14 +1828,24 @@ DataflowResult RunHardRegDataflow(const RtlControlFlowGraph& cfg, const Compilat
         must_unread_exit[b] = cur_unread;
         may_noncall_exit[b] = cur_noncall;
 
+        const bool both_edges_to_ft =
+            split_branch_edges && !cfg.rpo_blocks[b].successors.empty() &&
+            std::all_of(cfg.rpo_blocks[b].successors.begin(), cfg.rpo_blocks[b].successors.end(),
+                        [b](size_t s) { return s == b + 1; });
         for (size_t sb : cfg.rpo_blocks[b].successors) {
           if (sb >= n_blocks) continue;
           const bool is_ft = (sb == b + 1);
-          RegMask e_def = split_branch_edges ? (is_ft ? ft_def : taken_def) : cur_def;
+          RegMask e_def = both_edges_to_ft
+                              ? (ft_def & taken_def)
+                              : (split_branch_edges ? (is_ft ? ft_def : taken_def) : cur_def);
           const RegMask e_unread =
-              split_branch_edges ? (is_ft ? ft_unread : taken_unread) : cur_unread;
+              both_edges_to_ft
+                  ? (ft_unread & taken_unread)
+                  : (split_branch_edges ? (is_ft ? ft_unread : taken_unread) : cur_unread);
           RegMask e_noncall =
-              split_branch_edges ? (is_ft ? ft_noncall : taken_noncall) : cur_noncall;
+              both_edges_to_ft
+                  ? (ft_noncall | taken_noncall)
+                  : (split_branch_edges ? (is_ft ? ft_noncall : taken_noncall) : cur_noncall);
           if (cfg.rpo_blocks[b].successors.size() >= 2 &&
               (live_no_exit_in[sb] & (RegMask{1} << 3)) == 0) {
             bool sibling_uses_r3_only = false;
@@ -1423,7 +1940,11 @@ DataflowResult RunHardRegDataflow(const RtlControlFlowGraph& cfg, const Compilat
         RegMask ft_may = 0;
         bool split_edges = false;
         const size_t n_insns = res.block_summaries[b].size();
-        const bool is_cond = (cfg.rpo_blocks[b].successors.size() >= 2);
+        const bool is_cond = (cfg.rpo_blocks[b].successors.size() >= 2) ||
+                             (res.can_exit[b] && !cfg.rpo_blocks[b].successors.empty()) ||
+                             (!res.block_summaries[b].empty() &&
+                              res.block_summaries[b].back().is_annulled_target_seq &&
+                              !cfg.rpo_blocks[b].successors.empty());
         for (size_t i = 0; i < n_insns; ++i) {
           const InsnSummary& isum = res.block_summaries[b][i];
           if (!isum.valid) continue;
@@ -1449,9 +1970,15 @@ DataflowResult RunHardRegDataflow(const RtlControlFlowGraph& cfg, const Compilat
           may_ret_def_exit[b] = ex_may;
           changed_may = true;
         }
+        const bool both_may_to_ft =
+            split_edges && !cfg.rpo_blocks[b].successors.empty() &&
+            std::all_of(cfg.rpo_blocks[b].successors.begin(), cfg.rpo_blocks[b].successors.end(),
+                        [b](size_t s) { return s == b + 1; });
         for (size_t sb : cfg.rpo_blocks[b].successors) {
           if (sb >= n_blocks) continue;
-          const RegMask edge_may = split_edges ? ((sb == b + 1) ? ft_may : taken_may) : cur;
+          const RegMask edge_may = both_may_to_ft
+                                       ? (ft_may | taken_may)
+                                       : (split_edges ? ((sb == b + 1) ? ft_may : taken_may) : cur);
           if ((may_ret_def_in[sb] | edge_may) != may_ret_def_in[sb]) {
             may_ret_def_in[sb] |= edge_may;
             changed_may = true;
@@ -1481,6 +2008,15 @@ DataflowResult RunHardRegDataflow(const RtlControlFlowGraph& cfg, const Compilat
     return std::find(succs.begin(), succs.end(), b + 1) != succs.end();
   };
 
+  auto taken_also_goes_to_ft = [&](size_t b) -> bool {
+    if (b + 1 >= n_blocks) {
+      return false;
+    }
+    const auto& succs = cfg.rpo_blocks[b].successors;
+    return !succs.empty() &&
+           std::all_of(succs.begin(), succs.end(), [b](size_t s) { return s == b + 1; });
+  };
+
   auto backward_transfer = [&](const InsnSummary& isum, size_t b, RegMask after_live) -> RegMask {
     if (!isum.valid) {
       return after_live;
@@ -1493,7 +2029,7 @@ DataflowResult RunHardRegDataflow(const RtlControlFlowGraph& cfg, const Compilat
       if (isum.is_annulled_target_seq && has_fallthrough_edge(b)) {
         RegMask taken_live = exit_live_for_block(b);
         for (size_t sb : cfg.rpo_blocks[b].successors) {
-          if (sb != b + 1 && sb < n_blocks) {
+          if ((sb != b + 1 || taken_also_goes_to_ft(b)) && sb < n_blocks) {
             taken_live |= res.live_in[sb];
           }
         }
@@ -1829,6 +2365,22 @@ void ReconstructPostDbrHardRegLivenessAndReturnUse(RtlControlFlowGraph* cfg,
 
   auto apply_call_fusage_to_blocks = [&]() { ApplyMissingCallFusageFromDataflow(df, cfg); };
 
+  auto has_fallthrough_edge = [&](size_t b) -> bool {
+    if (b + 1 >= n_blocks) {
+      return false;
+    }
+    const auto& succs = cfg->rpo_blocks[b].successors;
+    return std::find(succs.begin(), succs.end(), b + 1) != succs.end();
+  };
+  auto taken_also_goes_to_ft = [&](size_t b) -> bool {
+    if (b + 1 >= n_blocks) {
+      return false;
+    }
+    const auto& succs = cfg->rpo_blocks[b].successors;
+    return !succs.empty() &&
+           std::all_of(succs.begin(), succs.end(), [b](size_t s) { return s == b + 1; });
+  };
+
   // Backward propagation of exit-reaching return register values (`exit_ret_mask`)
   // so only genuine return-value `SET`s receive `REG_FUNCTION_VALUE_P` (`reg/i`).
   std::vector<RegMask> ret_need_in(n_blocks, 0);
@@ -1861,7 +2413,18 @@ void ReconstructPostDbrHardRegLivenessAndReturnUse(RtlControlFlowGraph* cfg,
         for (auto it = df.block_summaries[b].rbegin(); it != df.block_summaries[b].rend(); ++it) {
           if (!it->valid) continue;
           if (it->is_sequence) {
-            cur_need &= ~(it->slot.defs | it->head.defs);
+            if (it == df.block_summaries[b].rbegin() && it->is_annulled_target_seq &&
+                has_fallthrough_edge(b)) {
+              RegMask taken_need = df.can_exit[b] ? exit_ret_mask : 0;
+              for (size_t sb : cfg->rpo_blocks[b].successors) {
+                if ((sb != b + 1 || taken_also_goes_to_ft(b)) && sb < n_blocks) {
+                  taken_need |= ret_need_in[sb];
+                }
+              }
+              cur_need = ((taken_need & ~it->slot.defs) | ret_need_in[b + 1]) & ~it->head.defs;
+            } else {
+              cur_need &= ~(it->slot.defs | it->head.defs);
+            }
           } else {
             cur_need &= ~it->single.defs;
           }
@@ -1881,14 +2444,6 @@ void ReconstructPostDbrHardRegLivenessAndReturnUse(RtlControlFlowGraph* cfg,
 
   const RegMask fixed_mask = (RegMask{1} << 0) | (RegMask{1} << 28) | (RegMask{1} << 29) |
                              (cfg->sideband.frame_pointer_needed ? (RegMask{1} << 30) : RegMask{0});
-
-  auto has_fallthrough_edge = [&](size_t b) -> bool {
-    if (b + 1 >= n_blocks) {
-      return false;
-    }
-    const auto& succs = cfg->rpo_blocks[b].successors;
-    return std::find(succs.begin(), succs.end(), b + 1) != succs.end();
-  };
 
   auto exit_live_for_block = [&](size_t b) -> RegMask {
     if (!df.can_exit[b]) {
@@ -2259,7 +2814,7 @@ void ReconstructPostDbrHardRegLivenessAndReturnUse(RtlControlFlowGraph* cfg,
             RegMask taken_live = exit_live_for_block(b);
             RegMask taken_ret_need = df.can_exit[b] ? exit_ret_mask : 0;
             for (size_t sb : cfg->rpo_blocks[b].successors) {
-              if (sb != b + 1 && sb < n_blocks) {
+              if ((sb != b + 1 || taken_also_goes_to_ft(b)) && sb < n_blocks) {
                 taken_live |= df.live_in[sb];
                 taken_ret_need |= ret_need_in[sb];
               }
@@ -2514,8 +3069,25 @@ void ReconstructPostDbrHardRegLivenessAndReturnUse(RtlControlFlowGraph* cfg,
         last_blk.SyncRtlInsnsFromInstructions();
         inserted_use = true;
       } else {
-        last_blk.instructions.push_back(std::move(use_sexpr));
-        last_blk.SyncRtlInsnsFromInstructions();
+        bool last_ends_with_jump = false;
+        if (!last_blk.instructions.empty()) {
+          auto last_parsed = ParsePatternAndNotes(last_blk.instructions.back());
+          last_ends_with_jump =
+              last_parsed.ok() && IsAnyControlTransferPattern(last_parsed->pattern);
+        }
+        if (last_ends_with_jump) {
+          const size_t end_idx = cfg->rpo_blocks.size();
+          RtlBasicBlock use_blk;
+          use_blk.id = static_cast<uint32_t>(end_idx);
+          use_blk.has_label = false;
+          use_blk.instructions = {std::move(use_sexpr)};
+          use_blk.SyncRtlInsnsFromInstructions();
+          last_blk.successors.push_back(end_idx);
+          cfg->rpo_blocks.push_back(std::move(use_blk));
+        } else {
+          last_blk.instructions.push_back(std::move(use_sexpr));
+          last_blk.SyncRtlInsnsFromInstructions();
+        }
         inserted_use = true;
       }
 

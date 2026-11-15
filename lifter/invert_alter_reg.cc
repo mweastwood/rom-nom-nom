@@ -131,11 +131,13 @@ class WebUnionFind {
   std::vector<uint8_t> rank_;
 };
 
-// Returns true if `regno` is an allocatable MIPS GPR (`$2..$25`) or FPR
-// (`$32..$63`). Fixed/reserved registers (`$0`, `$1/at`, `$26..$31`), MD
-// accumulators (`64..66`), and `$fcr31` (`67`) are never lifted to pseudos.
-bool IsAllocatableHardReg(int regno) {
-  return (regno >= 2 && regno <= 25) || (regno >= 32 && regno <= 63);
+// Returns true if `regno` is an allocatable MIPS GPR (`$2..$25`, plus `$30/s8`
+// when `!fp_is_fixed`) or FPR (`$32..$63`). Fixed/reserved registers (`$0`,
+// `$1/at`, `$26..$29`, `$30/$fp` when `fp_is_fixed`, `$31/ra`), MD accumulators
+// (`64..66`), and `$fcr31` (`67`) are never lifted to pseudos.
+bool IsAllocatableHardReg(int regno, bool fp_is_fixed) {
+  return (regno >= 2 && regno <= 25) || (!fp_is_fixed && regno == kFramePointerRegno) ||
+         (regno >= 32 && regno <= 63);
 }
 
 // Returns true if `regno` is a MIPS hardware incoming argument register
@@ -169,20 +171,21 @@ bool IsAllocatableMode(RtlMachineMode mode) {
 }
 
 // Returns true if `reg` is an allocatable hard-register node whose full
-// multi-word span lies in `2..25` or `32..63`. Hardware return registers (`/i`)
-// and frame-related/pointer-flagged registers (`/f`) are never lifted.
-bool IsCandidateHardRegNode(const RtlExpr& reg, bool gp64, bool fp64) {
+// multi-word span lies in `IsAllocatableHardReg(..., fp_is_fixed)`. Hardware
+// return registers (`/i`) and frame-related/pointer-flagged registers (`/f`)
+// are never lifted.
+bool IsCandidateHardRegNode(const RtlExpr& reg, bool gp64, bool fp64, bool fp_is_fixed) {
   if (reg.op != RtlOp::kReg || reg.flags.integrated || reg.flags.frame_related ||
       !IsAllocatableMode(reg.mode)) {
     return false;
   }
   const int regno = reg.RegNo();
-  if (!IsAllocatableHardReg(regno)) {
+  if (!IsAllocatableHardReg(regno, fp_is_fixed)) {
     return false;
   }
   const int span = std::max(1, MipsHardRegNregs(regno, reg.mode, gp64, fp64));
   for (int k = 0; k < span; ++k) {
-    if (!IsAllocatableHardReg(regno + k)) {
+    if (!IsAllocatableHardReg(regno + k, fp_is_fixed)) {
       return false;
     }
   }
@@ -285,18 +288,6 @@ void RecordMaxRegNo(const RtlExpr& expr, int* max_regno) {
   for (const RtlExpr& child : expr.children) {
     RecordMaxRegNo(child, max_regno);
   }
-}
-
-bool HasFloatStoreFlag(absl::Span<const std::string> c_flags) {
-  bool float_store = false;
-  for (std::string_view flag : c_flags) {
-    if (flag == "-ffloat-store") {
-      float_store = true;
-    } else if (flag == "-fno-float-store") {
-      float_store = false;
-    }
-  }
-  return float_store;
 }
 
 void InvalidateSlotRange(int64_t start_byte, int64_t end_byte, int frame_size_bytes,
@@ -540,7 +531,7 @@ void ClearWordRange(ReachState* state, int start_word, int span) {
 // Registers all candidate `(reg ...)` AST occurrences inside a non-`SEQUENCE`
 // body pattern `expr` in deterministic pre-order.
 void RegisterPatternOccurrences(const RtlExpr& expr, bool in_set_dest, bool in_clobber,
-                                int ref_weight, bool gp64, bool fp64,
+                                int ref_weight, bool gp64, bool fp64, bool fp_is_fixed,
                                 std::vector<RegOccurrence>* occs,
                                 absl::flat_hash_map<const RtlExpr*, int>* expr_to_occ) {
   if (expr.op == RtlOp::kNote || expr.op == RtlOp::kCodeLabel || expr.op == RtlOp::kBarrier ||
@@ -548,7 +539,7 @@ void RegisterPatternOccurrences(const RtlExpr& expr, bool in_set_dest, bool in_c
     return;
   }
 
-  if (IsCandidateHardRegNode(expr, gp64, fp64)) {
+  if (IsCandidateHardRegNode(expr, gp64, fp64, fp_is_fixed)) {
     const int occ_id = static_cast<int>(occs->size());
     const int span = std::max(1, MipsHardRegNregs(expr.RegNo(), expr.mode, gp64, fp64));
     occs->push_back(RegOccurrence{
@@ -564,22 +555,22 @@ void RegisterPatternOccurrences(const RtlExpr& expr, bool in_set_dest, bool in_c
 
   if (expr.op == RtlOp::kSet && expr.children.size() == 2) {
     RegisterPatternOccurrences(expr.children[0], /*in_set_dest=*/true, /*in_clobber=*/false,
-                               ref_weight, gp64, fp64, occs, expr_to_occ);
+                               ref_weight, gp64, fp64, fp_is_fixed, occs, expr_to_occ);
     RegisterPatternOccurrences(expr.children[1], /*in_set_dest=*/false, /*in_clobber=*/false,
-                               ref_weight, gp64, fp64, occs, expr_to_occ);
+                               ref_weight, gp64, fp64, fp_is_fixed, occs, expr_to_occ);
     return;
   }
 
   if (expr.op == RtlOp::kClobber && !expr.children.empty()) {
     RegisterPatternOccurrences(expr.children[0], /*in_set_dest=*/true, /*in_clobber=*/true,
-                               ref_weight, gp64, fp64, occs, expr_to_occ);
+                               ref_weight, gp64, fp64, fp_is_fixed, occs, expr_to_occ);
     return;
   }
 
   if (expr.op == RtlOp::kMem) {
     for (const RtlExpr& child : expr.children) {
       RegisterPatternOccurrences(child, /*in_set_dest=*/false, /*in_clobber=*/false, ref_weight,
-                                 gp64, fp64, occs, expr_to_occ);
+                                 gp64, fp64, fp_is_fixed, occs, expr_to_occ);
     }
     return;
   }
@@ -590,7 +581,7 @@ void RegisterPatternOccurrences(const RtlExpr& expr, bool in_set_dest, bool in_c
   for (size_t i = 0; i < expr.children.size(); ++i) {
     const bool child_dest = pass_dest && (i == 0);
     RegisterPatternOccurrences(expr.children[i], child_dest, in_clobber, ref_weight, gp64, fp64,
-                               occs, expr_to_occ);
+                               fp_is_fixed, occs, expr_to_occ);
   }
 }
 
@@ -1314,14 +1305,14 @@ void RewritePatternAst(RtlExpr* expr, int outgoing_args_size,
 }
 
 void RewriteNoteDatumExpr(RtlExpr* expr, RtlMachineMode note_kind, bool gp64, bool fp64,
-                          int outgoing_args_size, const InsnNoteContext& note_ctx,
+                          bool fp_is_fixed, int outgoing_args_size, const InsnNoteContext& note_ctx,
                           const ReachState* retval_libcall_reach,
                           const ActiveLibcallNoteScope* active_libcall_scope,
                           const std::vector<RegOccurrence>& occs, WebUnionFind* uf,
                           const std::vector<bool>& pinned_occ,
                           const absl::flat_hash_map<int, WebComponentStats>& comp_stats,
                           const absl::flat_hash_map<int, int>& slot_to_pseudo) {
-  if (IsCandidateHardRegNode(*expr, gp64, fp64)) {
+  if (IsCandidateHardRegNode(*expr, gp64, fp64, fp_is_fixed)) {
     const RegWebSignature sig = MakeRegWebSignature(*expr);
     int pseudo = -1;
     if (note_kind == RtlMachineMode::kRegUnused) {
@@ -1389,32 +1380,35 @@ void RewriteNoteDatumExpr(RtlExpr* expr, RtlMachineMode note_kind, bool gp64, bo
   }
 
   for (RtlExpr& child : expr->children) {
-    RewriteNoteDatumExpr(&child, note_kind, gp64, fp64, outgoing_args_size, note_ctx,
+    RewriteNoteDatumExpr(&child, note_kind, gp64, fp64, fp_is_fixed, outgoing_args_size, note_ctx,
                          retval_libcall_reach, active_libcall_scope, occs, uf, pinned_occ,
                          comp_stats, slot_to_pseudo);
   }
 }
 
-void RewriteSequenceSubInsnNotesChain(RtlExpr* chain, bool gp64, bool fp64, int outgoing_args_size,
-                                      const InsnNoteContext& note_ctx,
+void RewriteSequenceSubInsnNotesChain(RtlExpr* chain, bool gp64, bool fp64, bool fp_is_fixed,
+                                      int outgoing_args_size, const InsnNoteContext& note_ctx,
                                       const std::vector<RegOccurrence>& occs, WebUnionFind* uf,
                                       const std::vector<bool>& pinned_occ,
                                       const absl::flat_hash_map<int, WebComponentStats>& comp_stats,
                                       const absl::flat_hash_map<int, int>& slot_to_pseudo) {
   if (chain->op == RtlOp::kExprList && chain->mode != RtlMachineMode::kNone &&
       !chain->children.empty()) {
-    RewriteNoteDatumExpr(&chain->children[0], chain->mode, gp64, fp64, outgoing_args_size, note_ctx,
+    RewriteNoteDatumExpr(&chain->children[0], chain->mode, gp64, fp64, fp_is_fixed,
+                         outgoing_args_size, note_ctx,
                          /*retval_libcall_reach=*/nullptr, /*active_libcall_scope=*/nullptr, occs,
                          uf, pinned_occ, comp_stats, slot_to_pseudo);
     if (chain->children.size() >= 2) {
-      RewriteSequenceSubInsnNotesChain(&chain->children[1], gp64, fp64, outgoing_args_size,
-                                       note_ctx, occs, uf, pinned_occ, comp_stats, slot_to_pseudo);
+      RewriteSequenceSubInsnNotesChain(&chain->children[1], gp64, fp64, fp_is_fixed,
+                                       outgoing_args_size, note_ctx, occs, uf, pinned_occ,
+                                       comp_stats, slot_to_pseudo);
     }
     return;
   }
   if (chain->op == RtlOp::kInsnList && chain->children.size() >= 2) {
-    RewriteSequenceSubInsnNotesChain(&chain->children[1], gp64, fp64, outgoing_args_size, note_ctx,
-                                     occs, uf, pinned_occ, comp_stats, slot_to_pseudo);
+    RewriteSequenceSubInsnNotesChain(&chain->children[1], gp64, fp64, fp_is_fixed,
+                                     outgoing_args_size, note_ctx, occs, uf, pinned_occ, comp_stats,
+                                     slot_to_pseudo);
   }
 }
 
@@ -1559,7 +1553,9 @@ RtlControlFlowGraph InvertAlterReg(const RtlControlFlowGraph& allocated_cfg,
 
   const int frame_size_bytes = allocated_cfg.sideband.frame_size_bytes;
   const int outgoing_args_size = allocated_cfg.sideband.outgoing_args_size;
-  const bool float_store = HasFloatStoreFlag(profile.c_flags);
+  const bool fp_is_fixed =
+      allocated_cfg.sideband.frame_pointer_needed || !compiler_flags.flag_omit_frame_pointer;
+  const bool float_store = compiler_flags.flag_float_store;
   const bool can_check_stack_slots =
       compiler_flags.opt_level == 0 && allocated_cfg.sideband.frame_pointer_needed &&
       !float_store && outgoing_args_size >= 0 && frame_size_bytes >= kStackSlotAlignmentBytes &&
@@ -1584,13 +1580,13 @@ RtlControlFlowGraph InvertAlterReg(const RtlControlFlowGraph& allocated_cfg,
         for (const RtlExpr& sub : pn.pattern.children) {
           if (!sub.children.empty()) {
             RegisterPatternOccurrences(sub.children[0], /*in_set_dest=*/false,
-                                       /*in_clobber=*/false, ref_weight, gp64, fp64, &occs,
-                                       &expr_to_occ);
+                                       /*in_clobber=*/false, ref_weight, gp64, fp64, fp_is_fixed,
+                                       &occs, &expr_to_occ);
           }
         }
       } else {
         RegisterPatternOccurrences(pn.pattern, /*in_set_dest=*/false, /*in_clobber=*/false,
-                                   ref_weight, gp64, fp64, &occs, &expr_to_occ);
+                                   ref_weight, gp64, fp64, fp_is_fixed, &occs, &expr_to_occ);
       }
 
       if (can_check_stack_slots) {
@@ -1609,8 +1605,8 @@ RtlControlFlowGraph InvertAlterReg(const RtlControlFlowGraph& allocated_cfg,
 
   if (epilogue_delay_parsed.has_value()) {
     RegisterPatternOccurrences(epilogue_delay_parsed->pattern, /*in_set_dest=*/false,
-                               /*in_clobber=*/false, /*ref_weight=*/1, gp64, fp64, &occs,
-                               &expr_to_occ);
+                               /*in_clobber=*/false, /*ref_weight=*/1, gp64, fp64, fp_is_fixed,
+                               &occs, &expr_to_occ);
     if (can_check_stack_slots) {
       AnalyzeFpStackSlots(epilogue_delay_parsed->pattern, /*in_set_dest=*/false, /*in_note=*/false,
                           /*ref_weight=*/1, frame_size_bytes, outgoing_args_size, &stack_slots,
@@ -1621,9 +1617,9 @@ RtlControlFlowGraph InvertAlterReg(const RtlControlFlowGraph& allocated_cfg,
   // Pass 2: Forward reaching-definitions fixed-point dataflow across `rpo_blocks`.
   std::vector<ReachState> reach_in(num_blocks);
   for (int w = 0; w < kFirstPseudoRegister; ++w) {
-    if (IsIncomingArgumentHardReg(w)) {
+    if (IsIncomingArgumentHardReg(w) || (!fp_is_fixed && w == kFramePointerRegno)) {
       reach_in[0].defs[w].push_back(kPinnedAbiToken);
-    } else if (IsAllocatableHardReg(w)) {
+    } else if (IsAllocatableHardReg(w, fp_is_fixed)) {
       reach_in[0].defs[w].push_back(kUninitEntryToken);
     }
   }
@@ -1944,7 +1940,7 @@ RtlControlFlowGraph InvertAlterReg(const RtlControlFlowGraph& allocated_cfg,
           }
           if (s < block_seq_note_ctxs[b][i].size()) {
             for (size_t extra_idx = 1; extra_idx < sub.children.size(); ++extra_idx) {
-              RewriteSequenceSubInsnNotesChain(&sub.children[extra_idx], gp64, fp64,
+              RewriteSequenceSubInsnNotesChain(&sub.children[extra_idx], gp64, fp64, fp_is_fixed,
                                                outgoing_args_size, block_seq_note_ctxs[b][i][s],
                                                occs, &uf, pinned_occ, comp_stats, slot_to_pseudo);
             }
@@ -1957,8 +1953,8 @@ RtlControlFlowGraph InvertAlterReg(const RtlControlFlowGraph& allocated_cfg,
 
       for (RtlRegNote& note : parsed.reg_notes) {
         if (note.list_op == RtlOp::kExprList) {
-          RewriteNoteDatumExpr(&note.datum, note.kind, gp64, fp64, outgoing_args_size, note_ctx,
-                               retval_reach_ptr, active_scope_ptr, occs, &uf, pinned_occ,
+          RewriteNoteDatumExpr(&note.datum, note.kind, gp64, fp64, fp_is_fixed, outgoing_args_size,
+                               note_ctx, retval_reach_ptr, active_scope_ptr, occs, &uf, pinned_occ,
                                comp_stats, slot_to_pseudo);
         }
       }
@@ -1980,7 +1976,7 @@ RtlControlFlowGraph InvertAlterReg(const RtlControlFlowGraph& allocated_cfg,
     if (has_epilogue_delay_ctx) {
       for (RtlRegNote& note : epilogue_delay_parsed->reg_notes) {
         if (note.list_op == RtlOp::kExprList) {
-          RewriteNoteDatumExpr(&note.datum, note.kind, gp64, fp64, outgoing_args_size,
+          RewriteNoteDatumExpr(&note.datum, note.kind, gp64, fp64, fp_is_fixed, outgoing_args_size,
                                epilogue_delay_note_ctx, /*retval_libcall_reach=*/nullptr,
                                /*active_libcall_scope=*/nullptr, occs, &uf, pinned_occ, comp_stats,
                                slot_to_pseudo);

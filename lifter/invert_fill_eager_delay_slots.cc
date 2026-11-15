@@ -2339,9 +2339,9 @@ RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eag
       }
       if (need_loop_beg) {
         bool already_beg = false;
+        bool prev_emits_jump = false;
         if (hdr_b > 0) {
           const auto& prev_blk = out.rpo_blocks[hdr_b - 1];
-          bool prev_emits_jump = false;
           if (!prev_blk.instructions.empty()) {
             auto pl = ParsePatternAndNotes(prev_blk.instructions.back());
             prev_emits_jump = pl.ok() && IsAnyJumpOrReturnTopExpr(pl.value().pattern);
@@ -2363,8 +2363,11 @@ RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eag
           }
         }
         if (!already_beg) {
-          if (hdr_b > 0 && BlockHasZeroRealActiveInsns(out.rpo_blocks[hdr_b - 1]) &&
-              out.rpo_blocks[hdr_b - 1].successors.size() == 1 &&
+          // In `flow.c:find_basic_blocks`, `NOTE_INSN_LOOP_BEG` preceding a
+          // loop header label `L_hdr` sits at the tail of a pure-fallthrough
+          // predecessor basic block `hdr_b - 1` (`!prev_emits_jump &&
+          // successors == {hdr_b}`) rather than forming a separate basic block.
+          if (hdr_b > 0 && !prev_emits_jump && out.rpo_blocks[hdr_b - 1].successors.size() == 1 &&
               out.rpo_blocks[hdr_b - 1].successors[0] == hdr_b) {
             out.rpo_blocks[hdr_b - 1].instructions.push_back(
                 RtlExpr::MakeNote("NOTE_INSN_LOOP_BEG").ToGccPrintRtlString());

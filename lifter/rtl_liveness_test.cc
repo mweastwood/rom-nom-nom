@@ -489,5 +489,42 @@ TEST(RtlLivenessTest, PreReloadVsPostReloadHardSubregAndAsmOperandsVectorOrder) 
             gcc_asm_cfg.sideband.basic_block_live_at_start);
 }
 
+TEST(RtlLivenessTest, PreservePhantomPseudosOptionControlsZeroOccurrenceCombineTemporaries) {
+  const CompilationProfile o2_profile{.optimize_level = 2, .c_flags = {}};
+  RtlControlFlowGraph base;
+  base.pass = RtlPassKind::kLreg;
+  RtlBasicBlock b0;
+  b0.id = 0;
+  b0.instructions = {
+      "(set (reg/i:SI 2 v0) (reg:SI 4 a0))",
+      "(use (reg/i:SI 2 v0))",
+  };
+  b0.SyncRtlInsnsFromInstructions();
+  base.rpo_blocks = {b0};
+  base.sideband.max_regno = 76;
+  base.sideband.reg_n_refs[75] = 2;
+  base.sideband.reg_n_deaths[75] = 1;
+  base.sideband.reg_live_length[75] = 2;
+
+  RtlControlFlowGraph flow_cfg = base;
+  ReconstructRtlLiveness(
+      &flow_cfg, o2_profile,
+      {.reload_completed = false, .update_reg_notes = true, .preserve_phantom_pseudos = false});
+  EXPECT_FALSE(flow_cfg.sideband.reg_n_refs.contains(75));
+  EXPECT_FALSE(flow_cfg.sideband.reg_n_deaths.contains(75));
+  EXPECT_FALSE(flow_cfg.sideband.reg_live_length.contains(75));
+
+  RtlControlFlowGraph post_combine_cfg = base;
+  ReconstructRtlLiveness(
+      &post_combine_cfg, o2_profile,
+      {.reload_completed = false, .update_reg_notes = true, .preserve_phantom_pseudos = true});
+  EXPECT_EQ(post_combine_cfg.sideband.reg_n_refs[75], 2);
+  EXPECT_EQ(post_combine_cfg.sideband.reg_n_deaths[75], 1);
+  EXPECT_EQ(post_combine_cfg.sideband.reg_live_length[75], 2);
+  EXPECT_FALSE(post_combine_cfg.sideband.reg_n_sets.contains(75));
+  EXPECT_FALSE(post_combine_cfg.sideband.reg_renumber.contains(75));
+  EXPECT_GE(post_combine_cfg.sideband.max_regno, 76);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::lifter

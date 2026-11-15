@@ -1353,7 +1353,7 @@ RightInverseResult RightInverseVerifier::VerifySuffixRightInverse(
   if (target_rank <= PassPipelineRank(RtlPassKind::kLreg)) {
     y = inverses_->InvertAlterReg(y, effective_profile);
     if (y.rpo_blocks.empty()) return step_fail("InvertAlterReg");
-    y = inverses_->InvertReload(y);
+    y = inverses_->InvertReload(y, effective_profile);
     if (y.rpo_blocks.empty()) return step_fail("InvertReload");
     if (opt_enabled) {
       y = inverses_->InvertGlobalAlloc(y);
@@ -1670,7 +1670,8 @@ RightInverseResult RightInverseVerifier::VerifyReloadRightInverse(
   RightInverseResult result;
   result.expected_summary = reload_cfg_x.FormatSummary();
 
-  const RtlControlFlowGraph lifted_y = inverses_->InvertReload(reload_cfg_x);
+  const CompilationProfile profile = hooks_->ActiveCompilationProfile();
+  const RtlControlFlowGraph lifted_y = inverses_->InvertReload(reload_cfg_x, profile);
   if (!reload_cfg_x.rpo_blocks.empty() && lifted_y.rpo_blocks.empty()) {
     result.matches = false;
     result.diff_detail = "Inverse returned empty RtlControlFlowGraph";
@@ -1750,7 +1751,7 @@ RightInverseResult RightInverseVerifier::VerifyGlobalReloadStageRightInverse(
         if (!x.rpo_blocks.empty() && pre_alter.rpo_blocks.empty()) {
           return RtlControlFlowGraph{};
         }
-        RtlControlFlowGraph pre_reload = inverses_->InvertReload(pre_alter);
+        RtlControlFlowGraph pre_reload = inverses_->InvertReload(pre_alter, profile);
         if (!pre_alter.rpo_blocks.empty() && pre_reload.rpo_blocks.empty()) {
           return RtlControlFlowGraph{};
         }
@@ -2811,7 +2812,7 @@ RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
       cand_pre = inverses_->InvertGlobalAlloc(snap.post_state);
       break;
     case SubfunctionId::kReload:
-      cand_pre = inverses_->InvertReload(snap.post_state);
+      cand_pre = inverses_->InvertReload(snap.post_state, snap_profile);
       break;
     case SubfunctionId::kAlterReg:
       cand_pre = inverses_->InvertAlterReg(snap.post_state, snap_profile);

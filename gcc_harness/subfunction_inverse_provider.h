@@ -280,6 +280,10 @@ class SubfunctionInverseProvider {
 
   // 13b. Inverse of `reload1.c:reload`.
   virtual RtlControlFlowGraph InvertReload(const RtlControlFlowGraph& /*x*/) const { return {}; }
+  virtual RtlControlFlowGraph InvertReload(const RtlControlFlowGraph& x,
+                                           const CompilationProfile& /*profile*/) const {
+    return InvertReload(x);
+  }
 
   // 13c. Inverse of `global.c:global_alloc`.
   virtual RtlControlFlowGraph InvertGlobalAlloc(const RtlControlFlowGraph& /*x*/) const {

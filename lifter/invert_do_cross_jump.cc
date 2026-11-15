@@ -1502,6 +1502,287 @@ void RestoreDeletedNoopMdOutputReloads(RtlControlFlowGraph* cfg, bool gp64, bool
   }
 }
 
+constexpr int kReturnAddressRegno = 31;
+
+bool IsPostReloadReturnInternalPattern(const RtlExpr& pat) {
+  return pat.op == RtlOp::kParallel && pat.children.size() == 2 &&
+         pat.children[0].op == RtlOp::kReturn && pat.children[1].op == RtlOp::kUse &&
+         pat.children[1].children.size() == 1 && pat.children[1].children[0].IsHardReg() &&
+         pat.children[1].children[0].RegNo() == kReturnAddressRegno;
+}
+
+bool IsUnconditionalJumpOrTablejumpPattern(const RtlExpr& pat) {
+  if (pat.op == RtlOp::kSet && pat.children.size() == 2 && pat.children[0].op == RtlOp::kPc) {
+    return pat.children[1].op == RtlOp::kLabelRef || pat.children[1].op == RtlOp::kReg;
+  }
+  if (pat.op == RtlOp::kParallel && !pat.children.empty()) {
+    return IsUnconditionalJumpOrTablejumpPattern(pat.children[0]);
+  }
+  return false;
+}
+
+bool IsMipsCalleeSavedOrRaReg(int regno) {
+  return (regno >= 16 && regno <= 23) || regno == 30 || regno == 31 || (regno >= 52 && regno <= 63);
+}
+
+bool SubtreeContainsCallOrCalleeSavedReg(const RtlExpr& expr, bool gp64, bool fp64) {
+  bool found = false;
+  expr.Visit([&](const RtlExpr& node) {
+    if (found) {
+      return;
+    }
+    if (node.op == RtlOp::kCall) {
+      found = true;
+      return;
+    }
+    if (node.IsHardReg()) {
+      const int r = node.RegNo();
+      const int nw = std::max(1, MipsHardRegNregs(r, node.mode, gp64, fp64));
+      for (int k = 0; k < nw; ++k) {
+        if (IsMipsCalleeSavedOrRaReg(r + k)) {
+          found = true;
+          return;
+        }
+      }
+    }
+  });
+  return found;
+}
+
+// Reverses `jump2` (`jump.c:289-306, 2065-2081`) insertion of trailing
+// `return_internal` (`(parallel [(return) (use (reg:SI 31 ra))])`) on zero-frame
+// leaf functions (`HAVE_return` == `reload_completed && simple_epilogue_p()`,
+// `mips.md:5928-5941`, `mips.c:5398-5407`).
+//
+// In KMC GCC 2.7.2 MIPS, `define_expand "epilogue"` (`mips.md:6056`) is
+// commented out, so `.09.greg` and `.10.sched2` never contain `return_internal`;
+// `jump2` appends `emit_jump_insn(gen_return()); emit_barrier();` at
+// `get_last_insn()` when `simple_epilogue_p()` holds (`total_size == 0`) and
+// `get_last_insn()` is a non-`BARRIER` non-`NOTE` item. Note that `jump2`
+// never converts early jumps `(set (pc) (label_ref L_exit))` in `b < n - 1`
+// into `return_internal` because `redirect_exp` (`jump.c:3801`) attempts bare
+// `(return)`, which `validate_change` rejects on MIPS.
+bool UnexpandPostReloadTrailingReturnInsn(RtlControlFlowGraph* cfg,
+                                          const CompilationProfile& profile) {
+  if (profile.optimize_level <= 0 || cfg->rpo_blocks.empty() ||
+      cfg->sideband.frame_size_bytes != 0 || cfg->sideband.frame_pointer_needed ||
+      cfg->sideband.outgoing_args_size != 0) {
+    return false;
+  }
+
+  const size_t n = cfg->rpo_blocks.size();
+  if (n == 1 && cfg->rpo_blocks[0].instructions.size() == 1 && !cfg->rpo_blocks[0].has_label) {
+    // Removing `return_internal` from a 1-block unlabeled 1-insn CFG would leave
+    // zero non-`NOTE` items in the RTL chain (`jump.c:296-300` `insn == 0`).
+    return false;
+  }
+
+  std::vector<size_t> ret_blocks;
+  for (size_t b = 0; b < n; ++b) {
+    const auto& insns = cfg->rpo_blocks[b].instructions;
+    for (size_t i = 0; i < insns.size(); ++i) {
+      const auto parsed = ParsePatternAndNotes(insns[i]);
+      if (!parsed.ok()) {
+        return false;
+      }
+      if (IsPostReloadReturnInternalPattern(parsed->pattern)) {
+        if (i + 1 != insns.size() || !parsed->reg_notes.empty()) {
+          return false;
+        }
+        ret_blocks.push_back(b);
+      }
+    }
+  }
+  // In KMC GCC 2.7.2 MIPS, `gen_return()` is emitted at most once per zero-frame
+  // leaf function (at `get_last_insn()` in `jump.c:303, 2079` or `reorg.c:833`),
+  // because `redirect_exp` (`jump.c:3801`) attempts bare `(return)` which fails
+  // `validate_change`. If hand-written assembly contains 2+ `jr $ra` exits
+  // (`ret_blocks.size() > 1`), `jump2` + `dbr_schedule` cannot synthesize the
+  // non-trailing `return_internal`s from a `return_internal`-free `.10.sched2`,
+  // so preserving them is required for $f(g(x)) = x$.
+  if (ret_blocks.size() != 1) {
+    return false;
+  }
+
+  const size_t ret_b = ret_blocks[0];
+  {
+    const RtlBasicBlock& ret_blk = cfg->rpo_blocks[ret_b];
+    if (!ret_blk.successors.empty() || !ret_blk.addr_vec_targets.empty()) {
+      return false;
+    }
+    if (ret_blk.instructions.size() >= 2) {
+      const auto prev_parsed =
+          ParsePatternAndNotes(ret_blk.instructions[ret_blk.instructions.size() - 2]);
+      if (!prev_parsed.ok() || IsUnconditionalJumpOrTablejumpPattern(prev_parsed->pattern)) {
+        return false;
+      }
+    } else if (!ret_blk.has_label && ret_b >= 1) {
+      const RtlBasicBlock& pred_blk = cfg->rpo_blocks[ret_b - 1];
+      const bool pred_falls_through =
+          std::find(pred_blk.successors.begin(), pred_blk.successors.end(), ret_b) !=
+          pred_blk.successors.end();
+      if (!pred_falls_through || pred_blk.instructions.empty()) {
+        return false;
+      }
+      const auto pred_last = ParsePatternAndNotes(pred_blk.instructions.back());
+      if (!pred_last.ok() || IsUnconditionalJumpOrTablejumpPattern(pred_last->pattern)) {
+        return false;
+      }
+    }
+  }
+
+  if (ret_b != n - 1) {
+    const RtlBasicBlock& tail_blk = cfg->rpo_blocks[n - 1];
+    if (tail_blk.instructions.empty() || !tail_blk.addr_vec_targets.empty()) {
+      return false;
+    }
+    const auto tail_last = ParsePatternAndNotes(tail_blk.instructions.back());
+    if (!tail_last.ok() || !IsUnconditionalJumpOrTablejumpPattern(tail_last->pattern)) {
+      return false;
+    }
+  }
+
+  bool gp64 = false;
+  bool fp64 = false;
+  DetectMipsRegisterWidthFlags(*cfg, &profile, &gp64, &fp64);
+  for (size_t b = 0; b < n; ++b) {
+    const auto& insns = cfg->rpo_blocks[b].instructions;
+    const size_t limit = (b == ret_b) ? (insns.size() - 1) : insns.size();
+    for (size_t i = 0; i < limit; ++i) {
+      const auto parsed = ParsePatternAndNotes(insns[i]);
+      if (!parsed.ok() || SubtreeContainsCallOrCalleeSavedReg(parsed->pattern, gp64, fp64)) {
+        return false;
+      }
+    }
+  }
+  if (cfg->sideband.epilogue_delay_pattern.has_value() &&
+      !cfg->sideband.epilogue_delay_pattern->empty()) {
+    const auto ep_parsed = ParsePatternAndNotes(*cfg->sideband.epilogue_delay_pattern);
+    if (!ep_parsed.ok() || SubtreeContainsCallOrCalleeSavedReg(ep_parsed->pattern, gp64, fp64)) {
+      return false;
+    }
+  }
+
+  if (ret_b == n - 1) {
+    RtlBasicBlock& mut_last = cfg->rpo_blocks[n - 1];
+    mut_last.instructions.pop_back();
+    if (!mut_last.rtl_insns.empty()) {
+      mut_last.rtl_insns.pop_back();
+    }
+    mut_last.has_trailing_barrier = false;
+    mut_last.successors.clear();
+
+    if (n > 1 && mut_last.instructions.empty() && !mut_last.has_label &&
+        mut_last.addr_vec_targets.empty()) {
+      auto& pred_succs = cfg->rpo_blocks[n - 2].successors;
+      pred_succs.erase(std::remove(pred_succs.begin(), pred_succs.end(), n - 1), pred_succs.end());
+      cfg->rpo_blocks.pop_back();
+    }
+  } else {
+    size_t total_labels = 0;
+    for (size_t b = 0; b < n; ++b) {
+      if (cfg->rpo_blocks[b].has_label) {
+        ++total_labels;
+      }
+      if (!cfg->rpo_blocks[b].addr_vec_targets.empty()) {
+        ++total_labels;
+      }
+    }
+
+    const size_t exit_idx = n;
+    const std::string exit_lbl = absl::StrCat("L", total_labels);
+    RtlBasicBlock exit_blk;
+    exit_blk.id = static_cast<uint32_t>(exit_idx);
+    exit_blk.has_label = true;
+    cfg->rpo_blocks.push_back(std::move(exit_blk));
+
+    RtlBasicBlock& mut_b = cfg->rpo_blocks[ret_b];
+    if (mut_b.rtl_insns.size() != mut_b.instructions.size()) {
+      mut_b.SyncRtlInsnsFromInstructions();
+    }
+    const RtlExpr jump_expr =
+        RtlExpr::MakeSet(RtlExpr::MakePc(), RtlExpr::MakeSymbolicLabelRef(exit_lbl));
+    mut_b.rtl_insns.back().SetFromExpr(jump_expr);
+    mut_b.instructions.back() = mut_b.rtl_insns.back().canonical_pattern;
+    mut_b.has_trailing_barrier = true;
+    mut_b.successors = {exit_idx};
+  }
+
+  // When `.12.dbr` ended in a backward jump and interior `return_internal`
+  // blocks were un-expanded (either in Stage 1 `make_return_insns` or above in
+  // `jump2`), `jump2` had deleted the trailing `end_of_function_label` and its
+  // `(use (reg/i ...))` once all interior jumps became `RETURN`. Restore
+  // `(use (reg/i:<mode> <regno>))` in the trailing exit block if `cfg` marks a
+  // return register with `REG_FUNCTION_VALUE_P` (`reg/i`) and has no existing
+  // return `USE`.
+  if (!cfg->rpo_blocks.empty() && cfg->rpo_blocks.back().successors.empty()) {
+    bool has_existing_ret_use = false;
+    bool saw_r2 = false;
+    bool saw_r3 = false;
+    bool saw_r2_di = false;
+    bool saw_f0 = false;
+    bool saw_f1 = false;
+    bool saw_f0_df = false;
+    for (const RtlBasicBlock& blk : cfg->rpo_blocks) {
+      for (const std::string& pat_s : blk.instructions) {
+        const auto parsed = ParsePatternAndNotes(pat_s);
+        if (!parsed.ok()) {
+          continue;
+        }
+        if (parsed->pattern.op == RtlOp::kUse) {
+          parsed->pattern.Visit([&](const RtlExpr& node) {
+            if (node.IsHardReg()) {
+              const int r = node.RegNo();
+              if (r == 2 || r == 3 || r == 32 || r == 33) {
+                has_existing_ret_use = true;
+              }
+            }
+          });
+        }
+        parsed->pattern.Visit([&](const RtlExpr& node) {
+          if (!node.IsHardReg() || !node.flags.integrated) {
+            return;
+          }
+          const int r = node.RegNo();
+          if (r == 2) {
+            saw_r2 = true;
+            if (node.mode == RtlMachineMode::kDi) {
+              saw_r2_di = true;
+            }
+          } else if (r == 3) {
+            saw_r3 = true;
+          } else if (r == 32) {
+            saw_f0 = true;
+            if (node.mode == RtlMachineMode::kDf) {
+              saw_f0_df = true;
+            }
+          } else if (r == 33) {
+            saw_f1 = true;
+          }
+        });
+      }
+    }
+    if (!has_existing_ret_use && (saw_r2 || saw_r3 || saw_f0 || saw_f1)) {
+      const int ret_regno = (saw_r2 || saw_r3) ? 2 : 32;
+      const RtlMachineMode ret_mode =
+          (ret_regno == 2) ? ((saw_r3 || saw_r2_di) ? RtlMachineMode::kDi : RtlMachineMode::kSi)
+                           : ((saw_f1 || saw_f0_df) ? RtlMachineMode::kDf : RtlMachineMode::kSf);
+      RtlBasicBlock& exit_blk = cfg->rpo_blocks.back();
+      RtlInsn ret_use_insn;
+      ret_use_insn.SetFromExpr(
+          RtlExpr::MakeUse(RtlExpr::MakeReg(ret_mode, ret_regno, RtlFlags{.integrated = true})));
+      exit_blk.AddInsn(std::move(ret_use_insn));
+    }
+  }
+
+  cfg->sideband.saved_gpr_regnos.erase(
+      std::remove(cfg->sideband.saved_gpr_regnos.begin(), cfg->sideband.saved_gpr_regnos.end(),
+                  kReturnAddressRegno),
+      cfg->sideband.saved_gpr_regnos.end());
+  RecomputePostReloadLiveAtStart(cfg, profile);
+  return true;
+}
+
 }  // namespace
 
 RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& jump2_cfg_x) {
@@ -1698,6 +1979,7 @@ RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& jump2_cfg_x,
     for (auto& blk : out.rpo_blocks) {
       blk.SyncRtlInsnsFromInstructions();
     }
+    UnexpandPostReloadTrailingReturnInsn(&out, profile);
   }
   return out;
 }

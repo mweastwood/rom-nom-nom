@@ -90,6 +90,18 @@ TEST(CompilerFlagsTest, RespectsExplicitPassAndTargetFlagOverrides) {
   EXPECT_EQ(custom.small_data_threshold, 8);
   EXPECT_TRUE(custom.gas_debug);
   EXPECT_FALSE(custom.GasOptimizesAndReordersInsns());
+  EXPECT_FALSE(custom.flag_single_float);
+  EXPECT_FALSE(custom.flag_float_store);
+
+  const ParsedCompilerFlags fp_overrides =
+      ParsedCompilerFlags::Parse("-O2 -msingle-float -ffloat-store");
+  EXPECT_TRUE(fp_overrides.flag_single_float);
+  EXPECT_TRUE(fp_overrides.flag_float_store);
+
+  const ParsedCompilerFlags fp_reset =
+      ParsedCompilerFlags::Parse("-O2 -m4650 -mdouble-float -ffloat-store -fno-float-store");
+  EXPECT_FALSE(fp_reset.flag_single_float);
+  EXPECT_FALSE(fp_reset.flag_float_store);
 }
 
 }  // namespace

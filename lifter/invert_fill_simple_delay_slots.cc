@@ -665,7 +665,7 @@ void RecombineReorgSplitIdioms(RtlControlFlowGraph* cfg, const CompilationProfil
   bool recombined_split_movstrsi = false;
   for (size_t b = 0; b < parsed_blocks.size(); ++b) {
     if (TryRecombineAdjacentSplitMovstrsiInBlock(&parsed_blocks[b],
-                                                 /*mark_newly_folded_sentinel=*/true)) {
+                                                 /*mark_newly_folded_sentinel=*/true, gp64)) {
       recombined_split_movstrsi = true;
     }
   }

@@ -28,6 +28,17 @@ struct RtlLivenessOptions {
   // reconstructing missing `call_fusage`, `basic_block_live_at_start`, and
   // `RtlSidebandState` flow statistics.
   bool update_reg_notes = true;
+
+  // When `false` (default, matching `flow.c:life_analysis` at `.05.flow`), any
+  // pseudo register with zero RTL occurrences has its `reg_n_refs`,
+  // `reg_n_deaths`, and `reg_live_length` cleared to `0` (absent).
+  // When `true` (for post-`combine` stages `.06.combine`..`.08.lreg` where
+  // `combine.c:56` eliminated all RTL occurrences of a temporary after
+  // `flow_analysis`), preserves incoming unallocated phantom pseudos
+  // (`r >= kMipsFirstPseudoRegister`, `reg_renumber` absent, `reg_n_refs > 0`,
+  // `reg_n_sets == 0`, zero RTL occurrences) along with their `reg_n_refs`,
+  // `reg_n_deaths`, `reg_live_length`, and `max_regno` bound.
+  bool preserve_phantom_pseudos = false;
 };
 
 // Reconstructs GCC 2.7.2 dataflow liveness and `RtlSidebandState` flow

@@ -771,5 +771,63 @@ TEST(InvertFillEagerDelaySlotsUnitTest, PreservesDiModeLibcallFusageAcrossMerged
   EXPECT_TRUE(res.matches) << res.diff_detail;
 }
 
+TEST(InvertFillEagerDelaySlotsUnitTest,
+     LoopBegNoteAfterFallthroughPredecessorStaysInPredecessorWithoutExtraBlock) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  const std::vector<std::string> flags = {"-O2", "-mips1"};
+  hooks.ApplyCompilationProfile(CompilationProfile{.optimize_level = 2, .c_flags = flags});
+  ProductionFillEagerDelaySlotsProvider provider;
+  RightInverseVerifier verifier(&ctx, &hooks, &provider);
+
+  // `B0` initializes loop state (`v0 = 0`) and also holds the moved first-iteration
+  // `(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 3)))` after `reorg.c` shifted `L0:`
+  // past `v0 = v0 + 3` when stealing it into `B1`'s backward branch delay slot (with opposite
+  // fallthrough compensation `(-3)` in `B2`, `reorg.c:3528-3586`), while Stage 0 post-`dbr` input
+  // has no `NOTE_INSN_LOOP_BEG` in `B0`.
+  // `InvertFillEagerDelaySlots` must move `v0 = v0 + 3` back to `B1` and attach
+  // `(note NOTE_INSN_LOOP_BEG)` to the end of `B0` rather than inserting a spurious standalone
+  // note-only block between `B0` and `B1`!
+  RtlControlFlowGraph loop_cfg;
+  loop_cfg.pass = RtlPassKind::kDbr;
+  loop_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 2 v0) (const_int 0))",
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 3)))",
+                },
+                {1}),
+      MakeBlock(
+          1, true,
+          {
+              "(set (reg:SI 4 a0) (plus:SI (reg:SI 4 a0) (const_int -1)))",
+              "(sequence [(jump_insn (set (pc) (if_then_else (gt:SI (reg:SI 4 a0) (const_int 0)) "
+              "(label_ref L0) (pc)))) "
+              "(insn/s (set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 3))))])",
+          },
+          {1, 2}),
+      MakeBlock(2, false,
+                {
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int -3)))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+
+  const RtlControlFlowGraph lifted = InvertFillEagerDelaySlots(loop_cfg);
+  ASSERT_EQ(lifted.rpo_blocks.size(), 3u) << lifted.FormatSummary();
+  EXPECT_EQ(lifted.rpo_blocks[0].instructions.back(), "(note NOTE_INSN_LOOP_BEG)");
+
+  const auto eager_snap = hooks.ExecuteSubfunctionBoundary(
+      rom_nom_nom::gcc_harness::SubfunctionId::kFillEagerDelaySlots, lifted, {}, 2, flags);
+  const RightInverseResult res = verifier.VerifySubfunctionBoundaryRightInverse(eager_snap);
+  EXPECT_TRUE(res.matches) << res.diff_detail << "\nlifted:\n"
+                           << lifted.FormatSummary() << "\nactual:\n"
+                           << res.actual_summary;
+  EXPECT_TRUE(
+      InvertFillEagerDelaySlots(eager_snap.post_state).CompareAgainst(lifted).MatchesExactly());
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::lifter

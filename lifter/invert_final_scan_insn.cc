@@ -4784,6 +4784,35 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
     if (profile->optimize_level > 0 && FoldFinalScanMultiInsnTemplates(&cfg, *profile)) {
       StripRegDeadAndUnusedNotesOnCfg(&cfg);
       ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, *profile);
+    } else if (profile->optimize_level == 0) {
+      bool gp64 = false;
+      bool fp64 = false;
+      DetectMipsRegisterWidthFlags(cfg, profile, &gp64, &fp64);
+      for (RtlBasicBlock& blk : cfg.rpo_blocks) {
+        if (blk.instructions.size() < 2) {
+          continue;
+        }
+        std::vector<RtlPatternAndNotes> parsed_blk;
+        parsed_blk.reserve(blk.instructions.size());
+        bool ok = true;
+        for (const std::string& s : blk.instructions) {
+          auto p = ParsePatternAndNotes(s);
+          if (!p.ok()) {
+            ok = false;
+            break;
+          }
+          parsed_blk.push_back(std::move(*p));
+        }
+        if (ok && TryCoalesceMultiBatchMovstrsiInBlock(&parsed_blk, gp64,
+                                                       /*mark_newly_folded_sentinel=*/false)) {
+          blk.instructions.clear();
+          blk.instructions.reserve(parsed_blk.size());
+          for (const auto& pn : parsed_blk) {
+            blk.instructions.push_back(pn.ToGccPrintRtlString());
+          }
+          blk.SyncRtlInsnsFromInstructions();
+        }
+      }
     }
     UpgradeCallOutgoingArgBytes(&cfg, *profile);
   }

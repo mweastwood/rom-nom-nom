@@ -66,11 +66,19 @@ void CollectCompareDiamondDiPairs(const std::vector<std::vector<RtlPatternAndNot
 void CollectExistingDiEvenRegs(const std::vector<std::vector<RtlPatternAndNotes>>& blocks,
                                absl::flat_hash_set<int>* out_di_even_regs, bool* out_has_any_di);
 
-// Recombines adjacent `movstrsi_internal2` (`split_kind = 1`) +
-// `movstrsi_internal3` (`split_kind = 2`) pairs back into unsplit
-// `movstrsi_internal` (`split_kind = 0`, `mips.md:3609`).
+// Recombines `movstrsi_internal2` (`split_kind = 1`) + `movstrsi_internal3`
+// (`split_kind = 2`, or unpacked delay-slot `swr`/`sb`) pairs back into unsplit
+// `movstrsi_internal` (`split_kind = 0`, `mips.md:3609`), and coalesces
+// adjacent multi-batch `movstrsi_internal` chunks (`<= 2 * MAX_MOVE_BYTES`,
+// `mips.c:2361`).
 bool TryRecombineAdjacentSplitMovstrsiInBlock(std::vector<RtlPatternAndNotes>* insns,
-                                              bool mark_newly_folded_sentinel);
+                                              bool mark_newly_folded_sentinel, bool gp64 = false);
+
+// Coalesces adjacent `movstrsi_internal` (`split_kind = 0`) batches emitted by
+// `output_block_move` (`mips.c:2361`, `bytes_a == MAX_MOVE_BYTES`,
+// `bytes_a + bytes_b <= 2 * MAX_MOVE_BYTES`) back into a single instruction.
+bool TryCoalesceMultiBatchMovstrsiInBlock(std::vector<RtlPatternAndNotes>* insns, bool gp64,
+                                          bool mark_newly_folded_sentinel);
 
 // Folds `mips.md` `!TARGET_64BIT` multi-instruction `DImode` arithmetic, shift,
 // and widening multiply templates (`mulsidi3_internal`, `umulsidi3_internal`,

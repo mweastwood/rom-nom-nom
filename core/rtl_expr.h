@@ -320,6 +320,7 @@ struct RtlExpr {
   RtlExpr& MutableSetSrc() { return children.at(1); }
 
   bool IsParallel() const { return op == RtlOp::kParallel; }
+  bool IsCallPattern() const;
   bool IsComparison() const;
   bool IsCommutative() const;
 
@@ -407,6 +408,10 @@ std::string FormatGccPrintRtlPatternAndNotes(const RtlExpr& pattern,
                                              absl::Span<const RtlRegNote> notes,
                                              bool bracketed = false,
                                              absl::Span<const RtlExpr> call_fusage = {});
+
+inline bool IsCallPattern(const RtlExpr& pat) {
+  return pat.IsCallPattern();
+}
 
 }  // namespace rom_nom_nom
 

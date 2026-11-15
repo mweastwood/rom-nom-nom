@@ -8,9 +8,11 @@
 #include <utility>
 #include <vector>
 
+#include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "core/round_trip_test_cases.h"
 #include "core/rtl_cfg.h"
+#include "core/rtl_expr.h"
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
 #include "gcc_harness/right_inverse_verifier.h"
@@ -132,6 +134,26 @@ RtlBasicBlock MakeBlock(uint32_t id, bool has_label, std::vector<std::string> in
   return blk;
 }
 
+bool CfgContainsReturnOp(const RtlControlFlowGraph& cfg) {
+  bool found = false;
+  for (const RtlBasicBlock& blk : cfg.rpo_blocks) {
+    EXPECT_EQ(blk.rtl_insns.size(), blk.instructions.size());
+    for (const RtlInsn& rinsn : blk.rtl_insns) {
+      const absl::StatusOr<RtlExpr> expr = rinsn.ParseExpr();
+      EXPECT_TRUE(expr.ok()) << expr.status();
+      if (!expr.ok()) {
+        continue;
+      }
+      expr->Visit([&](const RtlExpr& node) {
+        if (node.op == RtlOp::kReturn) {
+          found = true;
+        }
+      });
+    }
+  }
+  return found;
+}
+
 class Pass02Jump2CrossJumpTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -182,13 +204,38 @@ TEST_F(Pass02Jump2CrossJumpTest, SyntheticPositiveCrossJumpedJoinBeforeReturn) {
   ASSERT_EQ(lifted.rpo_blocks.size(), 4u);
   EXPECT_EQ(lifted.rpo_blocks[1].instructions.size(), 4u);
   EXPECT_EQ(lifted.rpo_blocks[2].instructions.size(), 3u);
-  EXPECT_EQ(lifted.rpo_blocks[3].instructions.size(), 3u);
+  EXPECT_EQ(lifted.rpo_blocks[3].instructions.size(), 2u);
+  EXPECT_EQ(lifted.rpo_blocks[3].instructions.back(), "(use (reg/i:SI 2 v0))");
 
   const RightInverseResult res = verifier_.VerifyJump2CrossJumpStageRightInverse(cfg);
   EXPECT_TRUE(res.matches) << res.diff_detail << "\nlifted:\n"
                            << lifted.FormatSummary() << "\nexpected:\n"
                            << res.expected_summary << "\nactual:\n"
                            << res.actual_summary;
+}
+
+TEST_F(Pass02Jump2CrossJumpTest,
+       Stage0ToStage2SuffixUnexpandsInteriorReturnInternalOnZeroFrameLeaf) {
+  // Verify end-to-end Stage 0 -> Stage 1 -> Stage 2 suffix composition
+  // (`RtlPassKind::kSched2`) on a compiled `a || b` zero-frame leaf whose
+  // fresh Stage 0 -> Stage 1 lift leaves `return_internal` in an interior
+  // block (`ret_b < n - 1`).
+  RoundTripTestCase branch_or_tc;
+  branch_or_tc.test_name = "SyntheticShortCircuitDisjunctionLeaf";
+  branch_or_tc.function_name = "branch_or";
+  branch_or_tc.original_c = "int branch_or(int a, int b) { return a || b; }\n";
+  branch_or_tc.options.c_flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"};
+  const auto trace = hooks_.TraceForwardCompilation(branch_or_tc);
+
+  const RtlControlFlowGraph fresh_jump2 = InvertPass01DbrSchedule(
+      InvertFinalAndGasFunction(trace.stage0_input), trace.stage0_input.profile);
+  const RtlControlFlowGraph fresh_sched2 =
+      InvertPass02Jump2CrossJump(fresh_jump2, trace.stage0_input.profile);
+  ASSERT_FALSE(fresh_sched2.rpo_blocks.empty());
+  EXPECT_FALSE(CfgContainsReturnOp(fresh_sched2)) << fresh_sched2.FormatSummary();
+  const RightInverseResult suffix_res =
+      verifier_.VerifySuffixRightInverse(RtlPassKind::kSched2, trace.stage0_input);
+  EXPECT_TRUE(suffix_res.matches) << suffix_res.diff_detail;
 }
 
 TEST_F(Pass02Jump2CrossJumpTest, SyntheticPositiveMultiPredecessorCrossJumpedJoin) {

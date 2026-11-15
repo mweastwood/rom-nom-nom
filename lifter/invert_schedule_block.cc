@@ -884,7 +884,1016 @@ bool UnscheduleCalleeSavedFpAluSunkAcrossCall(std::vector<ParsedBlockInsn>* insn
   return any_modified;
 }
 
-void UnscheduleBlockInstructions(RtlBasicBlock* blk, bool gp64, bool fp64) {
+// Reverses `sched2` (`schedule_block`) latency-hiding sinks of `reload`-emitted
+// `=x` (`HI`/`LO`) output reloads `(set (reg:M gpr) (reg:M 64/65))` (and any
+// immediately adjacent dying stack spill store `(set (mem:M stack_slot) (reg:M gpr))`)
+// back immediately after the `mult` `PARALLEL` that defined `HI`/`LO`.
+bool UnscheduleDelayedHiLoReloads(std::vector<ParsedBlockInsn>* insns_ptr,
+                                  bool frame_pointer_needed) {
+  std::vector<ParsedBlockInsn>& insns = *insns_ptr;
+  bool any_modified = false;
+
+  auto extract_stack_mem_range = [&](const RtlExpr& mem, int* out_base, int64_t* out_off,
+                                     int64_t* out_sz) -> bool {
+    if (mem.op != RtlOp::kMem || mem.flags.volatil || mem.children.size() != 1) {
+      return false;
+    }
+    int64_t sz = 0;
+    switch (mem.mode) {
+      case RtlMachineMode::kQi:
+        sz = 1;
+        break;
+      case RtlMachineMode::kHi:
+        sz = 2;
+        break;
+      case RtlMachineMode::kSi:
+      case RtlMachineMode::kSf:
+        sz = 4;
+        break;
+      case RtlMachineMode::kDi:
+      case RtlMachineMode::kDf:
+        sz = 8;
+        break;
+      default:
+        return false;
+    }
+    const RtlExpr& addr = mem.children[0];
+    int base = -1;
+    int64_t off = 0;
+    if (addr.op == RtlOp::kReg) {
+      base = addr.RegNo();
+    } else if (addr.op == RtlOp::kPlus && addr.children.size() == 2 &&
+               addr.children[0].op == RtlOp::kReg && addr.children[1].op == RtlOp::kConstInt) {
+      base = addr.children[0].RegNo();
+      off = addr.children[1].int_val;
+    } else {
+      return false;
+    }
+    const int stack_base = frame_pointer_needed ? kMipsFpRegno : kMipsSpRegno;
+    if (base != kMipsSpRegno && base != stack_base) {
+      return false;
+    }
+    *out_base = base;
+    *out_off = off;
+    *out_sz = sz;
+    return true;
+  };
+
+  auto has_only_dead_note_for = [](const RtlPatternAndNotes& p, int regno) -> bool {
+    if (p.reg_notes.size() != 1) {
+      return false;
+    }
+    const RtlRegNote& n = p.reg_notes[0];
+    return n.kind == RtlMachineMode::kRegDead && n.datum.op == RtlOp::kReg &&
+           !n.datum.IsArgPointerReg() && n.datum.RegNo() == regno;
+  };
+
+  for (size_t i = 0; i + 2 < insns.size(); ++i) {
+    const RtlExpr& mul_pat = insns[i].parsed.pattern;
+    if (mul_pat.op != RtlOp::kParallel || mul_pat.children.size() < 2) {
+      continue;
+    }
+    const RtlExpr& elem0 = mul_pat.children[0];
+    if (elem0.op != RtlOp::kSet || elem0.children.size() != 2 ||
+        elem0.children[0].op != RtlOp::kReg || elem0.children[0].IsArgPointerReg()) {
+      continue;
+    }
+    const int md_reg = elem0.children[0].RegNo();
+    const RtlMachineMode md_mode = elem0.children[0].mode;
+    const RtlOp rhs_op = elem0.children[1].op;
+    const bool valid_mul =
+        (md_reg == 64 && md_mode == RtlMachineMode::kDi && rhs_op == RtlOp::kMult) ||
+        (md_reg == 65 && md_mode == RtlMachineMode::kSi && rhs_op == RtlOp::kMult) ||
+        (md_reg == 64 && md_mode == RtlMachineMode::kSi && rhs_op == RtlOp::kTruncate);
+    if (!valid_mul) {
+      continue;
+    }
+
+    for (size_t mv_idx = i + 1; mv_idx < insns.size(); ++mv_idx) {
+      const RtlExpr& mv_pat = insns[mv_idx].parsed.pattern;
+      if (mv_pat.op == RtlOp::kSet && mv_pat.children.size() == 2 &&
+          mv_pat.children[0].op == RtlOp::kReg && !mv_pat.children[0].IsArgPointerReg() &&
+          mv_pat.children[1].op == RtlOp::kReg && !mv_pat.children[1].IsArgPointerReg() &&
+          mv_pat.children[0].mode == mv_pat.children[1].mode) {
+        const int gpr = mv_pat.children[0].RegNo();
+        const int src_md = mv_pat.children[1].RegNo();
+        const RtlMachineMode mv_mode = mv_pat.children[0].mode;
+        const bool md_match =
+            (src_md == md_reg && mv_mode == md_mode) ||
+            (md_reg == 64 && md_mode == RtlMachineMode::kSi && rhs_op == RtlOp::kTruncate &&
+             src_md == 65 && mv_mode == RtlMachineMode::kSi);
+        if (md_match && gpr >= 1 && gpr < 32 && gpr != kMipsSpRegno &&
+            (!frame_pointer_needed || gpr != kMipsFpRegno) &&
+            has_only_dead_note_for(insns[mv_idx].parsed, src_md)) {
+          if (mv_idx == i + 1) {
+            break;
+          }
+          bool can_hoist_mv = true;
+          for (size_t k = i + 1; k < mv_idx; ++k) {
+            if (insns[k].has_side_effects ||
+                !SetsAreDisjoint(insns[k].read_regs, insns[mv_idx].write_regs) ||
+                !SetsAreDisjoint(insns[k].write_regs, insns[mv_idx].read_regs) ||
+                !SetsAreDisjoint(insns[k].write_regs, insns[mv_idx].write_regs)) {
+              can_hoist_mv = false;
+              break;
+            }
+            for (const RtlRegNote& note : insns[k].parsed.reg_notes) {
+              if (note.datum.op == RtlOp::kReg &&
+                  (insns[mv_idx].read_regs.contains(note.datum.RegNo()) ||
+                   insns[mv_idx].write_regs.contains(note.datum.RegNo()))) {
+                can_hoist_mv = false;
+                break;
+              }
+            }
+            if (!can_hoist_mv) {
+              break;
+            }
+          }
+          if (can_hoist_mv) {
+            bool hoist_adj_store = false;
+            int st_base = -1;
+            int64_t st_off = 0;
+            int64_t st_sz = 0;
+            if (mv_idx + 1 < insns.size()) {
+              const RtlExpr& st_pat = insns[mv_idx + 1].parsed.pattern;
+              if (st_pat.op == RtlOp::kSet && st_pat.children.size() == 2 &&
+                  st_pat.children[1].op == RtlOp::kReg && !st_pat.children[1].IsArgPointerReg() &&
+                  st_pat.children[1].RegNo() == gpr && st_pat.children[1].mode == mv_mode &&
+                  extract_stack_mem_range(st_pat.children[0], &st_base, &st_off, &st_sz) &&
+                  has_only_dead_note_for(insns[mv_idx + 1].parsed, gpr)) {
+                hoist_adj_store = true;
+                for (size_t k = i + 1; k < mv_idx && hoist_adj_store; ++k) {
+                  if (!SetsAreDisjoint(insns[k].write_regs, insns[mv_idx + 1].read_regs)) {
+                    hoist_adj_store = false;
+                    break;
+                  }
+                  if (insns[k].reads_mem || insns[k].writes_mem) {
+                    insns[k].parsed.pattern.Visit([&](const RtlExpr& n) {
+                      if (n.op == RtlOp::kMem) {
+                        int k_base = -1;
+                        int64_t k_off = 0;
+                        int64_t k_sz = 0;
+                        if (extract_stack_mem_range(n, &k_base, &k_off, &k_sz)) {
+                          if (k_base != st_base ||
+                              !((k_off + k_sz <= st_off) || (st_off + st_sz <= k_off))) {
+                            hoist_adj_store = false;
+                          }
+                        } else if (insns[k].writes_mem || !n.flags.unchanging) {
+                          hoist_adj_store = false;
+                        }
+                      }
+                    });
+                  }
+                }
+              }
+            }
+            const size_t hoist_end = hoist_adj_store ? (mv_idx + 2) : (mv_idx + 1);
+            std::rotate(insns.begin() + static_cast<ptrdiff_t>(i + 1),
+                        insns.begin() + static_cast<ptrdiff_t>(mv_idx),
+                        insns.begin() + static_cast<ptrdiff_t>(hoist_end));
+            any_modified = true;
+          }
+          break;
+        }
+      }
+      if (insns[mv_idx].has_side_effects || insns[mv_idx].read_regs.contains(64) ||
+          insns[mv_idx].read_regs.contains(65) || insns[mv_idx].read_regs.contains(66) ||
+          insns[mv_idx].write_regs.contains(64) || insns[mv_idx].write_regs.contains(65) ||
+          insns[mv_idx].write_regs.contains(66)) {
+        break;
+      }
+    }
+  }
+
+  return any_modified;
+}
+
+// Reverses `sched2` hoisting of a 1-cycle callee-saved GPR ALU instruction
+// (e.g., a loop induction increment `addiu $s0, $s0, 1`) up across post-call
+// `caller-save` restore consumers to immediately follow the `caller-save` stack
+// restore loads after a `CALL_INSN`. In `caller-save.c:restore_referenced_regs`,
+// restores are emitted lazily immediately before the first post-call instruction
+// referencing each saved register; leaving a hoisted callee-saved ALU ahead of
+// all restore consumers causes `caller-save` on replay to emit its restores
+// after that ALU, shifting `INSN_LUID` tie-break order in `sched2`.
+bool UnschedulePostCallHoistedCalleeSavedAlu(std::vector<ParsedBlockInsn>* insns_ptr,
+                                             bool frame_pointer_needed) {
+  std::vector<ParsedBlockInsn>& insns = *insns_ptr;
+  bool any_modified = false;
+
+  auto is_stack_load_into_non_callee_saved = [&](const ParsedBlockInsn& insn,
+                                                 int* out_dst) -> bool {
+    int dst = -1;
+    if (!IsSchedulableLoadInsn(insn, &dst) || IsCalleeSavedMipsHardReg(dst) ||
+        dst == kMipsSpRegno || dst == kMipsFpRegno) {
+      return false;
+    }
+    const RtlExpr& mem = insn.parsed.pattern.children[1];
+    if (mem.op != RtlOp::kMem || mem.flags.volatil || mem.children.size() != 1) {
+      return false;
+    }
+    const RtlExpr& addr = mem.children[0];
+    int base = -1;
+    int64_t off = 0;
+    if (addr.op == RtlOp::kReg) {
+      base = addr.RegNo();
+    } else if (addr.op == RtlOp::kPlus && addr.children.size() == 2 &&
+               addr.children[0].op == RtlOp::kReg && addr.children[1].op == RtlOp::kConstInt) {
+      base = addr.children[0].RegNo();
+      off = addr.children[1].int_val;
+    } else {
+      return false;
+    }
+    const int stack_base = frame_pointer_needed ? kMipsFpRegno : kMipsSpRegno;
+    if ((base != kMipsSpRegno && base != stack_base) || off < 16) {
+      return false;
+    }
+    *out_dst = dst;
+    return true;
+  };
+
+  auto insn_mentions_reg_in_notes = [](const ParsedBlockInsn& insn,
+                                       const absl::flat_hash_set<int>& regs) -> bool {
+    for (const RtlRegNote& note : insn.parsed.reg_notes) {
+      if (note.datum.op == RtlOp::kReg && !note.datum.IsArgPointerReg() &&
+          regs.contains(note.datum.RegNo())) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  for (size_t call_idx = 0; call_idx + 3 < insns.size(); ++call_idx) {
+    if (!IsCallExpr(insns[call_idx].parsed.pattern)) {
+      continue;
+    }
+    absl::flat_hash_set<int> restored_regs;
+    size_t restore_end = call_idx + 1;
+    while (restore_end < insns.size()) {
+      int r_dst = -1;
+      if (!is_stack_load_into_non_callee_saved(insns[restore_end], &r_dst)) {
+        break;
+      }
+      for (int w : insns[restore_end].write_regs) {
+        restored_regs.insert(w);
+      }
+      ++restore_end;
+    }
+    if (restore_end == call_idx + 1 || restore_end + 1 >= insns.size()) {
+      continue;
+    }
+
+    int alu_dst = -1;
+    const ParsedBlockInsn& alu_insn = insns[restore_end];
+    if (!IsSingleCycleIntAluInsn(alu_insn, &alu_dst) || IsConstIntMoveInsn(alu_insn) ||
+        alu_insn.read_regs.empty()) {
+      continue;
+    }
+    bool all_callee_saved = true;
+    absl::flat_hash_set<int> alu_regs;
+    for (int r : alu_insn.read_regs) {
+      if (!IsCalleeSavedMipsHardReg(r) || (frame_pointer_needed && r == kMipsFpRegno)) {
+        all_callee_saved = false;
+        break;
+      }
+      alu_regs.insert(r);
+    }
+    for (int r : alu_insn.write_regs) {
+      if (!IsCalleeSavedMipsHardReg(r) || (frame_pointer_needed && r == kMipsFpRegno)) {
+        all_callee_saved = false;
+        break;
+      }
+      alu_regs.insert(r);
+    }
+    if (!all_callee_saved || insn_mentions_reg_in_notes(alu_insn, alu_regs)) {
+      continue;
+    }
+
+    // Check if `restore_end + 1` is an immediately adjacent single-use stack
+    // load (e.g., loop-bound input reload) hoisted to feed the same consumer.
+    int opt_load_dst = -1;
+    const bool has_opt_load =
+        (restore_end + 2 < insns.size()) &&
+        is_stack_load_into_non_callee_saved(insns[restore_end + 1], &opt_load_dst) &&
+        !restored_regs.contains(opt_load_dst) && !alu_regs.contains(opt_load_dst) &&
+        SetsAreDisjoint(insns[restore_end + 1].read_regs, alu_regs);
+
+    std::optional<size_t> first_dep;
+    bool can_sink_alu = true;
+    bool saw_restored_consumer = false;
+    for (size_t k = restore_end + 1; k < insns.size(); ++k) {
+      if (!SetsAreDisjoint(insns[k].read_regs, alu_regs) ||
+          !SetsAreDisjoint(insns[k].write_regs, alu_regs) ||
+          insn_mentions_reg_in_notes(insns[k], alu_regs)) {
+        first_dep = k;
+        break;
+      }
+      if (insns[k].has_side_effects || IsCallExpr(insns[k].parsed.pattern)) {
+        can_sink_alu = false;
+        break;
+      }
+      if (!SetsAreDisjoint(insns[k].read_regs, restored_regs)) {
+        saw_restored_consumer = true;
+      }
+    }
+    if (!can_sink_alu || !saw_restored_consumer || !first_dep.has_value() ||
+        !IsRealConsumerInsn(insns[*first_dep]) || !insns[*first_dep].read_regs.contains(alu_dst)) {
+      continue;
+    }
+
+    bool opt_load_dead_at_consumer = HasRegDeadNoteFor(insns[*first_dep], opt_load_dst) ||
+                                     insns[*first_dep].write_regs.contains(opt_load_dst);
+    if (!opt_load_dead_at_consumer && has_opt_load && opt_load_dst != 2 && opt_load_dst != 3 &&
+        *first_dep + 1 < insns.size()) {
+      bool read_before_call = false;
+      for (size_t k = 0; k < call_idx; ++k) {
+        if (insns[k].read_regs.contains(opt_load_dst)) {
+          read_before_call = true;
+          break;
+        }
+        if (insns[k].write_regs.contains(opt_load_dst)) {
+          break;
+        }
+      }
+      if (!read_before_call) {
+        opt_load_dead_at_consumer = true;
+      }
+    }
+
+    bool sink_pair_with_load = false;
+    if (has_opt_load && *first_dep > restore_end + 2 &&
+        insns[*first_dep].read_regs.contains(opt_load_dst) && opt_load_dead_at_consumer) {
+      absl::flat_hash_set<int> load_regs = insns[restore_end + 1].write_regs;
+      sink_pair_with_load = true;
+      for (size_t k = restore_end + 2; k < *first_dep; ++k) {
+        if (insns[k].writes_mem || !SetsAreDisjoint(insns[k].read_regs, load_regs) ||
+            !SetsAreDisjoint(insns[k].write_regs, load_regs) ||
+            !SetsAreDisjoint(insns[k].write_regs, insns[restore_end + 1].read_regs) ||
+            insn_mentions_reg_in_notes(insns[k], load_regs)) {
+          sink_pair_with_load = false;
+          break;
+        }
+      }
+      for (size_t k = *first_dep + 1; k < insns.size() && sink_pair_with_load; ++k) {
+        if (insns[k].write_regs.contains(opt_load_dst)) {
+          break;
+        }
+        if (insns[k].read_regs.contains(opt_load_dst)) {
+          sink_pair_with_load = false;
+          break;
+        }
+      }
+    }
+
+    if (sink_pair_with_load) {
+      std::rotate(insns.begin() + static_cast<ptrdiff_t>(restore_end),
+                  insns.begin() + static_cast<ptrdiff_t>(restore_end + 2),
+                  insns.begin() + static_cast<ptrdiff_t>(*first_dep));
+      any_modified = true;
+    } else if (*first_dep > restore_end + 1) {
+      size_t sink_target = *first_dep;
+      int prev_load_dst = -1;
+      if (sink_target > restore_end + 1 &&
+          is_stack_load_into_non_callee_saved(insns[sink_target - 1], &prev_load_dst) &&
+          insns[*first_dep].read_regs.contains(prev_load_dst)) {
+        --sink_target;
+      }
+      if (sink_target > restore_end + 1) {
+        std::rotate(insns.begin() + static_cast<ptrdiff_t>(restore_end),
+                    insns.begin() + static_cast<ptrdiff_t>(restore_end + 1),
+                    insns.begin() + static_cast<ptrdiff_t>(sink_target));
+        any_modified = true;
+      }
+    }
+  }
+
+  return any_modified;
+}
+
+// Reverses `sched2` sinking of `$sp`-based stack stores (`[sp + off]`,
+// `off >= 16`) away from their defining 1-cycle integer ALU instructions in a
+// pre-call argument-setup sequence (`call_arg_bytes > 16`) when `reload`
+// output-spilled at least one outgoing stack-argument expression to
+// `[sp + spill_off]` (`spill_off >= call_arg_bytes`) and inherited the reload
+// register for `[sp + arg_off]` (`16 <= arg_off < call_arg_bytes`,
+// `reload.c:find_equiv_reg` at `reload.c:5651`). Hoisting those sunk stack
+// stores back immediately after their defining ALU instructions restores the
+// pre-`sched2` (`kAlterReg.post_state`) instruction and `INSN_LUID` order.
+bool UnscheduleSunkPreCallStackStores(std::vector<ParsedBlockInsn>* insns_ptr,
+                                      bool frame_pointer_needed) {
+  std::vector<ParsedBlockInsn>& insns = *insns_ptr;
+  bool any_modified = false;
+
+  auto mode_byte_size = [](RtlMachineMode mode) -> int64_t {
+    switch (mode) {
+      case RtlMachineMode::kQi:
+        return 1;
+      case RtlMachineMode::kHi:
+        return 2;
+      case RtlMachineMode::kSi:
+      case RtlMachineMode::kSf:
+        return 4;
+      case RtlMachineMode::kDi:
+      case RtlMachineMode::kDf:
+      default:
+        return 8;
+    }
+  };
+
+  auto extract_call_arg_bytes = [](const RtlExpr& pat) -> int64_t {
+    const RtlExpr* call_node = nullptr;
+    if (pat.op == RtlOp::kCall) {
+      call_node = &pat;
+    } else if (pat.op == RtlOp::kSet && pat.children.size() == 2 &&
+               pat.children[1].op == RtlOp::kCall) {
+      call_node = &pat.children[1];
+    } else if (pat.op == RtlOp::kParallel && !pat.children.empty()) {
+      const RtlExpr& c0 = pat.children[0];
+      if (c0.op == RtlOp::kCall) {
+        call_node = &c0;
+      } else if (c0.op == RtlOp::kSet && c0.children.size() == 2 &&
+                 c0.children[1].op == RtlOp::kCall) {
+        call_node = &c0.children[1];
+      }
+    }
+    if (call_node != nullptr && call_node->children.size() >= 2 &&
+        call_node->children[1].op == RtlOp::kConstInt) {
+      return call_node->children[1].int_val;
+    }
+    return 0;
+  };
+
+  auto match_sp_addr = [](const RtlExpr& addr, int64_t* out_off) -> bool {
+    if (addr.op == RtlOp::kReg && addr.RegNo() == kMipsSpRegno) {
+      *out_off = 0;
+      return true;
+    }
+    if (addr.op == RtlOp::kPlus && addr.children.size() == 2 &&
+        addr.children[0].op == RtlOp::kReg && addr.children[0].RegNo() == kMipsSpRegno &&
+        addr.children[1].op == RtlOp::kConstInt && addr.children[1].int_val >= 0) {
+      *out_off = addr.children[1].int_val;
+      return true;
+    }
+    return false;
+  };
+
+  auto match_sp_reg_store = [&](const ParsedBlockInsn& insn, int64_t* out_off, int64_t* out_size,
+                                int* out_src_reg) -> bool {
+    if (insn.has_side_effects || insn.reads_mem || !insn.writes_mem) {
+      return false;
+    }
+    const RtlExpr& pat = insn.parsed.pattern;
+    if (pat.op != RtlOp::kSet || pat.children.size() != 2) {
+      return false;
+    }
+    const RtlExpr& dst = pat.children[0];
+    const RtlExpr& src = pat.children[1];
+    if (dst.op != RtlOp::kMem || dst.flags.volatil || dst.children.size() != 1 ||
+        src.op != RtlOp::kReg || src.IsArgPointerReg() || dst.mode != src.mode) {
+      return false;
+    }
+    if (!match_sp_addr(dst.children[0], out_off)) {
+      return false;
+    }
+    *out_size = mode_byte_size(dst.mode);
+    *out_src_reg = src.RegNo();
+    return true;
+  };
+
+  auto insn_mentions_reg_in_notes = [](const ParsedBlockInsn& insn, int regno) -> bool {
+    for (const RtlRegNote& note : insn.parsed.reg_notes) {
+      if (note.datum.op == RtlOp::kReg && !note.datum.IsArgPointerReg() &&
+          note.datum.RegNo() == regno) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  struct StoreCand {
+    size_t idx = 0;
+    int64_t off = 0;
+    int64_t size = 4;
+  };
+
+  auto ranges_disjoint = [](int64_t a_off, int64_t a_sz, int64_t b_off, int64_t b_sz) -> bool {
+    return a_off + a_sz <= b_off || b_off + b_sz <= a_off;
+  };
+
+  auto extract_general_varying_ptr_base = [&](const RtlExpr& addr) -> int {
+    if (addr.op == RtlOp::kLoSum || addr.op == RtlOp::kSymbolRef || addr.op == RtlOp::kLabelRef ||
+        addr.op == RtlOp::kConst || addr.op == RtlOp::kConstInt) {
+      return -1;
+    }
+    const RtlExpr* base = &addr;
+    if (addr.op == RtlOp::kPlus && addr.children.size() == 2 &&
+        addr.children[1].op == RtlOp::kConstInt) {
+      base = &addr.children[0];
+    }
+    if (base->op != RtlOp::kReg || base->IsArgPointerReg()) {
+      return -1;
+    }
+    const int breg = base->RegNo();
+    if (breg == kMipsSpRegno || breg == kMipsTemp2Regno ||
+        (breg == kMipsFpRegno && frame_pointer_needed)) {
+      return -1;
+    }
+    return (breg >= 1 && breg < kMipsFirstFpr) ? breg : -1;
+  };
+
+  auto find_last_prologue_save_idx = [&](size_t limit) -> std::optional<size_t> {
+    std::optional<size_t> last_prologue_save_idx;
+    bool saw_sp_decrement = false;
+    absl::flat_hash_set<int> written_so_far;
+    for (size_t i = 0; i < limit; ++i) {
+      const RtlExpr& pat = insns[i].parsed.pattern;
+      if (IsCallExpr(pat) || pat.op == RtlOp::kReturn ||
+          (pat.op == RtlOp::kSet && !pat.children.empty() && pat.children[0].op == RtlOp::kPc)) {
+        break;
+      }
+      if (!saw_sp_decrement && pat.op == RtlOp::kSet && pat.children.size() == 2 &&
+          pat.children[0].op == RtlOp::kReg && pat.children[0].RegNo() == kMipsSpRegno &&
+          (pat.children[1].op == RtlOp::kMinus || pat.children[1].op == RtlOp::kPlus) &&
+          pat.children[1].children.size() == 2 && pat.children[1].children[0].op == RtlOp::kReg &&
+          pat.children[1].children[0].RegNo() == kMipsSpRegno) {
+        saw_sp_decrement = true;
+        written_so_far.insert(kMipsSpRegno);
+        continue;
+      }
+      if (saw_sp_decrement && insns[i].write_regs.contains(kMipsSpRegno)) {
+        break;
+      }
+      int64_t sv_off = 0;
+      int64_t sv_sz = 0;
+      int sv_reg = -1;
+      if (saw_sp_decrement && match_sp_reg_store(insns[i], &sv_off, &sv_sz, &sv_reg) &&
+          (sv_reg == kMipsRaRegno || IsCalleeSavedMipsHardReg(sv_reg)) &&
+          !written_so_far.contains(sv_reg)) {
+        last_prologue_save_idx = i;
+      }
+      for (int w : insns[i].write_regs) {
+        written_so_far.insert(w);
+      }
+    }
+    return last_prologue_save_idx;
+  };
+
+  auto compute_unchanging_ptr_regs_per_insn =
+      [&](size_t limit) -> std::vector<absl::flat_hash_set<int>> {
+    const std::optional<size_t> last_prologue_save_idx = find_last_prologue_save_idx(limit);
+
+    std::vector<absl::flat_hash_set<int>> per_insn(limit);
+    absl::flat_hash_set<int> cur_unchanging;
+    auto scan_read_expr = [&](auto& self, const RtlExpr& expr, bool before_prologue_save) -> void {
+      if (expr.op == RtlOp::kMem && !expr.children.empty()) {
+        const int breg = extract_general_varying_ptr_base(expr.children[0]);
+        if (!expr.flags.volatil && breg != -1 && (before_prologue_save || expr.flags.unchanging)) {
+          cur_unchanging.insert(breg);
+        }
+        self(self, expr.children[0], before_prologue_save);
+        return;
+      }
+      for (const RtlExpr& ch : expr.children) {
+        self(self, ch, before_prologue_save);
+      }
+    };
+    auto scan_stmt = [&](auto& self, const RtlExpr& stmt, bool before_prologue_save) -> void {
+      if (stmt.op == RtlOp::kSet && stmt.children.size() == 2) {
+        if (stmt.children[0].op == RtlOp::kMem && !stmt.children[0].children.empty()) {
+          const int w_breg = extract_general_varying_ptr_base(stmt.children[0].children[0]);
+          if (w_breg != -1) {
+            cur_unchanging.erase(w_breg);
+          }
+          scan_read_expr(scan_read_expr, stmt.children[0].children[0], before_prologue_save);
+        }
+        scan_read_expr(scan_read_expr, stmt.children[1], before_prologue_save);
+        return;
+      }
+      if (stmt.op == RtlOp::kParallel) {
+        for (const RtlExpr& elem : stmt.children) {
+          self(self, elem, before_prologue_save);
+        }
+        return;
+      }
+      if (stmt.op == RtlOp::kClobber) {
+        return;
+      }
+      scan_read_expr(scan_read_expr, stmt, before_prologue_save);
+    };
+
+    for (size_t i = 0; i < limit; ++i) {
+      const bool before_prologue_save =
+          last_prologue_save_idx.has_value() && i < *last_prologue_save_idx;
+      const RtlExpr& pat = insns[i].parsed.pattern;
+      scan_stmt(scan_stmt, pat, before_prologue_save);
+      per_insn[i] = cur_unchanging;
+
+      int preserved_dst = -1;
+      if (pat.op == RtlOp::kSet && pat.children.size() == 2 && pat.children[0].op == RtlOp::kReg &&
+          !pat.children[0].IsArgPointerReg()) {
+        const int dst_reg = pat.children[0].RegNo();
+        const RtlExpr& rhs = pat.children[1];
+        int src_ptr_reg = -1;
+        if (rhs.op == RtlOp::kReg && !rhs.IsArgPointerReg()) {
+          src_ptr_reg = rhs.RegNo();
+        } else if (rhs.op == RtlOp::kPlus && rhs.children.size() == 2 &&
+                   rhs.children[0].op == RtlOp::kReg && !rhs.children[0].IsArgPointerReg() &&
+                   rhs.children[1].op == RtlOp::kConstInt) {
+          src_ptr_reg = rhs.children[0].RegNo();
+        }
+        if (dst_reg >= 1 && dst_reg < kMipsFirstFpr && cur_unchanging.contains(src_ptr_reg)) {
+          cur_unchanging.insert(dst_reg);
+          preserved_dst = dst_reg;
+        }
+      }
+      for (int w : insns[i].write_regs) {
+        if (w != preserved_dst) {
+          cur_unchanging.erase(w);
+        }
+      }
+      if (IsCallExpr(pat)) {
+        for (int r = 1; r < kMipsFirstFpr; ++r) {
+          if (!IsCalleeSavedMipsHardReg(r)) {
+            cur_unchanging.erase(r);
+          }
+        }
+      }
+    }
+    return per_insn;
+  };
+
+  auto all_read_mems_disjoint_from_stores = [&](auto& self, const RtlExpr& expr,
+                                                const absl::flat_hash_set<int>& unchanging_regs,
+                                                const std::vector<StoreCand>& stores) -> bool {
+    if (expr.op == RtlOp::kMem) {
+      if (expr.flags.volatil || expr.children.size() != 1) {
+        return false;
+      }
+      const int breg = extract_general_varying_ptr_base(expr.children[0]);
+      const bool is_unchanging_read =
+          expr.flags.unchanging || (breg != -1 && unchanging_regs.contains(breg));
+      if (!is_unchanging_read) {
+        int64_t r_off = 0;
+        if (!match_sp_addr(expr.children[0], &r_off)) {
+          return false;
+        }
+        const int64_t r_sz = mode_byte_size(expr.mode);
+        for (const StoreCand& st : stores) {
+          if (!ranges_disjoint(r_off, r_sz, st.off, st.size)) {
+            return false;
+          }
+        }
+      }
+      return self(self, expr.children[0], unchanging_regs, stores);
+    }
+    for (const RtlExpr& ch : expr.children) {
+      if (!self(self, ch, unchanging_regs, stores)) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  size_t seg_start = 0;
+  for (size_t idx = 0; idx < insns.size(); ++idx) {
+    if (!IsCallExpr(insns[idx].parsed.pattern)) {
+      continue;
+    }
+    const size_t call_idx = idx;
+    const int64_t call_arg_bytes = extract_call_arg_bytes(insns[call_idx].parsed.pattern);
+    if (call_arg_bytes <= 16) {
+      seg_start = call_idx + 1;
+      continue;
+    }
+
+    auto collect_hoistable_stores = [&](size_t d, std::vector<StoreCand>* out_stores,
+                                        bool* out_has_spill_plus_arg) -> bool {
+      out_stores->clear();
+      *out_has_spill_plus_arg = false;
+      int r = -1;
+      if (!IsSingleCycleIntAluInsn(insns[d], &r) || IsConstIntMoveInsn(insns[d]) || r < 1 ||
+          r >= kMipsFirstFpr || r == kMipsSpRegno || (frame_pointer_needed && r == kMipsFpRegno)) {
+        return false;
+      }
+
+      bool saw_spill_store = false;
+      bool saw_arg_store = false;
+      for (size_t k = d + 1; k < call_idx; ++k) {
+        int64_t st_off = 0;
+        int64_t st_sz = 0;
+        int st_reg = -1;
+        if (match_sp_reg_store(insns[k], &st_off, &st_sz, &st_reg) && st_reg == r) {
+          if (st_off < 16) {
+            return false;
+          }
+          if (st_off >= call_arg_bytes) {
+            saw_spill_store = true;
+          } else {
+            saw_arg_store = true;
+            if (saw_spill_store) {
+              *out_has_spill_plus_arg = true;
+            }
+          }
+          out_stores->push_back(StoreCand{k, st_off, st_sz});
+          continue;
+        }
+        if (insns[k].write_regs.contains(r)) {
+          break;
+        }
+        if (insns[k].read_regs.contains(r)) {
+          return false;
+        }
+      }
+
+      if (!saw_arg_store || out_stores->empty() ||
+          out_stores->back().idx <= d + out_stores->size()) {
+        return false;
+      }
+
+      const size_t last_st_idx = out_stores->back().idx;
+      size_t st_pos = 0;
+      for (size_t k = d + 1; k < last_st_idx; ++k) {
+        if (st_pos < out_stores->size() && (*out_stores)[st_pos].idx == k) {
+          ++st_pos;
+          continue;
+        }
+        if (insns[k].has_side_effects || insns[k].read_regs.contains(r) ||
+            insns[k].write_regs.contains(r) || insns[k].write_regs.contains(kMipsSpRegno) ||
+            insn_mentions_reg_in_notes(insns[k], r)) {
+          return false;
+        }
+        if (insns[k].writes_mem) {
+          int64_t k_off = 0;
+          int64_t k_sz = 0;
+          int k_reg = -1;
+          if (!match_sp_reg_store(insns[k], &k_off, &k_sz, &k_reg)) {
+            return false;
+          }
+          for (const StoreCand& st : *out_stores) {
+            if (!ranges_disjoint(k_off, k_sz, st.off, st.size)) {
+              return false;
+            }
+          }
+        }
+        if (insns[k].reads_mem) {
+          const std::vector<absl::flat_hash_set<int>> unchanging_per_insn =
+              compute_unchanging_ptr_regs_per_insn(call_idx);
+          if (!all_read_mems_disjoint_from_stores(all_read_mems_disjoint_from_stores,
+                                                  insns[k].parsed.pattern, unchanging_per_insn[k],
+                                                  *out_stores)) {
+            return false;
+          }
+        }
+      }
+      return true;
+    };
+
+    bool segment_triggered = false;
+    for (size_t d = seg_start; d < call_idx; ++d) {
+      std::vector<StoreCand> stores;
+      bool has_spill_plus_arg = false;
+      if (collect_hoistable_stores(d, &stores, &has_spill_plus_arg) && has_spill_plus_arg) {
+        segment_triggered = true;
+        break;
+      }
+    }
+
+    if (segment_triggered) {
+      std::optional<size_t> max_hoisted_store_idx;
+      for (size_t d = seg_start; d < call_idx; ++d) {
+        std::vector<StoreCand> stores;
+        bool has_spill_plus_arg = false;
+        if (!collect_hoistable_stores(d, &stores, &has_spill_plus_arg)) {
+          continue;
+        }
+        for (size_t j = 0; j < stores.size(); ++j) {
+          const size_t dst_idx = d + 1 + j;
+          const size_t src_idx = stores[j].idx;
+          if (src_idx > dst_idx) {
+            std::rotate(insns.begin() + static_cast<ptrdiff_t>(dst_idx),
+                        insns.begin() + static_cast<ptrdiff_t>(src_idx),
+                        insns.begin() + static_cast<ptrdiff_t>(src_idx + 1));
+            any_modified = true;
+            max_hoisted_store_idx = max_hoisted_store_idx.has_value()
+                                        ? std::max(*max_hoisted_store_idx, dst_idx)
+                                        : dst_idx;
+          }
+        }
+        d += stores.size();
+      }
+
+      // In `sched.c:1740`, `sched_analyze_1` flushes `pending_read_insns` /
+      // `pending_write_insns` whenever a `MEM` write observes
+      // `pending_lists_length > 32`, setting `last_pending_memory_flush` so no
+      // subsequent `MEM` read (`sched.c:1930-1931`, even `RTX_UNCHANGING_P`
+      // `mem/u`) can hoist above that write. Conversely, `MEM` reads in
+      // `sched_analyze_2` (`sched.c:1935`) never trigger `flush_pending_lists`.
+      // When hoisting pre-call stack stores back above an intervening `MEM`
+      // read pushes `pending_lists_length > 32` at one of those stores, any
+      // prologue-hoisted `mem/u` loads (`l_idx < last_prologue_save_idx`) whose
+      // first consumer lies past `max_hoisted_store_idx` must have originated
+      // below those stores in `.09.greg`; sink them back before their consumers.
+      if (seg_start == 0 && max_hoisted_store_idx.has_value()) {
+        int pending_lists_len = 0;
+        bool overflowed_pending_lists = false;
+        auto count_expr_mems = [&](auto& self, const RtlExpr& e) -> int {
+          int cnt = (e.op == RtlOp::kMem) ? 1 : 0;
+          for (const RtlExpr& ch : e.children) {
+            cnt += self(self, ch);
+          }
+          return cnt;
+        };
+        for (size_t i = 0; i < call_idx; ++i) {
+          if (insns[i].writes_mem && pending_lists_len > 32) {
+            overflowed_pending_lists = true;
+            break;
+          }
+          pending_lists_len += count_expr_mems(count_expr_mems, insns[i].parsed.pattern);
+          for (const RtlRegNote& note : insns[i].parsed.reg_notes) {
+            if (note.kind == RtlMachineMode::kRegDead && note.datum.op == RtlOp::kMem) {
+              ++pending_lists_len;
+            }
+          }
+        }
+
+        std::optional<size_t> last_prologue_save = find_last_prologue_save_idx(call_idx);
+        if (overflowed_pending_lists && last_prologue_save.has_value() &&
+            *last_prologue_save < *max_hoisted_store_idx) {
+          std::optional<size_t> last_arg_store_idx;
+          for (size_t k = seg_start; k < call_idx; ++k) {
+            int64_t st_off = 0;
+            int64_t st_sz = 0;
+            int st_reg = -1;
+            if (match_sp_reg_store(insns[k], &st_off, &st_sz, &st_reg) && st_off >= 16 &&
+                st_off < call_arg_bytes) {
+              last_arg_store_idx = k;
+            }
+          }
+          size_t pair_sink_pos = last_arg_store_idx.has_value() ? (*last_arg_store_idx + 1)
+                                                                : (*max_hoisted_store_idx + 1);
+
+          for (size_t l_idx = 0; l_idx < *last_prologue_save;) {
+            int load_dst = -1;
+            if (!IsSchedulableLoadInsn(insns[l_idx], &load_dst) || load_dst < 1 ||
+                load_dst >= kMipsFirstFpr || load_dst == kMipsSpRegno ||
+                (frame_pointer_needed && load_dst == kMipsFpRegno)) {
+              ++l_idx;
+              continue;
+            }
+            RtlExpr* load_rhs = &insns[l_idx].parsed.pattern.children[1];
+            if ((load_rhs->op == RtlOp::kSignExtend || load_rhs->op == RtlOp::kZeroExtend) &&
+                load_rhs->children.size() == 1) {
+              load_rhs = &load_rhs->children[0];
+            }
+            if (load_rhs->op != RtlOp::kMem || load_rhs->flags.volatil ||
+                load_rhs->children.size() != 1) {
+              ++l_idx;
+              continue;
+            }
+            const int breg = extract_general_varying_ptr_base(load_rhs->children[0]);
+            if (breg == -1 || breg == load_dst) {
+              ++l_idx;
+              continue;
+            }
+
+            std::optional<size_t> consumer_idx;
+            bool blocked = false;
+            for (size_t k = l_idx + 1; k < call_idx; ++k) {
+              if (insns[k].read_regs.contains(load_dst)) {
+                consumer_idx = k;
+                break;
+              }
+              if (insns[k].has_side_effects || insns[k].write_regs.contains(load_dst) ||
+                  insns[k].write_regs.contains(breg) ||
+                  insn_mentions_reg_in_notes(insns[k], load_dst)) {
+                blocked = true;
+                break;
+              }
+              if (insns[k].writes_mem) {
+                int64_t k_off = 0;
+                int64_t k_sz = 0;
+                int k_reg = -1;
+                if (!match_sp_reg_store(insns[k], &k_off, &k_sz, &k_reg)) {
+                  blocked = true;
+                  break;
+                }
+              }
+            }
+            if (blocked || !consumer_idx.has_value() || *consumer_idx <= *max_hoisted_store_idx) {
+              ++l_idx;
+              continue;
+            }
+
+            bool sink_with_callee_saved_alu = false;
+            if (last_arg_store_idx.has_value() && *consumer_idx <= *last_arg_store_idx &&
+                pair_sink_pos <= call_idx) {
+              int alu_dst = -1;
+              if (IsCalleeSavedMipsHardReg(load_dst) &&
+                  IsSingleCycleIntAluInsn(insns[*consumer_idx], &alu_dst) && alu_dst == load_dst &&
+                  insns[*consumer_idx].read_regs.size() == 1 &&
+                  insns[*consumer_idx].write_regs.size() == 1) {
+                sink_with_callee_saved_alu = true;
+                for (size_t k = *consumer_idx + 1; k < pair_sink_pos; ++k) {
+                  if (insns[k].has_side_effects || insns[k].read_regs.contains(load_dst) ||
+                      insns[k].write_regs.contains(load_dst) ||
+                      insns[k].write_regs.contains(breg) ||
+                      insn_mentions_reg_in_notes(insns[k], load_dst)) {
+                    sink_with_callee_saved_alu = false;
+                    break;
+                  }
+                  if (insns[k].writes_mem) {
+                    int64_t k_off = 0;
+                    int64_t k_sz = 0;
+                    int k_reg = -1;
+                    if (!match_sp_reg_store(insns[k], &k_off, &k_sz, &k_reg)) {
+                      sink_with_callee_saved_alu = false;
+                      break;
+                    }
+                  }
+                }
+              }
+              if (!sink_with_callee_saved_alu) {
+                ++l_idx;
+                continue;
+              }
+            }
+
+            load_rhs->flags.unchanging = true;
+
+            const size_t check_breg_from =
+                sink_with_callee_saved_alu ? pair_sink_pos : *consumer_idx;
+            bool breg_used_after_consumer = false;
+            for (size_t k = check_breg_from; k < call_idx; ++k) {
+              if (insns[k].read_regs.contains(breg) || insns[k].write_regs.contains(breg)) {
+                breg_used_after_consumer = true;
+                break;
+              }
+            }
+            if (!breg_used_after_consumer) {
+              for (size_t m = l_idx + 1; m < check_breg_from; ++m) {
+                if (!insns[m].read_regs.contains(breg)) {
+                  continue;
+                }
+                auto& m_notes = insns[m].parsed.reg_notes;
+                for (auto it = m_notes.begin(); it != m_notes.end(); ++it) {
+                  if (it->kind == RtlMachineMode::kRegDead && it->datum.op == RtlOp::kReg &&
+                      !it->datum.IsArgPointerReg() && it->datum.RegNo() == breg) {
+                    RtlRegNote moved_note = *it;
+                    m_notes.erase(it);
+                    if (!HasRegDeadNoteFor(insns[l_idx], breg)) {
+                      insns[l_idx].parsed.reg_notes.push_back(std::move(moved_note));
+                    }
+                    break;
+                  }
+                }
+              }
+            }
+
+            if (sink_with_callee_saved_alu) {
+              std::rotate(insns.begin() + static_cast<ptrdiff_t>(*consumer_idx),
+                          insns.begin() + static_cast<ptrdiff_t>(*consumer_idx + 1),
+                          insns.begin() + static_cast<ptrdiff_t>(pair_sink_pos));
+              if (last_arg_store_idx.has_value() && *last_arg_store_idx > *consumer_idx &&
+                  *last_arg_store_idx < pair_sink_pos) {
+                --(*last_arg_store_idx);
+              }
+              std::rotate(insns.begin() + static_cast<ptrdiff_t>(l_idx),
+                          insns.begin() + static_cast<ptrdiff_t>(l_idx + 1),
+                          insns.begin() + static_cast<ptrdiff_t>(pair_sink_pos - 1));
+              --(*last_prologue_save);
+              --(*max_hoisted_store_idx);
+              if (last_arg_store_idx.has_value() && *last_arg_store_idx > l_idx &&
+                  *last_arg_store_idx < pair_sink_pos - 1) {
+                --(*last_arg_store_idx);
+              }
+            } else {
+              std::rotate(insns.begin() + static_cast<ptrdiff_t>(l_idx),
+                          insns.begin() + static_cast<ptrdiff_t>(l_idx + 1),
+                          insns.begin() + static_cast<ptrdiff_t>(*consumer_idx));
+              --(*last_prologue_save);
+              --(*max_hoisted_store_idx);
+              if (last_arg_store_idx.has_value() && *last_arg_store_idx > l_idx &&
+                  *last_arg_store_idx < *consumer_idx) {
+                --(*last_arg_store_idx);
+              }
+              if (pair_sink_pos > l_idx && pair_sink_pos < *consumer_idx) {
+                --pair_sink_pos;
+              }
+            }
+            any_modified = true;
+          }
+        }
+      }
+    }
+
+    seg_start = call_idx + 1;
+  }
+
+  return any_modified;
+}
+
+void UnscheduleBlockInstructions(RtlBasicBlock* blk, bool gp64, bool fp64, bool is_sched2 = false,
+                                 bool frame_pointer_needed = false) {
   const size_t n = blk->instructions.size();
   if (n < 3) {
     return;
@@ -904,7 +1913,19 @@ void UnscheduleBlockInstructions(RtlBasicBlock* blk, bool gp64, bool fp64) {
     insns.push_back(BuildParsedBlockInsn(std::move(*parsed_or), gp64, fp64, std::move(orig_insn)));
   }
 
-  bool modified = UnscheduleHoistedFpStoresAndCallArgs(&insns, gp64, fp64);
+  bool modified = false;
+  if (is_sched2 && UnscheduleDelayedHiLoReloads(&insns, frame_pointer_needed)) {
+    modified = true;
+  }
+  if (is_sched2 && UnschedulePostCallHoistedCalleeSavedAlu(&insns, frame_pointer_needed)) {
+    modified = true;
+  }
+  if (is_sched2 && UnscheduleSunkPreCallStackStores(&insns, frame_pointer_needed)) {
+    modified = true;
+  }
+  if (UnscheduleHoistedFpStoresAndCallArgs(&insns, gp64, fp64)) {
+    modified = true;
+  }
   if (UnscheduleCalleeSavedFpAluSunkAcrossCall(&insns, gp64, fp64)) {
     modified = true;
   }
@@ -2234,7 +3255,8 @@ RtlControlFlowGraph InvertScheduleBlock(const RtlControlFlowGraph& scheduled_cfg
     }
 
     for (RtlBasicBlock& blk : out.rpo_blocks) {
-      UnscheduleBlockInstructions(&blk, gp64, fp64);
+      UnscheduleBlockInstructions(&blk, gp64, fp64, scheduled_cfg.pass == RtlPassKind::kSched2,
+                                  out.sideband.frame_pointer_needed);
     }
 
     if (scheduled_cfg.pass == RtlPassKind::kSched2) {
@@ -2470,7 +3492,8 @@ RtlControlFlowGraph InvertThreadPrologueAndEpilogueInsns(const RtlControlFlowGra
         continue;
       }
       const RtlExpr& pat = insns[i].parsed.pattern;
-      if (IsCallExpr(pat) || IsJumpOrReturnExpr(pat)) {
+      if (IsCallExpr(pat) || pat.op == RtlOp::kReturn ||
+          (pat.op == RtlOp::kSet && !pat.children.empty() && pat.children[0].op == RtlOp::kPc)) {
         break;
       }
       int shift_reg = -1;
@@ -2788,7 +3811,8 @@ RtlControlFlowGraph InvertThreadPrologueAndEpilogueInsns(const RtlControlFlowGra
         continue;
       }
       const RtlExpr& pat = insns[i].parsed.pattern;
-      if (IsCallExpr(pat) || IsJumpOrReturnExpr(pat)) {
+      if (IsCallExpr(pat) || pat.op == RtlOp::kReturn ||
+          (pat.op == RtlOp::kSet && !pat.children.empty() && pat.children[0].op == RtlOp::kPc)) {
         break;
       }
 
@@ -2939,55 +3963,70 @@ RtlControlFlowGraph InvertThreadPrologueAndEpilogueInsns(const RtlControlFlowGra
   // non-`LO_SUM`/constant) can only be scheduled ahead of a `$sp`-based prologue
   // store when `RTX_UNCHANGING_P(mem) == 1` (`mem/u`).
   if (last_stripped_prologue_store_idx.has_value()) {
-    auto is_general_varying_ptr_addr = [&](const RtlExpr& addr) -> bool {
+    auto extract_general_varying_ptr_base = [&](const RtlExpr& addr) -> int {
       if (addr.op == RtlOp::kLoSum || addr.op == RtlOp::kSymbolRef || addr.op == RtlOp::kLabelRef ||
           addr.op == RtlOp::kConst || addr.op == RtlOp::kConstInt) {
-        return false;
+        return -1;
       }
       const RtlExpr* base = &addr;
       if (addr.op == RtlOp::kPlus && addr.children.size() == 2 &&
           addr.children[1].op == RtlOp::kConstInt) {
         base = &addr.children[0];
       }
-      if (base->op != RtlOp::kReg) {
-        return false;
+      if (base->op != RtlOp::kReg || base->IsArgPointerReg()) {
+        return -1;
       }
       const int breg = base->RegNo();
       if (breg == kMipsSpRegno || breg == kMipsTemp2Regno ||
           (breg == kMipsFpRegno && out.sideband.frame_pointer_needed)) {
-        return false;
+        return -1;
       }
-      return breg >= 1 && breg < kMipsFirstFpr;
+      return (breg >= 1 && breg < kMipsFirstFpr) ? breg : -1;
     };
-    auto mark_read_mems = [&](auto& self, RtlExpr* expr) -> bool {
+
+    absl::flat_hash_set<int> unchanging_ptr_regs;
+    auto mark_read_mems = [&](auto& self, RtlExpr* expr, bool before_prologue_store) -> bool {
       bool changed = false;
       if (expr->op == RtlOp::kMem && !expr->children.empty()) {
-        if (!expr->flags.volatil && !expr->flags.unchanging &&
-            is_general_varying_ptr_addr(expr->children[0])) {
-          expr->flags.unchanging = true;
-          changed = true;
+        const int breg = extract_general_varying_ptr_base(expr->children[0]);
+        if (!expr->flags.volatil && breg != -1) {
+          if (before_prologue_store || expr->flags.unchanging) {
+            unchanging_ptr_regs.insert(breg);
+            if (!expr->flags.unchanging) {
+              expr->flags.unchanging = true;
+              changed = true;
+            }
+          } else if (unchanging_ptr_regs.contains(breg)) {
+            expr->flags.unchanging = true;
+            changed = true;
+          }
         }
-        if (self(self, &expr->children[0])) {
+        if (self(self, &expr->children[0], before_prologue_store)) {
           changed = true;
         }
         return changed;
       }
       for (RtlExpr& ch : expr->children) {
-        if (self(self, &ch)) {
+        if (self(self, &ch, before_prologue_store)) {
           changed = true;
         }
       }
       return changed;
     };
-    auto mark_stmt_reads = [&](auto& self, RtlExpr* stmt) -> bool {
+    auto mark_stmt_reads = [&](auto& self, RtlExpr* stmt, bool before_prologue_store) -> bool {
       if (stmt->op == RtlOp::kSet && stmt->children.size() == 2) {
         bool changed = false;
         if (stmt->children[0].op == RtlOp::kMem && !stmt->children[0].children.empty()) {
-          if (mark_read_mems(mark_read_mems, &stmt->children[0].children[0])) {
+          const int w_breg = extract_general_varying_ptr_base(stmt->children[0].children[0]);
+          if (w_breg != -1) {
+            unchanging_ptr_regs.erase(w_breg);
+          }
+          if (mark_read_mems(mark_read_mems, &stmt->children[0].children[0],
+                             before_prologue_store)) {
             changed = true;
           }
         }
-        if (mark_read_mems(mark_read_mems, &stmt->children[1])) {
+        if (mark_read_mems(mark_read_mems, &stmt->children[1], before_prologue_store)) {
           changed = true;
         }
         return changed;
@@ -2995,7 +4034,7 @@ RtlControlFlowGraph InvertThreadPrologueAndEpilogueInsns(const RtlControlFlowGra
       if (stmt->op == RtlOp::kParallel) {
         bool changed = false;
         for (RtlExpr& elem : stmt->children) {
-          if (self(self, &elem)) {
+          if (self(self, &elem, before_prologue_store)) {
             changed = true;
           }
         }
@@ -3004,15 +4043,47 @@ RtlControlFlowGraph InvertThreadPrologueAndEpilogueInsns(const RtlControlFlowGra
       if (stmt->op == RtlOp::kClobber) {
         return false;
       }
-      return mark_read_mems(mark_read_mems, stmt);
+      return mark_read_mems(mark_read_mems, stmt, before_prologue_store);
     };
 
-    for (size_t i = 0; i < *last_stripped_prologue_store_idx; ++i) {
+    for (size_t i = 0; i < n; ++i) {
       if (strip[i]) {
         continue;
       }
-      if (mark_stmt_reads(mark_stmt_reads, &insns[i].parsed.pattern)) {
+      const bool before_prologue_store = (i < *last_stripped_prologue_store_idx);
+      if (mark_stmt_reads(mark_stmt_reads, &insns[i].parsed.pattern, before_prologue_store)) {
         mutated_notes[i] = true;
+      }
+      const RtlExpr& pat = insns[i].parsed.pattern;
+      int preserved_dst = -1;
+      if (pat.op == RtlOp::kSet && pat.children.size() == 2 && pat.children[0].op == RtlOp::kReg &&
+          !pat.children[0].IsArgPointerReg()) {
+        const int dst_reg = pat.children[0].RegNo();
+        const RtlExpr& rhs = pat.children[1];
+        int src_ptr_reg = -1;
+        if (rhs.op == RtlOp::kReg && !rhs.IsArgPointerReg()) {
+          src_ptr_reg = rhs.RegNo();
+        } else if (rhs.op == RtlOp::kPlus && rhs.children.size() == 2 &&
+                   rhs.children[0].op == RtlOp::kReg && !rhs.children[0].IsArgPointerReg() &&
+                   rhs.children[1].op == RtlOp::kConstInt) {
+          src_ptr_reg = rhs.children[0].RegNo();
+        }
+        if (dst_reg >= 1 && dst_reg < kMipsFirstFpr && unchanging_ptr_regs.contains(src_ptr_reg)) {
+          unchanging_ptr_regs.insert(dst_reg);
+          preserved_dst = dst_reg;
+        }
+      }
+      for (int w : insns[i].write_regs) {
+        if (w != preserved_dst) {
+          unchanging_ptr_regs.erase(w);
+        }
+      }
+      if (IsCallExpr(pat)) {
+        for (int r = 1; r < kMipsFirstFpr; ++r) {
+          if (!IsCalleeSavedMipsHardReg(r)) {
+            unchanging_ptr_regs.erase(r);
+          }
+        }
       }
     }
   }
