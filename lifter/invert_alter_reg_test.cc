@@ -20,6 +20,8 @@
 #include "lifter/pass02_jump2_cross_jump.h"
 #include "lifter/pass03_sched2_post_reload.h"
 
+extern "C" void regclass_init();  // NOLINT(readability-identifier-naming)
+
 namespace rom_nom_nom::lifter {
 namespace {
 
@@ -42,7 +44,7 @@ bool IsValidRecoveredHardRegHome(int hard_reg, bool fp_is_fixed) {
   if (hard_reg == 30 && !fp_is_fixed) {
     return true;
   }
-  return hard_reg == -1 || (hard_reg >= 2 && hard_reg <= 25) || (hard_reg >= 32 && hard_reg <= 63);
+  return hard_reg == -1 || (hard_reg >= 2 && hard_reg <= 25) || (hard_reg >= 32 && hard_reg <= 65);
 }
 
 int CountIntegratedRegNodesInExpr(const RtlExpr& expr) {
@@ -258,7 +260,9 @@ void VerifySinglePatternEntryArgReadsAndStep(const RtlExpr& fresh_pat, const Rtl
         VerifyExprUpwardExposedEntryArgReads(fe, le, *killed, test_name);
       }
     }
-  } else if (fresh_pat.op != RtlOp::kClobber) {
+  } else if (fresh_pat.op != RtlOp::kClobber &&
+             !(fresh_pat.op == RtlOp::kUse && !fresh_pat.children.empty() &&
+               !fresh_pat.children[0].flags.integrated)) {
     VerifyExprUpwardExposedEntryArgReads(fresh_pat, lifted_pat, *killed, test_name);
   }
 
@@ -298,8 +302,8 @@ void ExpectBlockZeroUpwardExposedEntryArgReadsPreserved(const RtlControlFlowGrap
   }
 }
 
-// Subclasses `SubfunctionInverseProvider` directly (never `ToySubfunctionInverses`)
-// so `RightInverseVerifier` exercises strictly the production `InvertAlterReg`.
+// Subclasses `SubfunctionInverseProvider` directly so `RightInverseVerifier`
+// exercises strictly the production `InvertAlterReg`.
 class ProductionAlterRegProvider final : public SubfunctionInverseProvider {
  public:
   RtlControlFlowGraph InvertAlterReg(const RtlControlFlowGraph& allocated_cfg_x,
@@ -538,10 +542,14 @@ TEST_F(InvertAlterRegTest, PreservesEntryArgAndLiftsSubsequentLocalOverwriteOfSa
       .id = 0,
       .instructions =
           {
-              // RHS reads incoming ABI `$a0`; LHS starts a local scratch web in `$a0`!
-              "(set (reg:SI 4 a0) (plus:SI (reg:SI 4 a0) (const_int 5)))",
-              "(set (reg:SI 4 a0) (ashift:SI (reg:SI 4 a0) (const_int 1)))",
-              "(set (reg/i:SI 2 v0) (reg:SI 4 a0))",
+              // RHS reads incoming ABI `$a0` (dying at this instruction); LHS starts a local
+              // scratch web in `$a0`!
+              "(set (reg:SI 4 a0) (plus:SI (reg:SI 4 a0) (const_int 5))) "
+              "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+              "(set (reg:SI 4 a0) (ashift:SI (reg:SI 4 a0) (const_int 1))) "
+              "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+              "(set (reg/i:SI 2 v0) (reg:SI 4 a0)) "
+              "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
               "(use (reg/i:SI 2 v0))",
           },
   });
@@ -553,10 +561,13 @@ TEST_F(InvertAlterRegTest, PreservesEntryArgAndLiftsSubsequentLocalOverwriteOfSa
   EXPECT_EQ(lifted.sideband.reg_renumber.at(72), 4);
   EXPECT_EQ(lifted.sideband.reg_renumber.at(73), 4);
   EXPECT_EQ(lifted.rpo_blocks[0].instructions[0],
-            "(set (reg:SI 72) (plus:SI (reg:SI 4 a0) (const_int 5)))");
+            "(set (reg:SI 72) (plus:SI (reg:SI 4 a0) (const_int 5))) "
+            "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
   EXPECT_EQ(lifted.rpo_blocks[0].instructions[1],
-            "(set (reg:SI 73) (ashift:SI (reg:SI 72) (const_int 1)))");
-  EXPECT_EQ(lifted.rpo_blocks[0].instructions[2], "(set (reg/i:SI 2 v0) (reg:SI 73))");
+            "(set (reg:SI 73) (ashift:SI (reg:SI 72) (const_int 1))) "
+            "(expr_list:REG_DEAD (reg:SI 72) (nil))");
+  EXPECT_EQ(lifted.rpo_blocks[0].instructions[2],
+            "(set (reg/i:SI 2 v0) (reg:SI 73)) (expr_list:REG_DEAD (reg:SI 73) (nil))");
 
   const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
   EXPECT_TRUE(res.matches) << res.diff_detail;
@@ -1451,6 +1462,439 @@ TEST_F(InvertAlterRegTest, VerifierRejectsCorruptedInverseProvider) {
   EXPECT_FALSE(res.matches);
 }
 
+TEST_F(InvertAlterRegTest, DoesNotLiftOrphanedPostReloadRegLibcallClobberWithoutMatchingRetval) {
+  // When post-reload dead-code elimination deletes the `REG_RETVAL` instruction of an
+  // `emit_no_conflict_block`, an orphaned `(clobber (reg:DI 2 v0)) (insn_list:REG_LIBCALL ...)`
+  // can remain immediately before a separate downstream `DImode` computation in `$2`.
+  // `InvertAlterReg` must keep the orphaned clobber pinned on physical hard register `2` rather
+  // than merging it into the downstream `DImode` pseudo web.
+  RtlControlFlowGraph raw_cfg;
+  raw_cfg.pass = RtlPassKind::kGreg;
+  raw_cfg.rpo_blocks.push_back(RtlBasicBlock{
+      .id = 0,
+      .instructions =
+          {
+              "(clobber (reg:DI 2 v0)) (insn_list:REG_LIBCALL 0 (nil))",
+              "(set (subreg:SI (reg:DI 2 v0) 0) (ashiftrt:SI (reg:SI 4 a0) (const_int 31)))",
+              "(set (subreg:SI (reg:DI 2 v0) 1) (reg:SI 4 a0))",
+              "(set (reg:DI 8 t0) (plus:DI (reg:DI 2 v0) (reg:DI 6 a2))) "
+              "(expr_list:REG_DEAD (reg:DI 2 v0) (nil))",
+              "(set (reg/i:DI 2 v0) (reg:DI 8 t0)) (expr_list:REG_DEAD (reg:DI 8 t0) (nil))",
+              "(use (reg/i:DI 2 v0))",
+          },
+  });
+  SyncAllBlocks(&raw_cfg);
+  ctx_.MaterializeFromCfg(raw_cfg);
+  const RtlControlFlowGraph orphan_cfg =
+      ctx_.DematerializeToCfg(ctx_.GetInsns(), RtlPassKind::kGreg);
+
+  const RtlControlFlowGraph lifted = InvertAlterReg(orphan_cfg, 72);
+  ASSERT_EQ(lifted.rpo_blocks.size(), 1u);
+  auto clob_parsed = ParsePatternAndNotes(lifted.rpo_blocks[0].instructions[0]);
+  ASSERT_TRUE(clob_parsed.ok());
+  EXPECT_EQ(clob_parsed->pattern.ToSexprString(), "(clobber (reg:DI 2 v0))");
+  // Downstream `DImode` pseudo in `$2` still lifts cleanly (`reg_n_sets == 2`) without absorbing
+  // the orphaned `REG_LIBCALL` clobber.
+  ASSERT_EQ(lifted.sideband.reg_renumber.size(), 2u);
+  EXPECT_EQ(lifted.sideband.reg_renumber.at(72), 2);
+  EXPECT_EQ(lifted.sideband.reg_n_sets.at(72), 2);
+  EXPECT_EQ(lifted.sideband.reg_renumber.at(73), 8);
+  const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(orphan_cfg);
+  EXPECT_TRUE(res.matches) << res.diff_detail;
+}
+
+TEST_F(InvertAlterRegTest, RegDeadSplitsKilledHardRegWebsAndO0RegEqualSelfMoveUnifiesDiWeb) {
+  // 1. At `-O2`, an explicit `REG_DEAD` note on `(reg:SI 8 t0)` kills `t0`'s reaching definition
+  //    both before a subsequent RMW destination write in the same block and across a loop backedge,
+  //    keeping the pre-death web (`r72`) separate from the post-death web (`r73`).
+  RtlControlFlowGraph raw_loop_cfg;
+  raw_loop_cfg.pass = RtlPassKind::kGreg;
+  raw_loop_cfg.rpo_blocks = {
+      RtlBasicBlock{
+          .id = 0,
+          .instructions =
+              {
+                  "(set (reg:SI 8 t0) (plus:SI (reg:SI 4 a0) (const_int 1)))",
+              },
+          .successors = {1},
+      },
+      RtlBasicBlock{
+          .id = 1,
+          .instructions =
+              {
+                  "(set (reg:SI 2 v0) (plus:SI (reg:SI 8 t0) (reg:SI 5 a1))) "
+                  "(expr_list:REG_DEAD (reg:SI 8 t0) (nil))",
+                  "(set (reg:SI 8 t0) (reg:SI 2 v0))",
+                  "(set (pc) (if_then_else (ne (reg:SI 8 t0) (const_int 10)) "
+                  "(label_ref L0) (pc))) (expr_list:REG_DEAD (reg:SI 8 t0) (nil))",
+              },
+          .successors = {1, 2},
+          .has_label = true,
+      },
+      RtlBasicBlock{
+          .id = 2,
+          .instructions =
+              {
+                  "(set (reg/i:SI 2 v0) (reg:SI 2 v0))",
+                  "(use (reg/i:SI 2 v0))",
+              },
+          .successors = {},
+      },
+  };
+  SyncAllBlocks(&raw_loop_cfg);
+  const CompilationProfile o2_prof{2, {"-O2", "-mips2"}, {}};
+  hooks_.ApplyCompilationProfile(o2_prof);
+  regclass_init();
+  ctx_.MaterializeFromCfg(raw_loop_cfg);
+  const RtlControlFlowGraph loop_cfg = ctx_.DematerializeToCfg(ctx_.GetInsns(), RtlPassKind::kGreg);
+
+  const RtlControlFlowGraph lifted_loop = InvertAlterReg(loop_cfg, o2_prof, 72);
+  // Two distinct pseudos on hard reg `8` (`r72` in B0->B1[0] and `r74` in B1[1]->B1[2]),
+  // not coalesced across `REG_DEAD (reg:SI 8 t0)`.
+  int count_hr8_pseudos = 0;
+  for (const auto& [pseudo, hr] : lifted_loop.sideband.reg_renumber) {
+    if (hr == 8) {
+      ++count_hr8_pseudos;
+    }
+  }
+  EXPECT_EQ(count_hr8_pseudos, 2);
+  const RightInverseResult loop_res = verifier_.VerifyAlterRegRightInverse(loop_cfg);
+  EXPECT_TRUE(loop_res.matches) << loop_res.diff_detail;
+
+  // 2. At `-O0`, `optabs.c` inline `DImode` sequence finishes with `(set (reg:DI 2 v0) (reg:DI 2
+  //    v0)) (expr_list:REG_EQUAL ...)` WITHOUT `REG_RETVAL` when no `REG_LIBCALL` note was emitted.
+  //    `InvertAlterReg` must unify the subreg writes before the self-move with the `DImode` web
+  //    after the self-move into a single pseudo (`-O0` `stupid` allocation).
+  RtlControlFlowGraph raw_o0_self_move;
+  raw_o0_self_move.pass = RtlPassKind::kGreg;
+  raw_o0_self_move.rpo_blocks = {
+      RtlBasicBlock{
+          .id = 0,
+          .instructions =
+              {
+                  "(set (subreg:SI (reg:DI 2 v0) 0) (ashiftrt:SI (reg:SI 4 a0) (const_int 31)))",
+                  "(set (subreg:SI (reg:DI 2 v0) 1) (reg:SI 4 a0))",
+                  "(set (reg:DI 2 v0) (reg:DI 2 v0)) "
+                  "(expr_list:REG_EQUAL (sign_extend:DI (reg:SI 4 a0)) (nil))",
+                  "(set (reg/i:DI 2 v0) (reg:DI 2 v0))",
+                  "(use (reg/i:DI 2 v0))",
+              },
+      },
+  };
+  SyncAllBlocks(&raw_o0_self_move);
+  const CompilationProfile o0_prof{0, {"-O0", "-mips2"}, {}};
+  hooks_.ApplyCompilationProfile(o0_prof);
+  regclass_init();
+  ctx_.MaterializeFromCfg(raw_o0_self_move);
+  const RtlControlFlowGraph o0_self_move_cfg =
+      ctx_.DematerializeToCfg(ctx_.GetInsns(), RtlPassKind::kGreg);
+
+  const RtlControlFlowGraph lifted_o0 = InvertAlterReg(o0_self_move_cfg, o0_prof, 72);
+  int count_hr2_pseudos = 0;
+  for (const auto& [pseudo, hr] : lifted_o0.sideband.reg_renumber) {
+    if (hr == 2) {
+      ++count_hr2_pseudos;
+    }
+  }
+  EXPECT_EQ(count_hr2_pseudos, 1);
+  const RightInverseResult o0_res = verifier_.VerifyAlterRegRightInverse(o0_self_move_cfg);
+  EXPECT_TRUE(o0_res.matches) << o0_res.diff_detail;
+}
+
+TEST_F(InvertAlterRegTest, DemotesFalsePreferenceConflictWebAndPreservesPinnedArithmeticRmw) {
+  const CompilationProfile o2_prof{2, {"-O2", "-mips1", "-funsigned-char"}, {}};
+
+  // 1. Multi-block `QImode` web in `$3` feeds `(set (reg:SI 2 v0) (plus:SI (subreg:SI (reg:QI 3)
+  //    0) 32))` where `$2` is pinned by `(set (mem:QI ...) (reg:QI 2 v0))`, while a cross-edge
+  //    `$2` web (`B0[1] -> B1[0]`) overlaps `$3` without preferring `$2` itself. `InvertAlterReg`
+  //    must demote the hoisted `B0[1] -> B1[0]` web back to `(reg:SI 2 v0)` while lifting `$3` and
+  //    the `$6` comparison web to pseudos.
+  RtlControlFlowGraph raw_pref_cfg;
+  raw_pref_cfg.pass = RtlPassKind::kGreg;
+  raw_pref_cfg.rpo_blocks = {
+      RtlBasicBlock{
+          .id = 0,
+          .instructions =
+              {
+                  "(set (reg:QI 3 v1) (mem:QI (reg:SI 4 a0)))",
+                  "(set (reg:SI 2 v0) (plus:SI (subreg:SI (reg:QI 3 v1) 0) (const_int -65)))",
+                  "(set (pc) (if_then_else (ne:SI (reg:SI 5 a1) (const_int 0)) "
+                  "(label_ref L1) (pc)))",
+              },
+          .successors = {3, 1},
+      },
+      RtlBasicBlock{
+          .id = 1,
+          .instructions =
+              {
+                  "(set (reg:SI 6 a2) (ltu:SI (reg:SI 2 v0) (const_int 26))) "
+                  "(expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+                  "(set (pc) (if_then_else (eq:SI (reg:SI 6 a2) (const_int 0)) "
+                  "(label_ref L1) (pc))) (expr_list:REG_DEAD (reg:SI 6 a2) (nil))",
+              },
+          .successors = {3, 2},
+      },
+      RtlBasicBlock{
+          .id = 2,
+          .instructions =
+              {
+                  "(set (reg:SI 2 v0) (plus:SI (subreg:SI (reg:QI 3 v1) 0) (const_int 32))) "
+                  "(expr_list:REG_DEAD (reg:QI 3 v1) (nil))",
+                  "(set (mem:QI (reg:SI 4 a0)) (reg:QI 2 v0)) "
+                  "(expr_list:REG_DEAD (reg:SI 2 v0) (expr_list:REG_DEAD (reg:SI 4 a0) (nil)))",
+              },
+          .successors = {3},
+      },
+      RtlBasicBlock{
+          .id = 3,
+          .instructions =
+              {
+                  "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+              },
+          .has_label = true,
+      },
+  };
+  SyncAllBlocks(&raw_pref_cfg);
+  hooks_.ApplyCompilationProfile(o2_prof);
+  regclass_init();
+  ctx_.MaterializeFromCfg(raw_pref_cfg);
+  const RtlControlFlowGraph pref_cfg = ctx_.DematerializeToCfg(ctx_.GetInsns(), RtlPassKind::kGreg);
+
+  const RtlControlFlowGraph lifted_pref = InvertAlterReg(pref_cfg, o2_prof, 72);
+  int count_hr3 = 0;
+  int count_hr6 = 0;
+  int count_hr2 = 0;
+  for (const auto& [pseudo, hr] : lifted_pref.sideband.reg_renumber) {
+    if (hr == 3) ++count_hr3;
+    if (hr == 6) ++count_hr6;
+    if (hr == 2) ++count_hr2;
+  }
+  EXPECT_EQ(count_hr3, 1) << lifted_pref.FormatSummary();
+  EXPECT_EQ(count_hr6, 1) << lifted_pref.FormatSummary();
+  EXPECT_EQ(count_hr2, 0) << lifted_pref.FormatSummary();
+  EXPECT_NE(lifted_pref.rpo_blocks[1].instructions[0].find("(reg:SI 2 v0)"), std::string::npos)
+      << lifted_pref.FormatSummary();
+  const RightInverseResult pref_res = verifier_.VerifyAlterRegRightInverse(pref_cfg);
+  EXPECT_TRUE(pref_res.matches) << pref_res.diff_detail;
+
+  // 2. Loop-carried non-`REG_DEAD` arithmetic RMW on an entry-pinned argument register (`$4 a0`)
+  //    at `-O2` keeps `SET_DEST` pinned to `$4 a0` where it merges with entry `$4 a0` at the loop
+  //    header rather than splitting off a conflicting pseudo.
+  RtlControlFlowGraph raw_rmw_cfg;
+  raw_rmw_cfg.pass = RtlPassKind::kGreg;
+  raw_rmw_cfg.rpo_blocks = {
+      RtlBasicBlock{
+          .id = 0,
+          .instructions =
+              {
+                  "(set (reg/i:SI 2 v0) (mem:SI (reg:SI 4 a0)))",
+                  "(set (pc) (if_then_else (eq:SI (reg/i:SI 2 v0) (const_int 0)) "
+                  "(label_ref L1) (pc)))",
+              },
+          .successors = {2, 1},
+          .has_label = true,
+      },
+      RtlBasicBlock{
+          .id = 1,
+          .instructions =
+              {
+                  "(set (reg:SI 4 a0) (plus:SI (reg:SI 4 a0) (const_int 4)))",
+                  "(set (pc) (label_ref L0))",
+              },
+          .successors = {0},
+      },
+      RtlBasicBlock{
+          .id = 2,
+          .instructions =
+              {
+                  "(use (reg/i:SI 2 v0))",
+              },
+          .has_label = true,
+      },
+  };
+  SyncAllBlocks(&raw_rmw_cfg);
+  ctx_.MaterializeFromCfg(raw_rmw_cfg);
+  const RtlControlFlowGraph rmw_cfg = ctx_.DematerializeToCfg(ctx_.GetInsns(), RtlPassKind::kGreg);
+  const RtlControlFlowGraph lifted_rmw = InvertAlterReg(rmw_cfg, o2_prof, 72);
+  EXPECT_TRUE(lifted_rmw.sideband.reg_renumber.empty()) << lifted_rmw.FormatSummary();
+  const RightInverseResult rmw_res = verifier_.VerifyAlterRegRightInverse(rmw_cfg);
+  EXPECT_TRUE(rmw_res.matches) << rmw_res.diff_detail;
+}
+
+TEST_F(InvertAlterRegTest,
+       CoalesceSameRegRenumberRmwPseudosIsInvariantToIncomingRegDeadAndLiveAtStartSideband) {
+  const CompilationProfile o2_prof{2, {"-O2", "-mips1"}, {}};
+  hooks_.ApplyCompilationProfile(o2_prof);
+
+  auto strip_notes_and_live_at_start = [](const RtlControlFlowGraph& in) {
+    RtlControlFlowGraph stripped = in;
+    stripped.sideband.basic_block_live_at_start.clear();
+    for (RtlBasicBlock& blk : stripped.rpo_blocks) {
+      for (std::string& insn_str : blk.instructions) {
+        auto pn = ParsePatternAndNotes(insn_str);
+        EXPECT_TRUE(pn.ok()) << insn_str;
+        if (pn.ok()) {
+          pn->reg_notes.clear();
+          insn_str = FormatGccPrintRtlPatternAndNotes(pn->pattern, pn->reg_notes,
+                                                      pn->bracketed_notes, /*call_fusage=*/{});
+        }
+      }
+      blk.SyncRtlInsnsFromInstructions();
+    }
+    return stripped;
+  };
+
+  // Case A (coalesces): `$t0` (`reg 8`) is initialized in `B0` (`r_global == true`), updated in
+  // `B1` via a `PARALLEL` RMW (`p_r != p_w`, `!w_global`) and consumed before `B2`, where `$t0`
+  // is dead at `B2` entry. Both with full `REG_DEAD` + `basic_block_live_at_start` and with both
+  // stripped, `CoalesceSameRegRenumberRmwPseudos` coalesces the RMW into a single pseudo `72`.
+  RtlControlFlowGraph raw_coalesce;
+  raw_coalesce.pass = RtlPassKind::kGreg;
+  raw_coalesce.rpo_blocks = {
+      RtlBasicBlock{
+          .id = 0,
+          .instructions =
+              {
+                  "(set (reg:SI 8 t0) (plus:SI (reg:SI 4 a0) (const_int 3))) "
+                  "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                  "(set (pc) (label_ref L0))",
+              },
+          .successors = {1},
+          .has_trailing_barrier = true,
+      },
+      RtlBasicBlock{
+          .id = 1,
+          .instructions =
+              {
+                  "(parallel[ (set (reg:SI 8 t0) (plus:SI (reg:SI 8 t0) (const_int 1))) "
+                  "(clobber (reg:SI 1 at)) ] ) (expr_list:REG_UNUSED (reg:SI 1 at) (nil))",
+                  "(set (reg/i:SI 2 v0) (reg:SI 8 t0)) (expr_list:REG_DEAD (reg:SI 8 t0) (nil))",
+                  "(set (pc) (label_ref L1))",
+              },
+          .successors = {2},
+          .has_label = true,
+          .has_trailing_barrier = true,
+      },
+      RtlBasicBlock{
+          .id = 2,
+          .instructions =
+              {
+                  "(use (reg/i:SI 2 v0)) (expr_list:REG_DEAD (reg/i:SI 2 v0) (nil))",
+              },
+          .has_label = true,
+      },
+  };
+  SyncAllBlocks(&raw_coalesce);
+  ctx_.MaterializeFromCfg(raw_coalesce);
+  RtlControlFlowGraph coalesce_with_notes =
+      ctx_.DematerializeToCfg(ctx_.GetInsns(), RtlPassKind::kGreg);
+  coalesce_with_notes.sideband.basic_block_live_at_start = {
+      {0, {4}},
+      {1, {8}},
+      {2, {2}},
+  };
+  const RtlControlFlowGraph coalesce_stripped = strip_notes_and_live_at_start(coalesce_with_notes);
+
+  const RtlControlFlowGraph lifted_coalesce_notes =
+      InvertAlterReg(coalesce_with_notes, o2_prof, 72);
+  const RtlControlFlowGraph lifted_coalesce_stripped =
+      InvertAlterReg(coalesce_stripped, o2_prof, 72);
+  EXPECT_EQ(lifted_coalesce_notes.sideband.reg_renumber.size(), 1u);
+  EXPECT_EQ(lifted_coalesce_stripped.sideband.reg_renumber,
+            lifted_coalesce_notes.sideband.reg_renumber);
+  ASSERT_EQ(lifted_coalesce_stripped.rpo_blocks.size(), lifted_coalesce_notes.rpo_blocks.size());
+  for (size_t b = 0; b < lifted_coalesce_notes.rpo_blocks.size(); ++b) {
+    ASSERT_EQ(lifted_coalesce_stripped.rpo_blocks[b].instructions.size(),
+              lifted_coalesce_notes.rpo_blocks[b].instructions.size());
+    for (size_t i = 0; i < lifted_coalesce_notes.rpo_blocks[b].instructions.size(); ++i) {
+      auto pn_notes = ParsePatternAndNotes(lifted_coalesce_notes.rpo_blocks[b].instructions[i]);
+      auto pn_strip = ParsePatternAndNotes(lifted_coalesce_stripped.rpo_blocks[b].instructions[i]);
+      ASSERT_TRUE(pn_notes.ok() && pn_strip.ok());
+      EXPECT_EQ(pn_strip->pattern.ToSexprString(), pn_notes->pattern.ToSexprString());
+    }
+  }
+  const RightInverseResult coal_notes_res =
+      verifier_.VerifyAlterRegRightInverse(coalesce_with_notes);
+  EXPECT_TRUE(coal_notes_res.matches) << coal_notes_res.diff_detail;
+  const RightInverseResult coal_strip_res = verifier_.VerifyAlterRegRightInverse(coalesce_stripped);
+  EXPECT_TRUE(coal_strip_res.matches) << coal_strip_res.diff_detail;
+
+  // Case B (must NOT coalesce): after the `PARALLEL` RMW on `$t0` in `B1` dies on a store, `B1`
+  // defines a new `$t0` web that flows live into `B2`. Even when all `REG_DEAD` notes and
+  // `basic_block_live_at_start` are stripped, `ReconstructRtlLiveness` detects `$t0` live-in at
+  // `B2` and refuses to coalesce `p_w` into global `p_r`.
+  RtlControlFlowGraph raw_split;
+  raw_split.pass = RtlPassKind::kGreg;
+  raw_split.rpo_blocks = {
+      RtlBasicBlock{
+          .id = 0,
+          .instructions =
+              {
+                  "(set (reg:SI 8 t0) (plus:SI (reg:SI 4 a0) (const_int 3))) "
+                  "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                  "(set (pc) (label_ref L0))",
+              },
+          .successors = {1},
+          .has_trailing_barrier = true,
+      },
+      RtlBasicBlock{
+          .id = 1,
+          .instructions =
+              {
+                  "(parallel[ (set (reg:SI 8 t0) (plus:SI (reg:SI 8 t0) (const_int 1))) "
+                  "(clobber (reg:SI 1 at)) ] ) (expr_list:REG_UNUSED (reg:SI 1 at) (nil))",
+                  "(set (mem:SI (reg:SI 5 a1)) (reg:SI 8 t0)) "
+                  "(expr_list:REG_DEAD (reg:SI 5 a1) (expr_list:REG_DEAD (reg:SI 8 t0) (nil)))",
+                  "(set (reg:SI 8 t0) (plus:SI (reg:SI 6 a2) (const_int 9))) "
+                  "(expr_list:REG_DEAD (reg:SI 6 a2) (nil))",
+                  "(set (pc) (label_ref L1))",
+              },
+          .successors = {2},
+          .has_label = true,
+          .has_trailing_barrier = true,
+      },
+      RtlBasicBlock{
+          .id = 2,
+          .instructions =
+              {
+                  "(set (reg/i:SI 2 v0) (reg:SI 8 t0)) (expr_list:REG_DEAD (reg:SI 8 t0) (nil))",
+                  "(use (reg/i:SI 2 v0)) (expr_list:REG_DEAD (reg/i:SI 2 v0) (nil))",
+              },
+          .has_label = true,
+      },
+  };
+  SyncAllBlocks(&raw_split);
+  ctx_.MaterializeFromCfg(raw_split);
+  RtlControlFlowGraph split_with_notes =
+      ctx_.DematerializeToCfg(ctx_.GetInsns(), RtlPassKind::kGreg);
+  split_with_notes.sideband.basic_block_live_at_start = {
+      {0, {4, 5, 6}},
+      {1, {5, 6, 8}},
+      {2, {8}},
+  };
+  const RtlControlFlowGraph split_stripped = strip_notes_and_live_at_start(split_with_notes);
+
+  const RtlControlFlowGraph lifted_split_notes = InvertAlterReg(split_with_notes, o2_prof, 72);
+  const RtlControlFlowGraph lifted_split_stripped = InvertAlterReg(split_stripped, o2_prof, 72);
+  EXPECT_EQ(lifted_split_notes.sideband.reg_renumber.size(), 3u);
+  EXPECT_EQ(lifted_split_stripped.sideband.reg_renumber, lifted_split_notes.sideband.reg_renumber);
+  ASSERT_EQ(lifted_split_stripped.rpo_blocks.size(), lifted_split_notes.rpo_blocks.size());
+  for (size_t b = 0; b < lifted_split_notes.rpo_blocks.size(); ++b) {
+    ASSERT_EQ(lifted_split_stripped.rpo_blocks[b].instructions.size(),
+              lifted_split_notes.rpo_blocks[b].instructions.size());
+    for (size_t i = 0; i < lifted_split_notes.rpo_blocks[b].instructions.size(); ++i) {
+      auto pn_notes = ParsePatternAndNotes(lifted_split_notes.rpo_blocks[b].instructions[i]);
+      auto pn_strip = ParsePatternAndNotes(lifted_split_stripped.rpo_blocks[b].instructions[i]);
+      ASSERT_TRUE(pn_notes.ok() && pn_strip.ok());
+      EXPECT_EQ(pn_strip->pattern.ToSexprString(), pn_notes->pattern.ToSexprString());
+    }
+  }
+  const RightInverseResult split_notes_res = verifier_.VerifyAlterRegRightInverse(split_with_notes);
+  EXPECT_TRUE(split_notes_res.matches) << split_notes_res.diff_detail;
+  const RightInverseResult split_strip_res = verifier_.VerifyAlterRegRightInverse(split_stripped);
+  EXPECT_TRUE(split_strip_res.matches) << split_strip_res.diff_detail;
+}
+
 class InvertAlterRegCorpusTest : public ::testing::TestWithParam<RoundTripTestCase> {
  protected:
   static void SetUpTestSuite() {
@@ -1480,6 +1924,9 @@ RightInverseVerifier* InvertAlterRegCorpusTest::verifier = nullptr;
 
 TEST_P(InvertAlterRegCorpusTest, All4172CasesSatisfyBoundaryAndFreshGregRightInverse) {
   const RoundTripTestCase& tc = GetParam();
+  ctx->BeginFunction("harness_init");
+  hooks->ApplyCompilationProfile({2, tc.options.c_flags, {}});
+  regclass_init();
   const FunctionCompilationTrace trace = hooks->TraceForwardCompilation(tc);
   ASSERT_FALSE(trace.subfunction_snapshots.empty())
       << "Failed to capture snapshots for " << tc.test_name;
@@ -1559,7 +2006,10 @@ TEST_P(InvertAlterRegCorpusTest, All4172CasesSatisfyBoundaryAndFreshGregRightInv
     if (hard >= 0) {
       ASSERT_TRUE(lifted_pre_alter.sideband.reg_n_sets.contains(pseudo)) << tc.test_name;
       EXPECT_GE(lifted_pre_alter.sideband.reg_n_sets.at(pseudo), 1)
-          << "Pseudo " << pseudo << " (hard " << hard << ") has 0 sets on " << tc.test_name;
+          << "Pseudo " << pseudo << " (hard " << hard << ") has 0 sets on " << tc.test_name
+          << "\nfresh_greg:\n"
+          << fresh_greg.FormatSummary() << "\nlifted_pre_alter:\n"
+          << lifted_pre_alter.FormatSummary();
     }
     if (trace.stage0_input.profile.optimize_level > 0) {
       EXPECT_NE(hard, -1) << "Touched reload stack slot at opt_level > 0 on " << tc.test_name;
@@ -1583,6 +2033,14 @@ TEST_P(InvertAlterRegCorpusTest, All4172CasesSatisfyBoundaryAndFreshGregRightInv
   ExpectBlockZeroUpwardExposedEntryArgReadsPreserved(fresh_greg, lifted_pre_alter, tc.test_name);
 
   hooks->ApplyCompilationProfile(trace.stage0_input.profile);
+  const RightInverseResult fresh_ver_res = verifier->VerifyAlterRegRightInverse(fresh_greg);
+  EXPECT_TRUE(fresh_ver_res.matches)
+      << "Fresh .09.greg -> VerifyAlterRegRightInverse mismatch on " << tc.test_name << ":\n"
+      << fresh_ver_res.diff_detail << "\nexpected (.09.greg):\n"
+      << fresh_ver_res.expected_summary << "\nactual (.09.greg):\n"
+      << fresh_ver_res.actual_summary << "\nlifted pre-alter:\n"
+      << lifted_pre_alter.FormatSummary();
+
   ctx->MaterializeFromCfg(fresh_greg);
   const RtlControlFlowGraph canonical_fresh_greg =
       ctx->DematerializeToCfg(ctx->GetInsns(), RtlPassKind::kGreg);

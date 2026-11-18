@@ -86,7 +86,8 @@ bool TryCoalesceMultiBatchMovstrsiInBlock(std::vector<RtlPatternAndNotes>* insns
 // `ashldi3_internal2/3`, `ashrdi3_internal2/3`, `lshrdi3_internal2/3`).
 bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t b,
                                          bool mark_newly_folded_sentinel,
-                                         std::vector<RtlPatternAndNotes>* insns);
+                                         std::vector<RtlPatternAndNotes>* insns,
+                                         bool compute_live_in_when_sideband_empty = false);
 
 struct MipsWitnessedDiFoldOptions {
   // True in Stage 1 (`reorg.c:try_split` after delay-slot unpacking) where the
@@ -105,6 +106,15 @@ bool TryFoldGp32DiWitnessedIdioms(const RtlControlFlowGraph& cfg, int frame_size
                                   const MipsWitnessedDiFoldOptions& options,
                                   std::vector<std::vector<RtlPatternAndNotes>>* blocks);
 
+// Folds contiguous 2-word `SImode` memory load/store pairs (`mips_move_2words`)
+// into `DFmode` for GPR pairs `r` (`r < 32`, even) that already appear as
+// `(reg:DF r)` in `blocks` (and are not `DImode`-witnessed).
+bool TryFoldGp32DfInGprPairMoves(const RtlControlFlowGraph& cfg, int frame_size,
+                                 const absl::flat_hash_set<int>& compare_di_pairs,
+                                 const absl::flat_hash_set<int>& existing_di_regs,
+                                 bool mark_newly_folded_sentinel,
+                                 std::vector<std::vector<RtlPatternAndNotes>>* blocks);
+
 struct MipsMovstrsiFoldOptions {
   bool gp64 = false;
   bool fp64 = false;
@@ -112,6 +122,7 @@ struct MipsMovstrsiFoldOptions {
   bool skip_unfilled_dbr_jump_tail = false;
   bool allow_delay_slot_split_movstrsi = false;
   bool mark_newly_folded_sentinel = false;
+  bool compute_live_in_when_sideband_empty = false;
 };
 
 // Folds `mips_expand_block_move` / `output_block_move` (`mips.md:3573,3609`)
@@ -121,6 +132,14 @@ bool TryFoldMovstrsiBlockMovesInBlock(
     const RtlControlFlowGraph& cfg, size_t b, const MipsMovstrsiFoldOptions& options,
     std::vector<RtlPatternAndNotes>* insns,
     std::optional<RtlPatternAndNotes>* epilogue_delay_pn = nullptr);
+
+// Restores `!TARGET_64BIT` `emit_no_conflict_block` (`optabs.c:2485-2525`)
+// standalone `(clobber (reg:DI dh)) (insn_list:REG_LIBCALL (nil))` markers
+// (and `(subreg:SI (reg:DI 64) 1)` on `mtlo`) ahead of 32-to-64-bit integer
+// extensions whose `DImode` result is consumed in the same block. Idempotent
+// when the `CLOBBER` marker is already present.
+void RestoreNoConflictExtendClobbers(RtlControlFlowGraph* cfg, bool gp64, bool fp64,
+                                     bool runs_sched2 = false);
 
 }  // namespace rom_nom_nom::lifter
 

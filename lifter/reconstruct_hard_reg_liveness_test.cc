@@ -1442,5 +1442,491 @@ TEST(ReconstructHardRegLivenessTest, KnownLibcallAndFprGprArgSlotExclusion) {
             "(use (reg:DF 44 $f12))");
 }
 
+TEST(ReconstructHardRegLivenessTest,
+     JumpTableLabelRefO0NonCallArgReadAndLabeledNonBareReturnUsePlacement) {
+  const CompilationProfile profile_o0 = MakeProfile(0, {"-O0", "-mips2"});
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips2"});
+
+  // 1. Jump-table `ADDR_VEC` `kLabelRef` base load into `$4` (`la $4, .Ljt`) followed by a
+  //    0-argument `CALL_INSN` in a switch case must NEVER count `$4` as an outgoing call argument.
+  RtlBasicBlock jt_entry =
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 4 a0) (label_ref L0))",
+                    "(set (reg:SI 2 v0) (mem:SI (reg:SI 4 a0)))",
+                    "(parallel [(set (pc) (reg:SI 2 v0)) (use (label_ref L0))])",
+                },
+                {1});
+  jt_entry.addr_vec_targets = {1};
+  RtlBasicBlock jt_case =
+      MakeBlock(1, true,
+                {
+                    "(parallel [(set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI "
+                    "(\"zero_arg_case\"))) (const_int 0))) (clobber (reg:SI 31 ra))])",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {});
+  RtlControlFlowGraph jt_cfg;
+  jt_cfg.pass = RtlPassKind::kDbr;
+  jt_cfg.rpo_blocks = {jt_entry, jt_case};
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&jt_cfg, profile_o2);
+  EXPECT_TRUE(
+      TopLevelInsnHasNote(jt_cfg.rpo_blocks[0].instructions[1], RtlMachineMode::kRegDead, 4));
+  ASSERT_TRUE(jt_cfg.rpo_blocks[1].rtl_insns[0].has_explicit_call_fusage);
+  EXPECT_TRUE(jt_cfg.rpo_blocks[1].rtl_insns[0].call_fusage.empty());
+
+  // 2. At `-O0`, `expand` never reuses an expression-temporary hard register as an outgoing call
+  //    argument: a non-call read of `$4` clears `may_explicit` before a 0-argument `CALL_INSN`.
+  RtlControlFlowGraph o0_non_call_cfg;
+  o0_non_call_cfg.pass = RtlPassKind::kDbr;
+  o0_non_call_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 4 a0) (mem:SI (plus:SI (reg:SI 30 fp) (const_int 16))))",
+                    "(set (mem:SI (plus:SI (reg:SI 30 fp) (const_int 20))) (reg:SI 4 a0))",
+                    "(parallel [(set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI "
+                    "(\"zero_arg_fn\"))) (const_int 0))) (clobber (reg:SI 31 ra))])",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&o0_non_call_cfg, profile_o0);
+  ASSERT_TRUE(o0_non_call_cfg.rpo_blocks[0].rtl_insns[2].has_explicit_call_fusage);
+  EXPECT_TRUE(o0_non_call_cfg.rpo_blocks[0].rtl_insns[2].call_fusage.empty());
+
+  // 3. When `last_blk` (`has_label == true`) contains active instructions before `RETURN`
+  //    (e.g. a shared cross-jumped store+load tail computing `(set (reg:SI 2 v0) ...)`),
+  //    `reorg.c:find_end_label` did NOT place `end_of_function_label` at `last_blk`'s label:
+  //    `(use (reg/i:SI 2 v0))` must be placed inside `last_blk` immediately before `RETURN`,
+  //    never inside `prev_blk` ahead of `$2`'s definition!
+  RtlControlFlowGraph shared_tail_cfg;
+  shared_tail_cfg.pass = RtlPassKind::kDbr;
+  shared_tail_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) "
+                    "(label_ref L0) (pc)))",
+                },
+                {1, 2}),
+      MakeBlock(1, false,
+                {
+                    "(set (reg:SI 5 a1) (plus:SI (reg:SI 5 a1) (const_int 1)))",
+                },
+                {2}),
+      MakeBlock(2, true,
+                {
+                    "(set (mem:SI (reg:SI 6 a2)) (reg:SI 5 a1))",
+                    "(set (reg:SI 2 v0) (reg:SI 5 a1))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&shared_tail_cfg, profile_o2);
+  EXPECT_EQ(shared_tail_cfg.rpo_blocks[1].instructions.size(), 1u);
+  ASSERT_EQ(shared_tail_cfg.rpo_blocks[2].instructions.size(), 4u);
+  EXPECT_TRUE(
+      IsReturnValueUseInsn(shared_tail_cfg.rpo_blocks[2].instructions[2], 2, RtlMachineMode::kSi));
+  EXPECT_FALSE(shared_tail_cfg.sideband.basic_block_live_at_start[0].contains(2));
+  EXPECT_FALSE(shared_tail_cfg.sideband.basic_block_live_at_start[1].contains(2));
+  EXPECT_FALSE(shared_tail_cfg.sideband.basic_block_live_at_start[2].contains(2));
+}
+
+TEST(ReconstructHardRegLivenessTest, DeadLoopCombineUseHandlesMultiBlockLoopAndSched2Priority) {
+  auto make_loop_cfg = [](bool first_insn_is_load) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kDbr;
+    const std::string first_insn =
+        first_insn_is_load ? "(set (reg:SI 6 a2) (mem:SI (reg:SI 4 a0)))"
+                           : "(set (reg:SI 6 a2) (plus:SI (reg:SI 4 a0) (const_int 1)))";
+    cfg.rpo_blocks = {
+        MakeBlock(0, false, {"(set (reg:SI 25 t9) (const_int 0))"}, {1}),
+        MakeBlock(1, true,
+                  {
+                      first_insn,
+                      "(set (reg:SI 24 t8) (plus:SI (reg:SI 6 a2) (reg:SI 5 a1)))",
+                      "(set (mem:SI (reg:SI 4 a0)) (reg:SI 24 t8))",
+                  },
+                  {2}),
+        MakeBlock(2, false,
+                  {
+                      "(set (reg:SI 25 t9) (plus:SI (reg:SI 25 t9) (reg:SI 6 a2)))",
+                      "(set (pc) (if_then_else (lt:SI (reg:SI 25 t9) (reg:SI 5 a1)) "
+                      "(label_ref L0) (pc)))",
+                  },
+                  {1, 3}),
+        MakeBlock(3, false,
+                  {
+                      "(set (reg:SI 2 v0) (reg:SI 25 t9))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    return cfg;
+  };
+
+  const CompilationProfile profile_o1{.optimize_level = 1, .c_flags = {"-O1", "-mips2"}};
+  const CompilationProfile profile_o2{.optimize_level = 2, .c_flags = {"-O2", "-mips2"}};
+
+  RtlControlFlowGraph o1_load_cfg = make_loop_cfg(/*first_insn_is_load=*/true);
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&o1_load_cfg, profile_o1);
+  ASSERT_EQ(o1_load_cfg.rpo_blocks[1].instructions.size(), 4u) << o1_load_cfg.FormatSummary();
+  EXPECT_EQ(o1_load_cfg.rpo_blocks[1].instructions[0], "(use (reg:SI 24 t8))");
+
+  RtlControlFlowGraph o2_load_cfg = make_loop_cfg(/*first_insn_is_load=*/true);
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&o2_load_cfg, profile_o2);
+  ASSERT_EQ(o2_load_cfg.rpo_blocks[1].instructions.size(), 4u) << o2_load_cfg.FormatSummary();
+  EXPECT_EQ(o2_load_cfg.rpo_blocks[1].instructions[1], "(use (reg:SI 24 t8))");
+
+  RtlControlFlowGraph o2_alu_cfg = make_loop_cfg(/*first_insn_is_load=*/false);
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&o2_alu_cfg, profile_o2);
+  ASSERT_EQ(o2_alu_cfg.rpo_blocks[1].instructions.size(), 4u) << o2_alu_cfg.FormatSummary();
+  EXPECT_EQ(o2_alu_cfg.rpo_blocks[1].instructions[0], "(use (reg:SI 24 t8))");
+}
+
+TEST(ReconstructHardRegLivenessTest, SharedReturnMoveWitnessSupportsFourExitPredsAndDfReturn) {
+  RtlControlFlowGraph cfg;
+  cfg.pass = RtlPassKind::kDbr;
+  cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:DF 34 $f2) (mem:DF (reg:SI 4 a0)))",
+                    "(set (pc) (if_then_else (eq:SI (reg:SI 5 a1) (const_int 0)) "
+                    "(label_ref L0) (pc)))",
+                },
+                {2, 1}),
+      MakeBlock(1, false,
+                {
+                    "(set (reg:DF 32 $f0) (plus:DF (reg:DF 34 $f2) (reg:DF 34 $f2)))",
+                    "(set (pc) (label_ref L3))",
+                },
+                {7}),
+      MakeBlock(2, true,
+                {
+                    "(set (pc) (if_then_else (eq:SI (reg:SI 5 a1) (const_int 1)) "
+                    "(label_ref L1) (pc)))",
+                },
+                {4, 3}),
+      MakeBlock(3, false,
+                {
+                    "(set (reg:DF 32 $f0) (mult:DF (reg:DF 34 $f2) (reg:DF 34 $f2)))",
+                    "(set (pc) (label_ref L3))",
+                },
+                {7}),
+      MakeBlock(4, true,
+                {
+                    "(set (reg:SI 2 v0) (const_int 2))",
+                    "(set (pc) (if_then_else (eq:SI (reg:SI 5 a1) (reg:SI 2 v0)) "
+                    "(label_ref L2) (pc)))",
+                },
+                {6, 5}),
+      MakeBlock(5, false,
+                {
+                    "(set (reg:DF 32 $f0) (minus:DF (reg:DF 34 $f2) (reg:DF 34 $f2)))",
+                    "(set (pc) (label_ref L3))",
+                },
+                {7}),
+      MakeBlock(6, true,
+                {
+                    "(set (reg:DF 32 $f0) (neg:DF (reg:DF 34 $f2)))",
+                },
+                {7}),
+      MakeBlock(7, true,
+                {
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+
+  const CompilationProfile profile_o2{
+      .optimize_level = 2,
+      .c_flags = {"-O2", "-mips2", "-mcpu=r4000"},
+  };
+  EXPECT_TRUE(HasDeletedSharedReturnMoveWitness(cfg, profile_o2, 32, RtlMachineMode::kDf));
+
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, profile_o2);
+  EXPECT_FALSE(InsnHasReturnValueSet(cfg.rpo_blocks[1].instructions[0], 32, RtlMachineMode::kDf));
+  EXPECT_FALSE(InsnHasReturnValueSet(cfg.rpo_blocks[3].instructions[0], 32, RtlMachineMode::kDf));
+  EXPECT_FALSE(InsnHasReturnValueSet(cfg.rpo_blocks[5].instructions[0], 32, RtlMachineMode::kDf));
+  EXPECT_FALSE(InsnHasReturnValueSet(cfg.rpo_blocks[6].instructions[0], 32, RtlMachineMode::kDf));
+  ASSERT_EQ(cfg.rpo_blocks[6].instructions.size(), 2u);
+  EXPECT_TRUE(IsReturnValueUseInsn(cfg.rpo_blocks[6].instructions[1], 32, RtlMachineMode::kDf));
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     SplitLocalToGlobalRmwRecoversRegDeadAndSkipsCachedMemStoreAndLuiOri) {
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips1"});
+
+  // 1. Multi-block loop (`B0 -> B2`, `B1 -> B2`, `B2 -> {B1, B3}`) with empty
+  // `RtlBasicBlock::predecessors` vectors: `NormalizePostReloadHardRegNotes` derives
+  // predecessors from `successors` and attaches `REG_DEAD (reg:SI 3 v1)` onto `B1[0]` where
+  // incoming multi-block `$3 v1` is overwritten by a local web that dies at `B1[1]`.
+  RtlControlFlowGraph loop_cfg;
+  loop_cfg.pass = RtlPassKind::kSched2;
+  loop_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 6 a2) (const_int 0))",
+                    "(set (pc) (label_ref L1))",
+                },
+                {2}),
+      MakeBlock(1, true,
+                {
+                    "(set (reg:SI 3 v1) (and:SI (reg:SI 3 v1) (const_int 255)))",
+                    "(set (reg:SI 6 a2) (plus:SI (reg:SI 6 a2) (reg:SI 3 v1))) "
+                    "(expr_list:REG_DEAD (reg:SI 3 v1) (nil))",
+                    "(set (reg:SI 4 a0) (plus:SI (reg:SI 4 a0) (const_int 1)))",
+                },
+                {2}),
+      MakeBlock(2, true,
+                {
+                    "(set (reg:SI 3 v1) (zero_extend:SI (mem:QI (reg:SI 4 a0))))",
+                    "(set (pc) (if_then_else (ne:SI (reg:SI 3 v1) (const_int 0)) "
+                    "(label_ref L0) (pc)))",
+                },
+                {1, 3}),
+      MakeBlock(3, false,
+                {
+                    "(set (reg/i:SI 2 v0) (reg:SI 6 a2)) (expr_list:REG_DEAD (reg:SI 6 a2) (nil))",
+                    "(use (reg/i:SI 2 v0)) (expr_list:REG_DEAD (reg/i:SI 2 v0) (nil))",
+                },
+                {}),
+  };
+  ASSERT_TRUE(loop_cfg.rpo_blocks[1].predecessors.empty());
+  NormalizePostReloadHardRegNotes(&loop_cfg, profile_o2);
+  EXPECT_TRUE(
+      TopLevelInsnHasNote(loop_cfg.rpo_blocks[1].instructions[0], RtlMachineMode::kRegDead, 3));
+
+  // 2. Cached bitfield memory load-RMW-store (`v1 = [a0]; v1 &= -256; v1 |= a2; [a0] = v1`) where
+  // `v1` stays live into `B1`, and 2-insn `lui + ori` constant split (`t0 = 65536; t0 |= 5`) in a
+  // non-entry block: both define a single multi-block pseudo in place and must NOT receive a
+  // bogus `REG_DEAD` note.
+  RtlControlFlowGraph cached_cfg;
+  cached_cfg.pass = RtlPassKind::kSched2;
+  cached_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 3 v1) (mem/s:SI (reg:SI 4 a0)))",
+                    "(set (reg:SI 3 v1) (and:SI (reg:SI 3 v1) (const_int -256)))",
+                    "(set (reg:SI 3 v1) (ior:SI (reg:SI 3 v1) (reg:SI 6 a2))) "
+                    "(expr_list:REG_DEAD (reg:SI 6 a2) (nil))",
+                    "(set (mem/s:SI (reg:SI 4 a0)) (reg:SI 3 v1))",
+                    "(set (pc) (if_then_else (ne:SI (reg:SI 5 a1) (const_int 0)) "
+                    "(label_ref L1) (pc)))",
+                },
+                {2, 1}),
+      MakeBlock(1, false,
+                {
+                    "(set (reg:SI 8 t0) (const_int 65536))",
+                    "(set (reg:SI 8 t0) (ior:SI (reg:SI 8 t0) (const_int 5)))",
+                    "(set (reg:SI 3 v1) (plus:SI (reg:SI 3 v1) (reg:SI 8 t0)))",
+                },
+                {2}),
+      MakeBlock(2, true,
+                {
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 3 v1) (reg:SI 8 t0))) "
+                    "(expr_list:REG_DEAD (reg:SI 3 v1) (expr_list:REG_DEAD (reg:SI 8 t0) (nil)))",
+                    "(use (reg/i:SI 2 v0)) (expr_list:REG_DEAD (reg/i:SI 2 v0) (nil))",
+                },
+                {}),
+  };
+  NormalizePostReloadHardRegNotes(&cached_cfg, profile_o2);
+  EXPECT_FALSE(
+      TopLevelInsnHasNote(cached_cfg.rpo_blocks[0].instructions[2], RtlMachineMode::kRegDead, 3));
+  EXPECT_FALSE(
+      TopLevelInsnHasNote(cached_cfg.rpo_blocks[1].instructions[1], RtlMachineMode::kRegDead, 8));
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     ResolveConstZeroRegDeadDistinguishesSingleMdProducerFromMultiMdBlock) {
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips1"});
+
+  // 1. Single `mult -> mflo $3 -> plus` in block (`!other_md`): the delay-slot
+  //    `(REG_DEAD (const_int 0))` on the consumer resolves to `(reg:SI 65 lo)`.
+  RtlControlFlowGraph single_md_cfg;
+  single_md_cfg.pass = RtlPassKind::kDbr;
+  single_md_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(parallel[ (set (reg:SI 65 lo) (mult:SI (reg:SI 4 a0) (reg:SI 5 a1))) "
+                    "(clobber (reg:SI 64 hi)) (clobber (reg:SI 66 hilo)) ] )",
+                    "(set (reg:SI 3 v1) (reg:SI 65 lo))",
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 3 v1) (reg:SI 6 a2))) "
+                    "(expr_list:REG_DEAD (const_int 0) (nil))",
+                    "(use (reg/i:SI 2 v0))",
+                },
+                {}),
+  };
+  ResolvePostReloadConstZeroRegDeadNotes(&single_md_cfg, profile_o2);
+  EXPECT_TRUE(TopLevelInsnHasNote(single_md_cfg.rpo_blocks[0].instructions[2],
+                                  RtlMachineMode::kRegDead, 65));
+  EXPECT_FALSE(TopLevelInsnHasNote(single_md_cfg.rpo_blocks[0].instructions[2],
+                                   RtlMachineMode::kRegDead, 3));
+
+  // 2. When the same basic block contains a second MD operation (`other_md == true`),
+  //    `65 lo` is not promoted as the pseudo home, so `(REG_DEAD (const_int 0))`
+  //    resolves to the GPR operand `(reg:SI 3 v1)`.
+  RtlControlFlowGraph multi_md_cfg;
+  multi_md_cfg.pass = RtlPassKind::kDbr;
+  multi_md_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(parallel[ (set (reg:SI 65 lo) (mult:SI (reg:SI 4 a0) (reg:SI 5 a1))) "
+                    "(clobber (reg:SI 64 hi)) (clobber (reg:SI 66 hilo)) ] )",
+                    "(set (reg:SI 3 v1) (reg:SI 65 lo))",
+                    "(set (reg:SI 7 a3) (plus:SI (reg:SI 3 v1) (reg:SI 6 a2))) "
+                    "(expr_list:REG_DEAD (const_int 0) (nil))",
+                    "(parallel[ (set (reg:SI 65 lo) (mult:SI (reg:SI 7 a3) (reg:SI 4 a0))) "
+                    "(clobber (reg:SI 64 hi)) (clobber (reg:SI 66 hilo)) ] )",
+                    "(set (reg/i:SI 2 v0) (reg:SI 65 lo))",
+                    "(use (reg/i:SI 2 v0))",
+                },
+                {}),
+  };
+  ResolvePostReloadConstZeroRegDeadNotes(&multi_md_cfg, profile_o2);
+  EXPECT_TRUE(
+      TopLevelInsnHasNote(multi_md_cfg.rpo_blocks[0].instructions[2], RtlMachineMode::kRegDead, 3));
+  EXPECT_FALSE(TopLevelInsnHasNote(multi_md_cfg.rpo_blocks[0].instructions[2],
+                                   RtlMachineMode::kRegDead, 65));
+}
+
+TEST(ReconstructHardRegLivenessTest, SharedReturnWitnessRecognizesJumpDelaySlotReturnRegisterSet) {
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips2"});
+  RtlControlFlowGraph cfg;
+  cfg.pass = RtlPassKind::kDbr;
+  cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 3 v1) (plus:SI (reg:SI 4 a0) (const_int 7)))",
+                    "(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) "
+                    "(label_ref L0) (pc)))",
+                },
+                {2, 1}),
+      MakeBlock(1, false,
+                {
+                    "(sequence [(jump_insn (set (pc) (label_ref L1))) "
+                    "(insn (set (reg:SI 2 v0) (plus:SI (reg:SI 3 v1) (const_int 1))))])",
+                },
+                {3}),
+      MakeBlock(2, true,
+                {
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 3 v1) (const_int 2)))",
+                },
+                {3}),
+      MakeBlock(3, true,
+                {
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  EXPECT_TRUE(HasDeletedSharedReturnMoveWitness(cfg, profile_o2, 2, RtlMachineMode::kSi));
+
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, profile_o2);
+  EXPECT_EQ(cfg.rpo_blocks[1].instructions[0].find("(reg/i:SI 2 v0)"), std::string::npos);
+  EXPECT_EQ(cfg.rpo_blocks[2].instructions[0].find("(reg/i:SI 2 v0)"), std::string::npos);
+  ASSERT_EQ(cfg.rpo_blocks[2].instructions.size(), 2u);
+  EXPECT_TRUE(IsReturnValueUseInsn(cfg.rpo_blocks[2].instructions[1], 2, RtlMachineMode::kSi));
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     DisambiguatesDisassembledMips1MultAndMultuWhenHiIsDeadAndLoIsLive) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  ProductionHardRegLivenessInverseProvider provider;
+  RightInverseVerifier verifier(&ctx, &hooks, &provider);
+  const std::vector<std::string> mips1_flags = {"-O2", "-mips1", "-Wa,-O2"};
+
+  // 1. Signed `mult`: `64 hi` is dead while `65 lo` is live, so Stage 0 rewrites disassembled
+  //    `smulsi3_highpart` into `mulsi3_internal` (`(set (reg:SI 65 lo) (mult:SI ...))`).
+  constexpr std::string_view kSignedSrc = R"(
+int mul_signed(int a, int b, int c) {
+  int prod = a * b;
+  if (c == 0) return prod;
+  return prod + c;
+}
+)";
+  const auto signed_trace =
+      hooks.TraceForwardCompilation(kSignedSrc, "mul_signed", mips1_flags, "mul_signed");
+  const RtlControlFlowGraph lifted_signed =
+      lifter::InvertFinalAndGasFunction(signed_trace.stage0_input);
+  ASSERT_FALSE(lifted_signed.rpo_blocks.empty());
+  bool found_signed_mulsi3 = false;
+  for (const std::string& insn : lifted_signed.rpo_blocks[0].instructions) {
+    const auto pn = ParsePatternAndNotes(insn);
+    if (pn.ok() && pn->pattern.op == RtlOp::kParallel && pn->pattern.children.size() == 3u &&
+        pn->pattern.children[0].IsSet() && pn->pattern.children[0].SetDest().IsReg() &&
+        pn->pattern.children[0].SetDest().RegNo() == 65 &&
+        pn->pattern.children[0].SetSrc().op == RtlOp::kMult) {
+      found_signed_mulsi3 = true;
+    }
+  }
+  EXPECT_TRUE(found_signed_mulsi3);
+  const auto signed_res = verifier.VerifyFinalAndGasStageRightInverse(signed_trace.stage0_input);
+  EXPECT_TRUE(signed_res.matches) << signed_res.diff_detail;
+
+  // 2. Unsigned `multu` (when `unsigned` multiply is emitted or synthetic `multu` + `mflo` words):
+  //    `64 hi` is dead while `65 lo` is live, so Stage 0 rewrites disassembled `umulsi3_highpart`
+  //    into `umulsidi3_internal` (`(set (reg:DI 64 hi) (mult:DI (zero_extend:DI ...) ...))`) with
+  //    partial `REG_UNUSED (reg:SI 64 hi)`, preserving exact `multu` machine emission (`0x19`).
+  Stage0FunctionInput unsigned_in = signed_trace.stage0_input;
+  bool patched_mult_to_multu = false;
+  for (uint32_t& word : unsigned_in.machine_words) {
+    if ((word & 0xfc00ffffu) == 0x00000018u) {
+      word |= 0x1u;  // `mult` (0x18) -> `multu` (0x19)
+      patched_mult_to_multu = true;
+    }
+  }
+  ASSERT_TRUE(patched_mult_to_multu);
+  const RtlControlFlowGraph lifted_unsigned = lifter::InvertFinalAndGasFunction(unsigned_in);
+  ASSERT_FALSE(lifted_unsigned.rpo_blocks.empty());
+  bool found_unsigned_umulsidi3 = false;
+  bool has_unused_hi_si = false;
+  for (const std::string& insn : lifted_unsigned.rpo_blocks[0].instructions) {
+    const auto pn = ParsePatternAndNotes(insn);
+    if (pn.ok() && pn->pattern.op == RtlOp::kParallel && pn->pattern.children.size() == 2u &&
+        pn->pattern.children[0].IsSet() && pn->pattern.children[0].SetDest().IsReg() &&
+        pn->pattern.children[0].SetDest().RegNo() == 64 &&
+        pn->pattern.children[0].SetDest().mode == RtlMachineMode::kDi &&
+        pn->pattern.children[0].SetSrc().op == RtlOp::kMult) {
+      found_unsigned_umulsidi3 = true;
+      for (const RtlRegNote& note : pn->reg_notes) {
+        if (note.kind == RtlMachineMode::kRegUnused && note.datum.IsReg() &&
+            note.datum.RegNo() == 64 && note.datum.mode == RtlMachineMode::kSi) {
+          has_unused_hi_si = true;
+        }
+      }
+    }
+  }
+  EXPECT_TRUE(found_unsigned_umulsidi3);
+  EXPECT_TRUE(has_unused_hi_si);
+  const auto unsigned_res = verifier.VerifyFinalAndGasStageRightInverse(unsigned_in);
+  EXPECT_TRUE(unsigned_res.matches) << unsigned_res.diff_detail;
+
+  // 3. When `64 hi` IS read (`mfhi` from unsigned constant division), `umulsi3_highpart` is
+  //    preserved unchanged.
+  constexpr std::string_view kHighpartSrc = R"(
+unsigned div_ten(unsigned a) {
+  return a / 10u;
+}
+)";
+  const auto highpart_trace =
+      hooks.TraceForwardCompilation(kHighpartSrc, "div_ten", mips1_flags, "div_ten");
+  const RtlControlFlowGraph lifted_highpart =
+      lifter::InvertFinalAndGasFunction(highpart_trace.stage0_input);
+  ASSERT_FALSE(lifted_highpart.rpo_blocks.empty());
+  bool found_highpart_truncate = false;
+  for (const std::string& insn : lifted_highpart.rpo_blocks[0].instructions) {
+    const auto pn = ParsePatternAndNotes(insn);
+    if (pn.ok() && pn->pattern.op == RtlOp::kParallel && pn->pattern.children.size() == 3u &&
+        pn->pattern.children[0].IsSet() &&
+        pn->pattern.children[0].SetSrc().op == RtlOp::kTruncate) {
+      found_highpart_truncate = true;
+    }
+  }
+  EXPECT_TRUE(found_highpart_truncate);
+  const auto highpart_res =
+      verifier.VerifyFinalAndGasStageRightInverse(highpart_trace.stage0_input);
+  EXPECT_TRUE(highpart_res.matches) << highpart_res.diff_detail;
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::lifter

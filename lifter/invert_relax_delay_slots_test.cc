@@ -25,14 +25,33 @@ using ::rom_nom_nom::gcc_harness::SubfunctionBoundarySnapshot;
 using ::rom_nom_nom::gcc_harness::SubfunctionId;
 using ::rom_nom_nom::gcc_harness::SubfunctionInverseProvider;
 
-// Subclasses `SubfunctionInverseProvider` directly (never `ToySubfunctionInverses`)
-// so that `RightInverseVerifier` exercises only the production `lifter/`
+// Subclasses `SubfunctionInverseProvider` directly so that
+// `RightInverseVerifier` exercises only the production `lifter/`
 // implementation of `InvertRelaxDelaySlots`.
 class ProductionRelaxDelaySlotsProvider final : public SubfunctionInverseProvider {
  public:
   RtlControlFlowGraph InvertRelaxDelaySlots(
       const RtlControlFlowGraph& dbr_relaxed_cfg_x) const override {
     return ::rom_nom_nom::lifter::InvertRelaxDelaySlots(dbr_relaxed_cfg_x);
+  }
+};
+
+// Adversarial inverse provider that strips `insn/s` (`INSN_FROM_TARGET_P`)
+// without inverting the branch so `RightInverseVerifier` rejects it.
+class StrippedInStructRelaxDelaySlotsProvider final : public SubfunctionInverseProvider {
+ public:
+  RtlControlFlowGraph InvertRelaxDelaySlots(
+      const RtlControlFlowGraph& dbr_relaxed_cfg_x) const override {
+    RtlControlFlowGraph bad = ::rom_nom_nom::lifter::InvertRelaxDelaySlots(dbr_relaxed_cfg_x);
+    if (!bad.rpo_blocks.empty() && !bad.rpo_blocks[0].instructions.empty()) {
+      std::string& s = bad.rpo_blocks[0].instructions.back();
+      const size_t pos = s.find("(insn/s ");
+      if (pos != std::string::npos) {
+        s.replace(pos, 8, "(insn ");
+        bad.rpo_blocks[0].SyncRtlInsnsFromInstructions();
+      }
+    }
+    return bad;
   }
 };
 
@@ -978,6 +997,138 @@ TEST(InvertRelaxDelaySlotsTest, NoteOnlyLoopContBridgeAndSharedReturnSlotSuppres
               "(insn (set (reg/i:SI 2 v0) (plus:SI (reg/i:SI 2 v0) (reg:SI 8 t0))))])");
     const RightInverseResult res_bridge = verifier.VerifyRelaxDelaySlotsRightInverse(bridge_cfg);
     EXPECT_TRUE(res_bridge.matches) << res_bridge.diff_detail;
+  }
+}
+
+TEST(InvertRelaxDelaySlotsTest,
+     PredOfTargetEndingWithSameSlotSuppressesFalseBranchInversionRightInverse) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  hooks.ApplyCompilationProfile(
+      CompilationProfile{.optimize_level = 2, .c_flags = {"-O2", "-mips1"}});
+  ProductionRelaxDelaySlotsProvider provider;
+  RightInverseVerifier verifier(&ctx, &hooks, &provider);
+  StrippedInStructRelaxDelaySlotsProvider stripped_provider;
+  RightInverseVerifier stripped_verifier(&ctx, &hooks, &stripped_provider);
+
+  // 1. Shared-epilogue `(use v0)` + `return` (`target_is_shared_epilogue_jump`
+  //    suppression): `B0` has `insn/s (set v0 (and s2 255))` jumping to `B2`,
+  //    while `B1` (`pred_of_target`) updates `s2` first (`!= slot`, so
+  //    `pred_of_target_starts_with_same_slot` is false) and ends with the exact
+  //    same `(set v0 (and s2 255))` (`pred_of_target_ends_with_same_slot` is
+  //    true). `InvertRelaxDelaySlots` must keep `B0` un-inverted (`eq` +
+  //    `insn/s`, 3 blocks) rather than synthesizing a Subcase II.6 trampoline.
+  {
+    RtlControlFlowGraph shared_tail_cfg;
+    shared_tail_cfg.pass = RtlPassKind::kDbr;
+    shared_tail_cfg.sideband.saved_gpr_regnos = {18, 31};
+    shared_tail_cfg.rpo_blocks.resize(3);
+    shared_tail_cfg.rpo_blocks[0].AddPatternOnly(
+        "(sequence [(jump_insn (set (pc) (if_then_else (eq:SI (reg:SI 18 s2) (const_int 0)) "
+        "(label_ref L0) (pc)))) "
+        "(insn/s (set (reg/i:SI 2 v0) (and:SI (reg:SI 18 s2) (const_int 255))))])");
+    shared_tail_cfg.rpo_blocks[0].successors = {2, 1};
+    shared_tail_cfg.rpo_blocks[1].AddPatternOnly(
+        "(set (reg:SI 18 s2) (plus:SI (reg:SI 18 s2) (const_int 1)))");
+    shared_tail_cfg.rpo_blocks[1].AddPatternOnly(
+        "(set (reg/i:SI 2 v0) (and:SI (reg:SI 18 s2) (const_int 255)))");
+    shared_tail_cfg.rpo_blocks[1].successors = {2};
+    shared_tail_cfg.rpo_blocks[2].has_label = true;
+    shared_tail_cfg.rpo_blocks[2].AddPatternOnly("(use (reg/i:SI 2 v0))");
+    shared_tail_cfg.rpo_blocks[2].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+
+    const RtlControlFlowGraph lifted = InvertRelaxDelaySlots(shared_tail_cfg);
+    ASSERT_EQ(lifted.rpo_blocks.size(), 3u);
+    EXPECT_TRUE(absl::StrContains(lifted.rpo_blocks[0].instructions[0], "(eq:SI "));
+    EXPECT_TRUE(absl::StrContains(lifted.rpo_blocks[0].instructions[0], "(insn/s "));
+
+    const RightInverseResult res = verifier.VerifyRelaxDelaySlotsRightInverse(shared_tail_cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+    EXPECT_FALSE(stripped_verifier.VerifyRelaxDelaySlotsRightInverse(shared_tail_cfg).matches);
+
+    // Contrast: when `B1` ends with a DIFFERENT instruction (`v0 = 1`),
+    // `pred_of_target_ends_with_same_slot` is false and `InvertRelaxDelaySlots`
+    // DOES perform Subcase II.6 inversion (`eq` -> `ne`, 4 blocks).
+    RtlControlFlowGraph diff_tail_cfg = shared_tail_cfg;
+    diff_tail_cfg.rpo_blocks[1].instructions[1] = "(set (reg/i:SI 2 v0) (const_int 1))";
+    diff_tail_cfg.rpo_blocks[1].SyncRtlInsnsFromInstructions();
+    const RtlControlFlowGraph lifted_diff = InvertRelaxDelaySlots(diff_tail_cfg);
+    ASSERT_EQ(lifted_diff.rpo_blocks.size(), 4u);
+    EXPECT_TRUE(absl::StrContains(lifted_diff.rpo_blocks[0].instructions[0], "(ne:SI "));
+    EXPECT_TRUE(verifier.VerifyRelaxDelaySlotsRightInverse(diff_tail_cfg).matches);
+  }
+
+  // 2. Trailing empty `end_of_function_label` (`target_is_trailing_empty_return_label`
+  //    suppression): `find_last_real_active` skips trailing `(use ...)` in `B1`
+  //    and matches `(set v0 (and s2 255))` before empty `B2`.
+  {
+    RtlControlFlowGraph empty_end_cfg;
+    empty_end_cfg.pass = RtlPassKind::kDbr;
+    empty_end_cfg.sideband.frame_size_bytes = 24;
+    empty_end_cfg.sideband.saved_gpr_regnos = {18, 31};
+    empty_end_cfg.rpo_blocks.resize(3);
+    empty_end_cfg.rpo_blocks[0].AddPatternOnly(
+        "(sequence [(jump_insn (set (pc) (if_then_else (eq:SI (reg:SI 18 s2) (const_int 0)) "
+        "(label_ref L0) (pc)))) "
+        "(insn/s (set (reg/i:SI 2 v0) (and:SI (reg:SI 18 s2) (const_int 255))))])");
+    empty_end_cfg.rpo_blocks[0].successors = {2, 1};
+    empty_end_cfg.rpo_blocks[1].AddPatternOnly(
+        "(set (reg:SI 18 s2) (plus:SI (reg:SI 18 s2) (const_int 1)))");
+    empty_end_cfg.rpo_blocks[1].AddPatternOnly(
+        "(set (reg/i:SI 2 v0) (and:SI (reg:SI 18 s2) (const_int 255)))");
+    empty_end_cfg.rpo_blocks[1].AddPatternOnly("(use (reg/i:SI 2 v0))");
+    empty_end_cfg.rpo_blocks[1].successors = {2};
+    empty_end_cfg.rpo_blocks[2].has_label = true;
+
+    const RtlControlFlowGraph lifted = InvertRelaxDelaySlots(empty_end_cfg);
+    ASSERT_EQ(lifted.rpo_blocks.size(), 3u);
+    EXPECT_TRUE(absl::StrContains(lifted.rpo_blocks[0].instructions[0], "(eq:SI "));
+    EXPECT_TRUE(absl::StrContains(lifted.rpo_blocks[0].instructions[0], "(insn/s "));
+
+    const RightInverseResult res = verifier.VerifyRelaxDelaySlotsRightInverse(empty_end_cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+    EXPECT_FALSE(stripped_verifier.VerifyRelaxDelaySlotsRightInverse(empty_end_cfg).matches);
+  }
+
+  // 3. Lookback across an unlabeled `(use ...)` `pred_of_target` (`B3`) to
+  //    `pred2 = target_b - 2` (`B2`, `target_b - 2 != b`) ending with the same
+  //    slot instruction before empty `end_of_function_label` (`B4`).
+  {
+    RtlControlFlowGraph lookback_cfg;
+    lookback_cfg.pass = RtlPassKind::kDbr;
+    lookback_cfg.sideband.frame_size_bytes = 24;
+    lookback_cfg.sideband.saved_gpr_regnos = {18, 31};
+    lookback_cfg.rpo_blocks.resize(5);
+    lookback_cfg.rpo_blocks[0].AddPatternOnly(
+        "(sequence [(jump_insn (set (pc) (if_then_else (eq:SI (reg:SI 18 s2) (const_int 0)) "
+        "(label_ref L1) (pc)))) "
+        "(insn/s (set (reg/i:SI 2 v0) (and:SI (reg:SI 18 s2) (const_int 255))))])");
+    lookback_cfg.rpo_blocks[0].successors = {4, 1};
+    lookback_cfg.rpo_blocks[1].AddPatternOnly(
+        "(set (reg:SI 18 s2) (plus:SI (reg:SI 18 s2) (const_int 1)))");
+    lookback_cfg.rpo_blocks[1].successors = {2};
+    lookback_cfg.rpo_blocks[2].has_label = true;
+    lookback_cfg.rpo_blocks[2].AddPatternOnly(
+        "(set (reg:SI 18 s2) (plus:SI (reg:SI 18 s2) (const_int 2)))");
+    lookback_cfg.rpo_blocks[2].AddPatternOnly(
+        "(set (reg/i:SI 2 v0) (and:SI (reg:SI 18 s2) (const_int 255)))");
+    lookback_cfg.rpo_blocks[2].successors = {3};
+    lookback_cfg.rpo_blocks[3].has_label = false;
+    lookback_cfg.rpo_blocks[3].AddPatternOnly("(use (reg/i:SI 2 v0))");
+    lookback_cfg.rpo_blocks[3].successors = {4};
+    lookback_cfg.rpo_blocks[4].has_label = true;
+
+    const RtlControlFlowGraph lifted = InvertRelaxDelaySlots(lookback_cfg);
+    ASSERT_EQ(lifted.rpo_blocks.size(), 5u);
+    EXPECT_TRUE(absl::StrContains(lifted.rpo_blocks[0].instructions[0], "(eq:SI "));
+    EXPECT_TRUE(absl::StrContains(lifted.rpo_blocks[0].instructions[0], "(insn/s "));
+
+    RtlControlFlowGraph diff_lookback_cfg = lookback_cfg;
+    diff_lookback_cfg.rpo_blocks[2].instructions[1] = "(set (reg/i:SI 2 v0) (const_int 1))";
+    diff_lookback_cfg.rpo_blocks[2].SyncRtlInsnsFromInstructions();
+    const RtlControlFlowGraph lifted_diff = InvertRelaxDelaySlots(diff_lookback_cfg);
+    ASSERT_EQ(lifted_diff.rpo_blocks.size(), 6u);
+    EXPECT_TRUE(absl::StrContains(lifted_diff.rpo_blocks[0].instructions[0], "(ne:SI "));
   }
 }
 

@@ -30,6 +30,7 @@
 #include "core/rtl_expr.h"
 #include "lifter/mips_multi_insn_idioms.h"
 #include "lifter/reconstruct_hard_reg_liveness.h"
+#include "lifter/reconstruct_o0_final_scan.h"
 
 namespace rom_nom_nom::lifter {
 namespace {
@@ -999,8 +1000,20 @@ std::string InvertUnalignedBlockMove(std::string_view multi_line_asm) {
       return "";
     }
   }
-  while (clobber_regs.size() < 4) {
-    clobber_regs.push_back(src_base);
+  constexpr std::array<int, 16> kCallerSavedAllocOrder = {2,  3,  4,  5,  6,  7,  8,  9,
+                                                          10, 11, 12, 13, 14, 15, 24, 25};
+  const int max_used_clobber = *std::max_element(clobber_regs.begin(), clobber_regs.end());
+  for (int pass = 0; pass < 2 && clobber_regs.size() < 4; ++pass) {
+    for (int cand : kCallerSavedAllocOrder) {
+      if ((pass == 0 && cand <= max_used_clobber) || cand == src_base || cand == dst_base ||
+          std::find(clobber_regs.begin(), clobber_regs.end(), cand) != clobber_regs.end()) {
+        continue;
+      }
+      clobber_regs.push_back(cand);
+      if (clobber_regs.size() == 4) {
+        break;
+      }
+    }
   }
 
   const std::string dst_addr =
@@ -1019,6 +1032,237 @@ std::string InvertUnalignedBlockMove(std::string_view multi_line_asm) {
       dst_addr, src_addr, FormatGprRtl(clobber_regs[0], "SI"), FormatGprRtl(clobber_regs[1], "SI"),
       FormatGprRtl(clobber_regs[2], "SI"), FormatGprRtl(clobber_regs[3], "SI"), total_bytes,
       move_type);
+}
+
+std::string InvertFloatingPointFinalScanInsn(std::string_view mnemonic,
+                                             absl::Span<const std::string_view> ops) {
+  if (mnemonic == "li.s" || mnemonic == "li.d") {
+    if (ops.size() != 2) {
+      return "";
+    }
+    const std::string_view mode = (mnemonic == "li.d") ? "DF" : "SF";
+    const int fpr = ParseFprNumber(ops[0]);
+    const int gpr = (fpr < 0) ? ParseGprNumber(ops[0]) : -1;
+    if (fpr < 0 && gpr < 1) {
+      return "";
+    }
+    const std::string dst_rtx = (fpr >= 0) ? FormatFprRtl(fpr, mode) : FormatGprRtl(gpr, mode);
+    const std::string val_str(ops[1]);
+    char* endptr = nullptr;
+    const double d = std::strtod(val_str.c_str(), &endptr);
+    if (endptr == val_str.c_str() || *endptr != '\0') {
+      return "";
+    }
+    const uint64_t bits = absl::bit_cast<uint64_t>(d);
+    const int32_t lo = static_cast<int32_t>(bits & 0xffffffffu);
+    const int32_t hi = static_cast<int32_t>(bits >> 32);
+    return absl::StrFormat("(set %s (const_double:%s (cc0) %d %d))", dst_rtx, mode, lo, hi);
+  }
+
+  if (mnemonic == "mov.s" || mnemonic == "mov.d") {
+    if (ops.size() != 2) {
+      return "";
+    }
+    const std::string_view mode = (mnemonic == "mov.d") ? "DF" : "SF";
+    const int fd = ParseFprNumber(ops[0]);
+    const int fs = ParseFprNumber(ops[1]);
+    if (fd < 0 || fs < 0) {
+      return "";
+    }
+    return absl::StrFormat("(set %s %s)", FormatFprRtl(fd, mode), FormatFprRtl(fs, mode));
+  }
+
+  if (mnemonic == "mfc1" || mnemonic == "dmfc1") {
+    if (ops.size() != 2) {
+      return "";
+    }
+    const std::string_view mode = (mnemonic == "dmfc1") ? "DF" : "SF";
+    const int rt = ParseGprNumber(ops[0]);
+    const int fs = ParseFprNumber(ops[1]);
+    if (rt < 0 || fs < 0) {
+      return "";
+    }
+    return absl::StrFormat("(set %s %s)", FormatGprRtl(rt, mode), FormatFprRtl(fs, mode));
+  }
+
+  if (mnemonic == "mtc1" || mnemonic == "dmtc1") {
+    if (ops.size() != 2) {
+      return "";
+    }
+    const std::string_view mode = (mnemonic == "dmtc1") ? "DF" : "SF";
+    const int rt = ParseGprNumber(ops[0]);
+    const int fs = ParseFprNumber(ops[1]);
+    if (rt < 0 || fs < 0) {
+      return "";
+    }
+    if (rt == 0 && mnemonic == "mtc1") {
+      return absl::StrFormat("(set %s (const_double:SF (cc0) 0 0))", FormatFprRtl(fs, "SF"));
+    }
+    return absl::StrFormat("(set %s %s)", FormatFprRtl(fs, mode), FormatGprRtl(rt, mode));
+  }
+
+  if (mnemonic == "cfc1") {
+    if (ops.size() != 2) {
+      return "";
+    }
+    const int rt = ParseGprNumber(ops[0]);
+    if (rt < 0 || (ops[1] != "$31" && ops[1] != "$fcr31")) {
+      return "";
+    }
+    return absl::StrFormat("(set %s (reg:SI 67 $fcr31))", FormatGprRtl(rt, "SI"));
+  }
+
+  if (mnemonic == "ctc1") {
+    if (ops.size() != 2) {
+      return "";
+    }
+    const int rt = ParseGprNumber(ops[0]);
+    if (rt < 0 || (ops[1] != "$31" && ops[1] != "$fcr31")) {
+      return "";
+    }
+    return absl::StrFormat("(set (reg:SI 67 $fcr31) %s)", FormatGprRtl(rt, "SI"));
+  }
+
+  if (mnemonic == "add.s" || mnemonic == "add.d" || mnemonic == "sub.s" || mnemonic == "sub.d" ||
+      mnemonic == "mul.s" || mnemonic == "mul.d" || mnemonic == "div.s" || mnemonic == "div.d") {
+    if (ops.size() != 3) {
+      return "";
+    }
+    const std::string_view mode = absl::EndsWith(mnemonic, ".d") ? "DF" : "SF";
+    const int fd = ParseFprNumber(ops[0]);
+    const int fs = ParseFprNumber(ops[1]);
+    const int ft = ParseFprNumber(ops[2]);
+    if (fd < 0 || fs < 0 || ft < 0) {
+      return "";
+    }
+    const std::string_view rtl_op =
+        absl::StartsWith(mnemonic, "add")
+            ? "plus"
+            : (absl::StartsWith(mnemonic, "sub")
+                   ? "minus"
+                   : (absl::StartsWith(mnemonic, "mul") ? "mult" : "div"));
+    return absl::StrFormat("(set %s (%s:%s %s %s))", FormatFprRtl(fd, mode), rtl_op, mode,
+                           FormatFprRtl(fs, mode), FormatFprRtl(ft, mode));
+  }
+
+  if (mnemonic == "abs.s" || mnemonic == "abs.d" || mnemonic == "neg.s" || mnemonic == "neg.d" ||
+      mnemonic == "sqrt.s" || mnemonic == "sqrt.d") {
+    if (ops.size() != 2) {
+      return "";
+    }
+    const std::string_view mode = absl::EndsWith(mnemonic, ".d") ? "DF" : "SF";
+    const int fd = ParseFprNumber(ops[0]);
+    const int fs = ParseFprNumber(ops[1]);
+    if (fd < 0 || fs < 0) {
+      return "";
+    }
+    const std::string_view rtl_op = absl::StartsWith(mnemonic, "abs")
+                                        ? "abs"
+                                        : (absl::StartsWith(mnemonic, "neg") ? "neg" : "sqrt");
+    return absl::StrFormat("(set %s (%s:%s %s))", FormatFprRtl(fd, mode), rtl_op, mode,
+                           FormatFprRtl(fs, mode));
+  }
+
+  if (mnemonic == "cvt.d.s") {
+    if (ops.size() != 2) {
+      return "";
+    }
+    const int fd = ParseFprNumber(ops[0]);
+    const int fs = ParseFprNumber(ops[1]);
+    if (fd < 0 || fs < 0) {
+      return "";
+    }
+    return absl::StrFormat("(set %s (float_extend:DF %s))", FormatFprRtl(fd, "DF"),
+                           FormatFprRtl(fs, "SF"));
+  }
+
+  if (mnemonic == "cvt.s.d") {
+    if (ops.size() != 2) {
+      return "";
+    }
+    const int fd = ParseFprNumber(ops[0]);
+    const int fs = ParseFprNumber(ops[1]);
+    if (fd < 0 || fs < 0) {
+      return "";
+    }
+    return absl::StrFormat("(set %s (float_truncate:SF %s))", FormatFprRtl(fd, "SF"),
+                           FormatFprRtl(fs, "DF"));
+  }
+
+  if (mnemonic == "cvt.s.w" || mnemonic == "cvt.d.w") {
+    if (ops.size() != 2) {
+      return "";
+    }
+    const std::string_view mode = (mnemonic == "cvt.s.w") ? "SF" : "DF";
+    const int fd = ParseFprNumber(ops[0]);
+    const int fs = ParseFprNumber(ops[1]);
+    if (fd < 0 || fs < 0) {
+      return "";
+    }
+    return absl::StrFormat("(set %s (float:%s %s))", FormatFprRtl(fd, mode), mode,
+                           FormatGprRtl(2, "SI"));
+  }
+
+  if (mnemonic == "trunc.w.s" || mnemonic == "trunc.w.d") {
+    if (ops.size() == 3) {
+      const std::string_view src_mode = (mnemonic == "trunc.w.d") ? "DF" : "SF";
+      const int fd = ParseFprNumber(ops[0]);
+      const int fs = ParseFprNumber(ops[1]);
+      const int scratch_gpr = ParseGprNumber(ops[2]);
+      if (fd < 0 || fs < 0 || scratch_gpr < 0) {
+        return "";
+      }
+      return absl::StrFormat("(parallel[ (set %s (fix:SI %s)) (clobber %s) (clobber %s) ] )",
+                             FormatFprRtl(fd, "SI"), FormatFprRtl(fs, src_mode),
+                             FormatGprRtl(scratch_gpr, "SI"), FormatFprRtl(fd, src_mode));
+    }
+    if (ops.size() == 2) {
+      const std::string_view src_mode = (mnemonic == "trunc.w.d") ? "DF" : "SF";
+      const int fd = ParseFprNumber(ops[0]);
+      const int fs = ParseFprNumber(ops[1]);
+      if (fd < 0 || fs < 0) {
+        return "";
+      }
+      return absl::StrFormat("(parallel[ (set %s (fix:SI %s)) (clobber %s) (clobber %s) ] )",
+                             FormatFprRtl(fd, "SI"), FormatFprRtl(fs, src_mode),
+                             FormatGprRtl(1, "SI"), FormatFprRtl(fd, src_mode));
+    }
+    return "";
+  }
+
+  if (absl::StartsWith(mnemonic, "c.") &&
+      (absl::EndsWith(mnemonic, ".s") || absl::EndsWith(mnemonic, ".d"))) {
+    if (ops.size() != 2) {
+      return "";
+    }
+    const std::string_view mode = absl::EndsWith(mnemonic, ".d") ? "DF" : "SF";
+    const std::string_view cond = mnemonic.substr(2, mnemonic.size() - 4);
+    const int fs = ParseFprNumber(ops[0]);
+    const int ft = ParseFprNumber(ops[1]);
+    if (fs < 0 || ft < 0) {
+      return "";
+    }
+    std::string_view rtl_cmp;
+    if (cond == "eq" || cond == "seq") {
+      rtl_cmp = "eq";
+    } else if (cond == "lt" || cond == "olt" || cond == "ult") {
+      rtl_cmp = "lt";
+    } else if (cond == "le" || cond == "ole" || cond == "ule") {
+      rtl_cmp = "le";
+    } else if (cond == "gt") {
+      rtl_cmp = "gt";
+    } else if (cond == "ge") {
+      rtl_cmp = "ge";
+    } else if (cond == "ne" || cond == "neq") {
+      rtl_cmp = "ne";
+    } else {
+      return "";
+    }
+    return absl::StrFormat("(set (reg:CC_FP 67 $fcr31) (%s:CC_FP %s %s))", rtl_cmp,
+                           FormatFprRtl(fs, mode), FormatFprRtl(ft, mode));
+  }
+
+  return "";
 }
 
 }  // namespace
@@ -1747,236 +1991,7 @@ std::string InvertFinalScanInsn(std::string_view asm_line_x) {
     return absl::StrFormat("(set (%s:%s %s) %s)", mem_tag, mode, addr_rtx, FormatFprRtl(fpr, mode));
   }
 
-  if (mnemonic == "li.s" || mnemonic == "li.d") {
-    if (ops.size() != 2) {
-      return "";
-    }
-    const std::string_view mode = (mnemonic == "li.d") ? "DF" : "SF";
-    const int fpr = ParseFprNumber(ops[0]);
-    const int gpr = (fpr < 0) ? ParseGprNumber(ops[0]) : -1;
-    if (fpr < 0 && gpr < 1) {
-      return "";
-    }
-    const std::string dst_rtx = (fpr >= 0) ? FormatFprRtl(fpr, mode) : FormatGprRtl(gpr, mode);
-    const std::string val_str(ops[1]);
-    char* endptr = nullptr;
-    const double d = std::strtod(val_str.c_str(), &endptr);
-    if (endptr == val_str.c_str() || *endptr != '\0') {
-      return "";
-    }
-    const uint64_t bits = absl::bit_cast<uint64_t>(d);
-    const int32_t lo = static_cast<int32_t>(bits & 0xffffffffu);
-    const int32_t hi = static_cast<int32_t>(bits >> 32);
-    return absl::StrFormat("(set %s (const_double:%s (cc0) %d %d))", dst_rtx, mode, lo, hi);
-  }
-
-  if (mnemonic == "mov.s" || mnemonic == "mov.d") {
-    if (ops.size() != 2) {
-      return "";
-    }
-    const std::string_view mode = (mnemonic == "mov.d") ? "DF" : "SF";
-    const int fd = ParseFprNumber(ops[0]);
-    const int fs = ParseFprNumber(ops[1]);
-    if (fd < 0 || fs < 0) {
-      return "";
-    }
-    return absl::StrFormat("(set %s %s)", FormatFprRtl(fd, mode), FormatFprRtl(fs, mode));
-  }
-
-  if (mnemonic == "mfc1" || mnemonic == "dmfc1") {
-    if (ops.size() != 2) {
-      return "";
-    }
-    const std::string_view mode = (mnemonic == "dmfc1") ? "DF" : "SF";
-    const int rt = ParseGprNumber(ops[0]);
-    const int fs = ParseFprNumber(ops[1]);
-    if (rt < 0 || fs < 0) {
-      return "";
-    }
-    return absl::StrFormat("(set %s %s)", FormatGprRtl(rt, mode), FormatFprRtl(fs, mode));
-  }
-
-  if (mnemonic == "mtc1" || mnemonic == "dmtc1") {
-    if (ops.size() != 2) {
-      return "";
-    }
-    const std::string_view mode = (mnemonic == "dmtc1") ? "DF" : "SF";
-    const int rt = ParseGprNumber(ops[0]);
-    const int fs = ParseFprNumber(ops[1]);
-    if (rt < 0 || fs < 0) {
-      return "";
-    }
-    if (rt == 0 && mnemonic == "mtc1") {
-      return absl::StrFormat("(set %s (const_double:SF (cc0) 0 0))", FormatFprRtl(fs, "SF"));
-    }
-    return absl::StrFormat("(set %s %s)", FormatFprRtl(fs, mode), FormatGprRtl(rt, mode));
-  }
-
-  if (mnemonic == "cfc1") {
-    if (ops.size() != 2) {
-      return "";
-    }
-    const int rt = ParseGprNumber(ops[0]);
-    if (rt < 0 || (ops[1] != "$31" && ops[1] != "$fcr31")) {
-      return "";
-    }
-    return absl::StrFormat("(set %s (reg:SI 67 $fcr31))", FormatGprRtl(rt, "SI"));
-  }
-
-  if (mnemonic == "ctc1") {
-    if (ops.size() != 2) {
-      return "";
-    }
-    const int rt = ParseGprNumber(ops[0]);
-    if (rt < 0 || (ops[1] != "$31" && ops[1] != "$fcr31")) {
-      return "";
-    }
-    return absl::StrFormat("(set (reg:SI 67 $fcr31) %s)", FormatGprRtl(rt, "SI"));
-  }
-
-  // ---------------------------------------------------------------------------
-  // 11. Floating-point arithmetic, unary ops, conversions, and comparisons
-  // ---------------------------------------------------------------------------
-  if (mnemonic == "add.s" || mnemonic == "add.d" || mnemonic == "sub.s" || mnemonic == "sub.d" ||
-      mnemonic == "mul.s" || mnemonic == "mul.d" || mnemonic == "div.s" || mnemonic == "div.d") {
-    if (ops.size() != 3) {
-      return "";
-    }
-    const std::string_view mode = absl::EndsWith(mnemonic, ".d") ? "DF" : "SF";
-    const int fd = ParseFprNumber(ops[0]);
-    const int fs = ParseFprNumber(ops[1]);
-    const int ft = ParseFprNumber(ops[2]);
-    if (fd < 0 || fs < 0 || ft < 0) {
-      return "";
-    }
-    const std::string_view rtl_op =
-        absl::StartsWith(mnemonic, "add")
-            ? "plus"
-            : (absl::StartsWith(mnemonic, "sub")
-                   ? "minus"
-                   : (absl::StartsWith(mnemonic, "mul") ? "mult" : "div"));
-    return absl::StrFormat("(set %s (%s:%s %s %s))", FormatFprRtl(fd, mode), rtl_op, mode,
-                           FormatFprRtl(fs, mode), FormatFprRtl(ft, mode));
-  }
-
-  if (mnemonic == "abs.s" || mnemonic == "abs.d" || mnemonic == "neg.s" || mnemonic == "neg.d" ||
-      mnemonic == "sqrt.s" || mnemonic == "sqrt.d") {
-    if (ops.size() != 2) {
-      return "";
-    }
-    const std::string_view mode = absl::EndsWith(mnemonic, ".d") ? "DF" : "SF";
-    const int fd = ParseFprNumber(ops[0]);
-    const int fs = ParseFprNumber(ops[1]);
-    if (fd < 0 || fs < 0) {
-      return "";
-    }
-    const std::string_view rtl_op = absl::StartsWith(mnemonic, "abs")
-                                        ? "abs"
-                                        : (absl::StartsWith(mnemonic, "neg") ? "neg" : "sqrt");
-    return absl::StrFormat("(set %s (%s:%s %s))", FormatFprRtl(fd, mode), rtl_op, mode,
-                           FormatFprRtl(fs, mode));
-  }
-
-  if (mnemonic == "cvt.d.s") {
-    if (ops.size() != 2) {
-      return "";
-    }
-    const int fd = ParseFprNumber(ops[0]);
-    const int fs = ParseFprNumber(ops[1]);
-    if (fd < 0 || fs < 0) {
-      return "";
-    }
-    return absl::StrFormat("(set %s (float_extend:DF %s))", FormatFprRtl(fd, "DF"),
-                           FormatFprRtl(fs, "SF"));
-  }
-
-  if (mnemonic == "cvt.s.d") {
-    if (ops.size() != 2) {
-      return "";
-    }
-    const int fd = ParseFprNumber(ops[0]);
-    const int fs = ParseFprNumber(ops[1]);
-    if (fd < 0 || fs < 0) {
-      return "";
-    }
-    return absl::StrFormat("(set %s (float_truncate:SF %s))", FormatFprRtl(fd, "SF"),
-                           FormatFprRtl(fs, "DF"));
-  }
-
-  if (mnemonic == "cvt.s.w" || mnemonic == "cvt.d.w") {
-    if (ops.size() != 2) {
-      return "";
-    }
-    const std::string_view mode = (mnemonic == "cvt.s.w") ? "SF" : "DF";
-    const int fd = ParseFprNumber(ops[0]);
-    const int fs = ParseFprNumber(ops[1]);
-    if (fd < 0 || fs < 0) {
-      return "";
-    }
-    return absl::StrFormat("(set %s (float:%s %s))", FormatFprRtl(fd, mode), mode,
-                           FormatGprRtl(2, "SI"));
-  }
-
-  if (mnemonic == "trunc.w.s" || mnemonic == "trunc.w.d") {
-    if (ops.size() == 3) {
-      const std::string_view src_mode = (mnemonic == "trunc.w.d") ? "DF" : "SF";
-      const int fd = ParseFprNumber(ops[0]);
-      const int fs = ParseFprNumber(ops[1]);
-      const int scratch_gpr = ParseGprNumber(ops[2]);
-      if (fd < 0 || fs < 0 || scratch_gpr < 0) {
-        return "";
-      }
-      return absl::StrFormat("(parallel[ (set %s (fix:SI %s)) (clobber %s) (clobber %s) ] )",
-                             FormatFprRtl(fd, "SI"), FormatFprRtl(fs, src_mode),
-                             FormatGprRtl(scratch_gpr, "SI"), FormatFprRtl(fd, src_mode));
-    }
-    if (ops.size() == 2) {
-      const std::string_view src_mode = (mnemonic == "trunc.w.d") ? "DF" : "SF";
-      const int fd = ParseFprNumber(ops[0]);
-      const int fs = ParseFprNumber(ops[1]);
-      if (fd < 0 || fs < 0) {
-        return "";
-      }
-      return absl::StrFormat("(parallel[ (set %s (fix:SI %s)) (clobber %s) (clobber %s) ] )",
-                             FormatFprRtl(fd, "SI"), FormatFprRtl(fs, src_mode),
-                             FormatGprRtl(1, "SI"), FormatFprRtl(fd, src_mode));
-    }
-    return "";
-  }
-
-  if (absl::StartsWith(mnemonic, "c.") &&
-      (absl::EndsWith(mnemonic, ".s") || absl::EndsWith(mnemonic, ".d"))) {
-    if (ops.size() != 2) {
-      return "";
-    }
-    const std::string_view mode = absl::EndsWith(mnemonic, ".d") ? "DF" : "SF";
-    const std::string_view cond = mnemonic.substr(2, mnemonic.size() - 4);
-    const int fs = ParseFprNumber(ops[0]);
-    const int ft = ParseFprNumber(ops[1]);
-    if (fs < 0 || ft < 0) {
-      return "";
-    }
-    std::string_view rtl_cmp;
-    if (cond == "eq" || cond == "seq") {
-      rtl_cmp = "eq";
-    } else if (cond == "lt" || cond == "olt" || cond == "ult") {
-      rtl_cmp = "lt";
-    } else if (cond == "le" || cond == "ole" || cond == "ule") {
-      rtl_cmp = "le";
-    } else if (cond == "gt") {
-      rtl_cmp = "gt";
-    } else if (cond == "ge") {
-      rtl_cmp = "ge";
-    } else if (cond == "ne" || cond == "neq") {
-      rtl_cmp = "ne";
-    } else {
-      return "";
-    }
-    return absl::StrFormat("(set (reg:CC_FP 67 $fcr31) (%s:CC_FP %s %s))", rtl_cmp,
-                           FormatFprRtl(fs, mode), FormatFprRtl(ft, mode));
-  }
-
-  return "";
+  return InvertFloatingPointFinalScanInsn(mnemonic, ops);
 }
 
 namespace {
@@ -2676,7 +2691,8 @@ void UpgradeDivModInsnsForOptimize(RtlControlFlowGraph* cfg) {
           });
           std::vector<RtlRegNote> notes = parsed->reg_notes;
           notes.insert(notes.end(), next_parsed->reg_notes.begin(), next_parsed->reg_notes.end());
-          upgraded.push_back(FormatPatternAndNotes(fused, notes, parsed->bracketed_notes));
+          upgraded.push_back(FormatGccPrintRtlPatternAndNotes(fused, notes, parsed->bracketed_notes,
+                                                              /*call_fusage=*/{}));
           changed = true;
           ++i;
           continue;
@@ -2699,7 +2715,8 @@ void UpgradeDivModInsnsForOptimize(RtlControlFlowGraph* cfg) {
           .list_op = RtlOp::kExprList,
           .datum = scratch_at,
       });
-      upgraded.push_back(FormatPatternAndNotes(divmod, notes, parsed->bracketed_notes));
+      upgraded.push_back(FormatGccPrintRtlPatternAndNotes(divmod, notes, parsed->bracketed_notes,
+                                                          /*call_fusage=*/{}));
       changed = true;
     }
     if (changed) {
@@ -2886,18 +2903,25 @@ void UpgradeR4000Mulsi3Insns(RtlControlFlowGraph* cfg) {
         rd = p1->pattern.SetDest().RegNo();
       }
       if (rs >= 0 && rs < 32 && rt >= 0 && rt < 32 && rd >= 1 && !hilo_read_after(b, i + 2)) {
+        auto make_si_gpr = [](int r) {
+          RtlExpr reg = RtlExpr::MakeReg(RtlMachineMode::kSi, r);
+          if (r == 30) {
+            reg.str_val = "$fp";
+          }
+          return reg;
+        };
         RtlExpr fused = RtlExpr::MakeParallel({
-            RtlExpr::MakeSet(RtlExpr::MakeReg(RtlMachineMode::kSi, rd),
-                             RtlExpr::MakeBinary(RtlOp::kMult, RtlMachineMode::kSi,
-                                                 RtlExpr::MakeReg(RtlMachineMode::kSi, rs),
-                                                 RtlExpr::MakeReg(RtlMachineMode::kSi, rt))),
+            RtlExpr::MakeSet(make_si_gpr(rd),
+                             RtlExpr::MakeBinary(RtlOp::kMult, RtlMachineMode::kSi, make_si_gpr(rs),
+                                                 make_si_gpr(rt))),
             RtlExpr::MakeClobber(RtlExpr::MakeReg(RtlMachineMode::kSi, 64)),
             RtlExpr::MakeClobber(RtlExpr::MakeReg(RtlMachineMode::kSi, 65)),
             RtlExpr::MakeClobber(RtlExpr::MakeReg(RtlMachineMode::kSi, 66)),
         });
         std::vector<RtlRegNote> notes = p0->reg_notes;
         notes.insert(notes.end(), p1->reg_notes.begin(), p1->reg_notes.end());
-        upgraded.push_back(FormatPatternAndNotes(fused, notes, p0->bracketed_notes));
+        upgraded.push_back(FormatGccPrintRtlPatternAndNotes(fused, notes, p0->bracketed_notes,
+                                                            /*call_fusage=*/{}));
         changed = true;
         ++i;
         continue;
@@ -3078,6 +3102,607 @@ void NarrowDuplicateConstLoadsInBlocks(RtlControlFlowGraph* cfg) {
   }
 }
 
+// Reverses `final.c:cleanup_subreg_operands` on multi-use sub-word register
+// webs loaded by `movqi_internal2`/`movhi_internal2` (`(set (reg:QI/HI r)
+// (mem:QI/HI addr))`), zero-extended into another register via
+// `zero_extendqisi2`/`zero_extendhisi2` (`(set (reg:SI d) (zero_extend:SI
+// (reg:QI/HI r)))`, assembled as `andi $d, $r, 0xff|0xffff`), and consumed via
+// `(subreg:SI (reg:QI/HI r) 0)` in downstream ALU instructions.
+void NarrowMultiUseSubwordZeroExtendWebs(RtlControlFlowGraph* cfg) {
+  const size_t nb = cfg->rpo_blocks.size();
+  if (nb == 0) {
+    return;
+  }
+  std::vector<std::vector<size_t>> preds(nb);
+  std::vector<std::vector<RtlPatternAndNotes>> parsed(nb);
+  std::vector<std::vector<bool>> ok(nb);
+  for (size_t b = 0; b < nb; ++b) {
+    for (size_t s : cfg->rpo_blocks[b].successors) {
+      if (s < nb) {
+        preds[s].push_back(b);
+      }
+    }
+    const size_t n = cfg->rpo_blocks[b].instructions.size();
+    parsed[b].resize(n);
+    ok[b].assign(n, false);
+    for (size_t i = 0; i < n; ++i) {
+      auto p = ParsePatternAndNotes(cfg->rpo_blocks[b].instructions[i]);
+      if (p.ok()) {
+        parsed[b][i] = std::move(*p);
+        ok[b][i] = true;
+      }
+    }
+  }
+
+  auto is_caller_saved_gpr = [](int r) {
+    return (r >= 1 && r <= 15) || r == 24 || r == 25 || r == 31;
+  };
+  auto step_elem = [&](RtlExpr* elem, int r, RtlMachineMode mem_mode, int64_t full_mask,
+                       bool mutate, bool* reads_r, bool* kills_r, bool* invalid) {
+    auto check_bad_sub = [&](const RtlExpr& sub, bool in_mem) {
+      sub.Visit([&](const RtlExpr& n) {
+        if (n.op == RtlOp::kUnspecVolatile || n.op == RtlOp::kAsmInput) {
+          *invalid = true;
+        }
+        if (n.IsReg()) {
+          const int nr = n.RegNo();
+          if ((n.mode == RtlMachineMode::kDi || n.mode == RtlMachineMode::kDf) &&
+              (nr == r || nr + 1 == r)) {
+            *invalid = true;
+          } else if (nr == r) {
+            if (in_mem || n.flags.volatil || n.flags.integrated ||
+                (n.mode != RtlMachineMode::kSi && n.mode != mem_mode)) {
+              *invalid = true;
+            }
+          }
+        }
+      });
+    };
+    auto check_all_mems = [&](const RtlExpr& sub) {
+      sub.Visit([&](const RtlExpr& n) {
+        if (n.IsMem()) {
+          check_bad_sub(n, /*in_mem=*/true);
+        }
+      });
+    };
+    auto rewrite_reads = [&](const auto& self, RtlExpr* node) -> void {
+      if (node->IsMem()) {
+        return;
+      }
+      if (node->IsReg()) {
+        if (node->RegNo() == r) {
+          *reads_r = true;
+          if (mutate && node->mode == RtlMachineMode::kSi) {
+            RtlExpr narrow = *node;
+            narrow.mode = mem_mode;
+            *node = RtlExpr::MakeSubreg(RtlMachineMode::kSi, std::move(narrow), 0);
+          }
+        }
+        return;
+      }
+      if (node->IsSubreg() && !node->children.empty() && node->children[0].IsReg() &&
+          node->children[0].RegNo() == r) {
+        *reads_r = true;
+        if (node->children[0].mode != mem_mode) {
+          *invalid = true;
+        }
+        return;
+      }
+      for (RtlExpr& ch : node->children) {
+        self(self, &ch);
+      }
+    };
+
+    check_bad_sub(*elem, /*in_mem=*/false);
+    check_all_mems(*elem);
+    if (*invalid) {
+      return;
+    }
+    if (elem->op == RtlOp::kCall || (elem->IsSet() && elem->SetSrc().op == RtlOp::kCall)) {
+      elem->Visit([&](const RtlExpr& n) {
+        if (n.IsReg() && n.RegNo() == r) {
+          *invalid = true;
+        }
+      });
+      if (is_caller_saved_gpr(r)) {
+        *kills_r = true;
+      }
+      return;
+    }
+    if (elem->IsSet()) {
+      if (elem->SetDest().op == RtlOp::kPc && elem->SetSrc().IsReg() &&
+          elem->SetSrc().RegNo() == r) {
+        *invalid = true;
+        return;
+      }
+      RtlExpr& src = elem->MutableSetSrc();
+      if (src.op == RtlOp::kAnd && src.mode == RtlMachineMode::kSi && src.children.size() == 2 &&
+          src.children[0].IsReg() && src.children[0].RegNo() == r &&
+          src.children[0].mode == RtlMachineMode::kSi && src.children[1].IsConstInt() &&
+          src.children[1].int_val == full_mask) {
+        *reads_r = true;
+        if (mutate) {
+          RtlExpr narrow = src.children[0];
+          narrow.mode = mem_mode;
+          src = RtlExpr::MakeUnary(RtlOp::kZeroExtend, RtlMachineMode::kSi, std::move(narrow));
+        }
+      } else {
+        rewrite_reads(rewrite_reads, &src);
+      }
+      if (elem->SetDest().IsReg() && elem->SetDest().RegNo() == r) {
+        *kills_r = true;
+      }
+      return;
+    }
+    if (elem->op == RtlOp::kClobber) {
+      if (!elem->children.empty() && elem->children[0].IsReg() && elem->children[0].RegNo() == r) {
+        *kills_r = true;
+      }
+      return;
+    }
+    rewrite_reads(rewrite_reads, elem);
+  };
+
+  auto step_insn = [&](RtlExpr* pat, int r, RtlMachineMode mem_mode, int64_t full_mask, bool mutate,
+                       bool* reads_before_kill, bool* kills_all_paths, bool* invalid) {
+    *reads_before_kill = false;
+    *kills_all_paths = false;
+    *invalid = false;
+    auto run_one = [&](RtlExpr* e, bool* rd, bool* kl) {
+      *rd = false;
+      *kl = false;
+      if (e->IsParallel()) {
+        for (RtlExpr& ch : e->children) {
+          bool cr = false;
+          bool ck = false;
+          step_elem(&ch, r, mem_mode, full_mask, mutate, &cr, &ck, invalid);
+          if (cr && !*kl) *rd = true;
+          if (ck) *kl = true;
+        }
+      } else {
+        step_elem(e, r, mem_mode, full_mask, mutate, rd, kl, invalid);
+      }
+    };
+    if (pat->op == RtlOp::kSequence && pat->children.size() == 2 &&
+        !pat->children[0].children.empty() && !pat->children[1].children.empty()) {
+      const bool call_head = (pat->children[0].op == RtlOp::kCallInsn);
+      const bool annulled_untaken =
+          !call_head && pat->children[0].flags.unchanging && pat->children[1].flags.in_struct;
+      RtlExpr* first_e = call_head ? &pat->children[1].children[0] : &pat->children[0].children[0];
+      RtlExpr* second_e = call_head ? &pat->children[0].children[0] : &pat->children[1].children[0];
+      bool r1 = false, k1 = false;
+      run_one(first_e, &r1, &k1);
+      if (r1) *reads_before_kill = true;
+      if (k1) {
+        *kills_all_paths = true;
+        return;
+      }
+      bool r2 = false, k2 = false;
+      run_one(second_e, &r2, &k2);
+      if (r2) *reads_before_kill = true;
+      if (k2) {
+        if (annulled_untaken) {
+          *invalid = true;
+        } else {
+          *kills_all_paths = true;
+        }
+      }
+      return;
+    }
+    run_one(pat, reads_before_kill, kills_all_paths);
+  };
+
+  std::vector<bool> blk_dirty(nb, false);
+  for (size_t b0 = 0; b0 < nb; ++b0) {
+    const size_t n0 = parsed[b0].size();
+    for (size_t i0 = 0; i0 + 1 < n0; ++i0) {
+      if (!ok[b0][i0] || !parsed[b0][i0].pattern.IsSet()) {
+        continue;
+      }
+      const RtlExpr& dst_i = parsed[b0][i0].pattern.SetDest();
+      const RtlExpr& src_i = parsed[b0][i0].pattern.SetSrc();
+      if (!dst_i.IsReg() || dst_i.mode != RtlMachineMode::kSi || dst_i.flags.volatil ||
+          dst_i.flags.integrated || src_i.op != RtlOp::kZeroExtend ||
+          src_i.mode != RtlMachineMode::kSi || src_i.children.size() != 1 ||
+          !src_i.children[0].IsMem() || src_i.children[0].flags.volatil) {
+        continue;
+      }
+      const int r = dst_i.RegNo();
+      const RtlMachineMode mem_mode = src_i.children[0].mode;
+      if (r < 2 || r > 25 || (mem_mode != RtlMachineMode::kQi && mem_mode != RtlMachineMode::kHi)) {
+        continue;
+      }
+      const int64_t full_mask = (mem_mode == RtlMachineMode::kQi) ? 255 : 65535;
+
+      bool found_zext_copy = false;
+      for (size_t j = i0 + 1; j < n0; ++j) {
+        if (!ok[b0][j]) {
+          break;
+        }
+        const RtlExpr& pj = parsed[b0][j].pattern;
+        if (pj.IsSet() && pj.SetDest().IsReg() && !pj.SetDest().flags.volatil &&
+            pj.SetDest().mode == RtlMachineMode::kSi && pj.SetDest().RegNo() != r &&
+            pj.SetSrc().op == RtlOp::kAnd && pj.SetSrc().mode == RtlMachineMode::kSi &&
+            pj.SetSrc().children.size() == 2 && pj.SetSrc().children[0].IsReg() &&
+            pj.SetSrc().children[0].RegNo() == r &&
+            pj.SetSrc().children[0].mode == RtlMachineMode::kSi &&
+            pj.SetSrc().children[1].IsConstInt() && pj.SetSrc().children[1].int_val == full_mask) {
+          const int d = pj.SetDest().RegNo();
+          if ((d >= 2 && d <= 25) || (d == 30 && !cfg->sideband.frame_pointer_needed)) {
+            found_zext_copy = true;
+            break;
+          }
+        }
+        bool rd = false, kl = false, inv = false;
+        RtlExpr probe = pj;
+        step_insn(&probe, r, mem_mode, full_mask, /*mutate=*/false, &rd, &kl, &inv);
+        if (kl || inv) {
+          break;
+        }
+      }
+      if (!found_zext_copy) {
+        continue;
+      }
+
+      std::vector<bool> blk_gen(nb, false);
+      std::vector<bool> blk_kill(nb, false);
+      bool any_parse_fail = false;
+      for (size_t b = 0; b < nb; ++b) {
+        bool killed_so_far = false;
+        for (size_t i = 0; i < parsed[b].size(); ++i) {
+          if (!ok[b][i]) {
+            any_parse_fail = true;
+            break;
+          }
+          bool rd = false, kl = false, inv = false;
+          RtlExpr probe = parsed[b][i].pattern;
+          step_insn(&probe, r, mem_mode, full_mask, /*mutate=*/false, &rd, &kl, &inv);
+          if (!killed_so_far && rd) {
+            blk_gen[b] = true;
+          }
+          if (kl) {
+            killed_so_far = true;
+          }
+        }
+        blk_kill[b] = killed_so_far;
+      }
+      if (any_parse_fail) {
+        continue;
+      }
+
+      std::vector<bool> live_in(nb, false);
+      bool changed_df = true;
+      while (changed_df) {
+        changed_df = false;
+        for (size_t rev_b = nb; rev_b > 0; --rev_b) {
+          const size_t b = rev_b - 1;
+          bool live_out = false;
+          for (size_t s : cfg->rpo_blocks[b].successors) {
+            if (s < nb && live_in[s]) {
+              live_out = true;
+            }
+          }
+          const bool new_in = blk_gen[b] || (!blk_kill[b] && live_out);
+          if (new_in != live_in[b]) {
+            live_in[b] = new_in;
+            changed_df = true;
+          }
+        }
+      }
+
+      bool valid_web = true;
+      bool killed_in_b0_tail = false;
+      int other_subreg_reads = 0;
+      auto check_other_reads = [&](const RtlExpr& pat) {
+        pat.Visit([&](const RtlExpr& n) {
+          if (n.IsSubreg() && !n.children.empty() && n.children[0].IsReg() &&
+              n.children[0].RegNo() == r && n.children[0].mode == mem_mode) {
+            ++other_subreg_reads;
+          }
+        });
+      };
+      for (size_t j = i0 + 1; j < n0; ++j) {
+        bool rd = false, kl = false, inv = false;
+        RtlExpr probe = parsed[b0][j].pattern;
+        step_insn(&probe, r, mem_mode, full_mask, /*mutate=*/true, &rd, &kl, &inv);
+        if (inv) {
+          valid_web = false;
+          break;
+        }
+        check_other_reads(probe);
+        if (kl) {
+          killed_in_b0_tail = true;
+          break;
+        }
+      }
+      if (!valid_web) {
+        continue;
+      }
+
+      std::vector<bool> in_web(nb, false);
+      std::vector<bool> live_out_of_web_blk(nb, false);
+      std::vector<size_t> q;
+      if (!killed_in_b0_tail) {
+        live_out_of_web_blk[b0] = true;
+        for (size_t s : cfg->rpo_blocks[b0].successors) {
+          if (s < nb && live_in[s]) {
+            if (s == b0) {
+              valid_web = false;
+              break;
+            }
+            if (!in_web[s]) {
+              in_web[s] = true;
+              q.push_back(s);
+            }
+          }
+        }
+      }
+      for (size_t qi = 0; valid_web && qi < q.size(); ++qi) {
+        const size_t wb = q[qi];
+        bool killed_wb = false;
+        for (size_t j = 0; j < parsed[wb].size(); ++j) {
+          bool rd = false, kl = false, inv = false;
+          RtlExpr probe = parsed[wb][j].pattern;
+          step_insn(&probe, r, mem_mode, full_mask, /*mutate=*/true, &rd, &kl, &inv);
+          if (inv) {
+            valid_web = false;
+            break;
+          }
+          check_other_reads(probe);
+          if (kl) {
+            killed_wb = true;
+            break;
+          }
+        }
+        if (!valid_web) {
+          break;
+        }
+        if (!killed_wb) {
+          live_out_of_web_blk[wb] = true;
+          for (size_t s : cfg->rpo_blocks[wb].successors) {
+            if (s < nb && live_in[s]) {
+              if (s == b0) {
+                valid_web = false;
+                break;
+              }
+              if (!in_web[s]) {
+                in_web[s] = true;
+                q.push_back(s);
+              }
+            }
+          }
+        }
+      }
+      for (size_t wb : q) {
+        for (size_t p : preds[wb]) {
+          if (p != b0 && !in_web[p]) {
+            valid_web = false;
+          }
+          if (!live_out_of_web_blk[p]) {
+            valid_web = false;
+          }
+        }
+      }
+      if (!valid_web || other_subreg_reads == 0) {
+        continue;
+      }
+
+      RtlExpr mem_expr = parsed[b0][i0].pattern.SetSrc().children[0];
+      parsed[b0][i0].pattern.MutableSetDest().mode = mem_mode;
+      parsed[b0][i0].pattern.MutableSetSrc() = std::move(mem_expr);
+      cfg->rpo_blocks[b0].instructions[i0] = parsed[b0][i0].ToGccPrintRtlString();
+      blk_dirty[b0] = true;
+
+      for (size_t j = i0 + 1; j < n0; ++j) {
+        bool rd = false, kl = false, inv = false;
+        step_insn(&parsed[b0][j].pattern, r, mem_mode, full_mask, /*mutate=*/true, &rd, &kl, &inv);
+        if (rd) {
+          cfg->rpo_blocks[b0].instructions[j] = parsed[b0][j].ToGccPrintRtlString();
+          blk_dirty[b0] = true;
+        }
+        if (kl) {
+          break;
+        }
+      }
+      for (size_t wb : q) {
+        for (size_t j = 0; j < parsed[wb].size(); ++j) {
+          bool rd = false, kl = false, inv = false;
+          step_insn(&parsed[wb][j].pattern, r, mem_mode, full_mask, /*mutate=*/true, &rd, &kl,
+                    &inv);
+          if (rd) {
+            cfg->rpo_blocks[wb].instructions[j] = parsed[wb][j].ToGccPrintRtlString();
+            blk_dirty[wb] = true;
+          }
+          if (kl) {
+            break;
+          }
+        }
+      }
+    }
+  }
+  for (size_t b = 0; b < nb; ++b) {
+    if (blk_dirty[b]) {
+      cfg->rpo_blocks[b].SyncRtlInsnsFromInstructions();
+    }
+  }
+}
+
+// Reverses `final.c:cleanup_subreg_operands` (`alter_subreg`) on single-use
+// non-volatile sub-word loads `(set (reg:QI/HI r) (mem:QI/HI addr))` feeding
+// `(set (reg:SI d) (and:SI (subreg:SI (reg:QI/HI r) 0) (const_int C)))` with
+// `0 < C < (QI ? 255 : 65535)` produced by `combine.c` (`force_to_mode`).
+void NarrowSubwordMaskedLoadsInBlocks(RtlControlFlowGraph* cfg) {
+  auto touches_gpr = [](const RtlExpr& expr, int target_r, int* read_cnt, bool* pure_kill,
+                        bool* bad_ctrl_or_call) {
+    *read_cnt = 0;
+    *pure_kill = false;
+    *bad_ctrl_or_call = false;
+    if (expr.op == RtlOp::kSequence || IsReturnOrJumpPattern(expr)) {
+      *bad_ctrl_or_call = true;
+      return;
+    }
+    expr.Visit([&](const RtlExpr& n) {
+      if (n.op == RtlOp::kCall || n.op == RtlOp::kUnspecVolatile || n.op == RtlOp::kAsmInput) {
+        *bad_ctrl_or_call = true;
+      }
+    });
+    if (*bad_ctrl_or_call) {
+      return;
+    }
+    auto count_reads = [&](const RtlExpr& sub) {
+      sub.Visit([&](const RtlExpr& n) {
+        if (n.IsReg()) {
+          const int nr = n.RegNo();
+          if (nr == target_r || ((n.mode == RtlMachineMode::kDi || n.mode == RtlMachineMode::kDf) &&
+                                 nr + 1 == target_r)) {
+            ++(*read_cnt);
+          }
+        }
+      });
+    };
+    auto check_elem = [&](const RtlExpr& elem) {
+      if (elem.IsSet()) {
+        if (!elem.SetDest().IsReg()) {
+          count_reads(elem.SetDest());
+        }
+        count_reads(elem.SetSrc());
+        if (elem.SetDest().IsReg()) {
+          const int dr = elem.SetDest().RegNo();
+          if (dr == target_r || ((elem.SetDest().mode == RtlMachineMode::kDi ||
+                                  elem.SetDest().mode == RtlMachineMode::kDf) &&
+                                 dr + 1 == target_r)) {
+            *pure_kill = (*read_cnt == 0);
+          }
+        }
+      } else if (elem.op == RtlOp::kClobber && !elem.children.empty() && elem.children[0].IsReg()) {
+        const int dr = elem.children[0].RegNo();
+        if (dr == target_r) {
+          *pure_kill = (*read_cnt == 0);
+        }
+      } else {
+        count_reads(elem);
+      }
+    };
+    if (expr.IsParallel()) {
+      for (const RtlExpr& c : expr.children) {
+        check_elem(c);
+      }
+    } else {
+      check_elem(expr);
+    }
+  };
+
+  for (RtlBasicBlock& blk : cfg->rpo_blocks) {
+    const size_t n = blk.instructions.size();
+    if (n < 2) {
+      continue;
+    }
+    std::vector<RtlPatternAndNotes> parsed(n);
+    std::vector<bool> ok(n, false);
+    for (size_t i = 0; i < n; ++i) {
+      auto p = ParsePatternAndNotes(blk.instructions[i]);
+      if (p.ok()) {
+        parsed[i] = std::move(*p);
+        ok[i] = true;
+      }
+    }
+    bool changed = false;
+    for (size_t i = 0; i + 1 < n; ++i) {
+      if (!ok[i] || !parsed[i].pattern.IsSet()) {
+        continue;
+      }
+      const RtlExpr& dst_i = parsed[i].pattern.SetDest();
+      const RtlExpr& src_i = parsed[i].pattern.SetSrc();
+      if (!dst_i.IsReg() || dst_i.mode != RtlMachineMode::kSi || dst_i.flags.volatil ||
+          dst_i.flags.integrated || src_i.op != RtlOp::kZeroExtend ||
+          src_i.mode != RtlMachineMode::kSi || src_i.children.size() != 1 ||
+          !src_i.children[0].IsMem() || src_i.children[0].flags.volatil) {
+        continue;
+      }
+      const int r = dst_i.RegNo();
+      const RtlMachineMode mem_mode = src_i.children[0].mode;
+      if (r < 2 || r > 25 || (mem_mode != RtlMachineMode::kQi && mem_mode != RtlMachineMode::kHi)) {
+        continue;
+      }
+      const int64_t max_mask = (mem_mode == RtlMachineMode::kQi) ? 255 : 65535;
+
+      for (size_t j = i + 1; j < n; ++j) {
+        if (!ok[j]) {
+          break;
+        }
+        int read_cnt = 0;
+        bool pure_kill = false;
+        bool bad = false;
+        touches_gpr(parsed[j].pattern, r, &read_cnt, &pure_kill, &bad);
+        if (bad || pure_kill) {
+          break;
+        }
+        bool writes_r = false;
+        if (parsed[j].pattern.IsSet() && parsed[j].pattern.SetDest().IsReg()) {
+          const int dr = parsed[j].pattern.SetDest().RegNo();
+          if (dr == r || ((parsed[j].pattern.SetDest().mode == RtlMachineMode::kDi ||
+                           parsed[j].pattern.SetDest().mode == RtlMachineMode::kDf) &&
+                          dr + 1 == r)) {
+            writes_r = true;
+          }
+        }
+        if (read_cnt == 0 && !writes_r) {
+          continue;
+        }
+        if (!parsed[j].pattern.IsSet() || read_cnt != 1) {
+          break;
+        }
+        const RtlExpr& dst_j = parsed[j].pattern.SetDest();
+        const RtlExpr& src_j = parsed[j].pattern.SetSrc();
+        const int d = dst_j.IsReg() ? dst_j.RegNo() : -1;
+        const bool valid_d =
+            (d >= 2 && d <= 25) || (d == 30 && !cfg->sideband.frame_pointer_needed);
+        if (!dst_j.IsReg() || !valid_d || dst_j.mode != RtlMachineMode::kSi ||
+            dst_j.flags.volatil || src_j.op != RtlOp::kAnd || src_j.mode != RtlMachineMode::kSi ||
+            src_j.children.size() != 2 || !src_j.children[0].IsReg() ||
+            src_j.children[0].RegNo() != r || src_j.children[0].mode != RtlMachineMode::kSi ||
+            src_j.children[0].flags.volatil || src_j.children[0].flags.integrated ||
+            !src_j.children[1].IsConstInt() || src_j.children[1].int_val <= 0 ||
+            src_j.children[1].int_val >= max_mask) {
+          break;
+        }
+        bool proven_dead_after_j = (d == r);
+        for (size_t m = j + 1; !proven_dead_after_j && m < n; ++m) {
+          if (!ok[m]) {
+            break;
+          }
+          int m_reads = 0;
+          bool m_kill = false;
+          bool m_bad = false;
+          touches_gpr(parsed[m].pattern, r, &m_reads, &m_kill, &m_bad);
+          if (m_bad || m_reads > 0) {
+            break;
+          }
+          if (m_kill) {
+            proven_dead_after_j = true;
+          }
+        }
+        if (proven_dead_after_j) {
+          RtlExpr mem_expr = src_i.children[0];
+          parsed[i].pattern.MutableSetDest().mode = mem_mode;
+          parsed[i].pattern.MutableSetSrc() = std::move(mem_expr);
+          RtlExpr narrow_reg = src_j.children[0];
+          narrow_reg.mode = mem_mode;
+          parsed[j].pattern.MutableSetSrc().children[0] =
+              RtlExpr::MakeSubreg(RtlMachineMode::kSi, std::move(narrow_reg), 0);
+          blk.instructions[i] = parsed[i].ToGccPrintRtlString();
+          blk.instructions[j] = parsed[j].ToGccPrintRtlString();
+          changed = true;
+        }
+        break;
+      }
+    }
+    if (changed) {
+      blk.SyncRtlInsnsFromInstructions();
+    }
+  }
+}
+
 // In KMC GCC 2.7.2 `reorg.c:3348-3368` (`fill_slots_from_thread`), a self-loop
 // polling block `[<reg> = <load>(<mem>), <cond_branch_to_self>]` with no memory
 // stores, calls, or modifications to the address registers would always have
@@ -3163,9 +3788,1070 @@ void MarkSelfLoopSpinWaitLoadsVolatile(RtlControlFlowGraph* cfg) {
         node.flags.volatil = true;
       }
     });
-    blk.instructions.front() = FormatPatternAndNotes(first_parsed->pattern, first_parsed->reg_notes,
-                                                     first_parsed->bracketed_notes);
+    blk.instructions.front() = FormatGccPrintRtlPatternAndNotes(
+        first_parsed->pattern, first_parsed->reg_notes, first_parsed->bracketed_notes,
+        /*call_fusage=*/{});
     blk.SyncRtlInsnsFromInstructions();
+  }
+}
+
+struct Stage0PreReorgBlockInsn {
+  bool is_sequence = false;
+  RtlExpr seq_head_wrap;
+  RtlExpr seq_slot_wrap;
+  RtlPatternAndNotes top_pn;
+  RtlPatternAndNotes head_pn;
+  RtlPatternAndNotes slot_pn;
+  bool mutated = false;
+};
+
+struct Stage0PreReorgExecStep {
+  size_t insn_idx = 0;
+  RtlPatternAndNotes* pn = nullptr;
+  bool* mutated = nullptr;
+  absl::flat_hash_set<int> read_regs;
+  absl::flat_hash_set<int> write_regs;
+  bool reads_mem = false;
+  bool writes_mem = false;
+  bool has_side_effects = false;
+};
+
+int64_t Stage0ScalarMemModeByteSize(RtlMachineMode mode) {
+  switch (mode) {
+    case RtlMachineMode::kQi:
+      return 1;
+    case RtlMachineMode::kHi:
+      return 2;
+    case RtlMachineMode::kSi:
+    case RtlMachineMode::kSf:
+      return 4;
+    case RtlMachineMode::kDi:
+    case RtlMachineMode::kDf:
+      return 8;
+    default:
+      return 0;
+  }
+}
+
+void InsertStage0RegSpan(int regno, RtlMachineMode mode, bool gp64, bool fp64,
+                         absl::flat_hash_set<int>* out) {
+  if (regno <= 0) {
+    return;
+  }
+  const int nregs = std::max(1, MipsHardRegNregs(regno, mode, gp64, fp64));
+  for (int k = 0; k < nregs; ++k) {
+    out->insert(regno + k);
+  }
+}
+
+void AnalyzeStage0SourceExpr(const RtlExpr& expr, bool gp64, bool fp64,
+                             absl::flat_hash_set<int>* reads, bool* reads_mem,
+                             bool* has_side_effects) {
+  if (expr.op == RtlOp::kMem) {
+    *reads_mem = true;
+    if (expr.flags.volatil) {
+      *has_side_effects = true;
+    }
+  }
+  if (expr.op == RtlOp::kCall || expr.op == RtlOp::kUnspecVolatile || expr.op == RtlOp::kAsmInput ||
+      expr.op == RtlOp::kAsmOperands || expr.op == RtlOp::kReturn) {
+    *has_side_effects = true;
+  }
+  if (expr.op == RtlOp::kReg && !expr.IsArgPointerReg()) {
+    InsertStage0RegSpan(expr.RegNo(), expr.mode, gp64, fp64, reads);
+    return;
+  }
+  for (const RtlExpr& ch : expr.children) {
+    AnalyzeStage0SourceExpr(ch, gp64, fp64, reads, reads_mem, has_side_effects);
+  }
+}
+
+void AnalyzeStage0DestExpr(const RtlExpr& dst, bool gp64, bool fp64,
+                           absl::flat_hash_set<int>* reads, absl::flat_hash_set<int>* writes,
+                           bool* writes_mem, bool* has_side_effects) {
+  if (dst.op == RtlOp::kMem) {
+    *writes_mem = true;
+    if (dst.flags.volatil) {
+      *has_side_effects = true;
+    }
+    for (const RtlExpr& ch : dst.children) {
+      bool dummy_reads_mem = false;
+      AnalyzeStage0SourceExpr(ch, gp64, fp64, reads, &dummy_reads_mem, has_side_effects);
+    }
+    return;
+  }
+  const RtlExpr* inner = &dst;
+  while (inner->op == RtlOp::kSubreg && !inner->children.empty()) {
+    inner = &inner->children[0];
+  }
+  if (inner->op == RtlOp::kReg && !inner->IsArgPointerReg()) {
+    InsertStage0RegSpan(inner->RegNo(), dst.mode, gp64, fp64, writes);
+    return;
+  }
+  for (const RtlExpr& ch : dst.children) {
+    AnalyzeStage0DestExpr(ch, gp64, fp64, reads, writes, writes_mem, has_side_effects);
+  }
+}
+
+void AnalyzeStage0Stmt(const RtlExpr& stmt, bool gp64, bool fp64, Stage0PreReorgExecStep* step) {
+  if (stmt.op == RtlOp::kSet && stmt.children.size() == 2) {
+    if (stmt.children[0].op == RtlOp::kPc) {
+      step->has_side_effects = true;
+    } else {
+      AnalyzeStage0DestExpr(stmt.children[0], gp64, fp64, &step->read_regs, &step->write_regs,
+                            &step->writes_mem, &step->has_side_effects);
+    }
+    AnalyzeStage0SourceExpr(stmt.children[1], gp64, fp64, &step->read_regs, &step->reads_mem,
+                            &step->has_side_effects);
+    return;
+  }
+  if (stmt.op == RtlOp::kClobber && !stmt.children.empty()) {
+    AnalyzeStage0DestExpr(stmt.children[0], gp64, fp64, &step->read_regs, &step->write_regs,
+                          &step->writes_mem, &step->has_side_effects);
+    return;
+  }
+  if (stmt.op == RtlOp::kUse && !stmt.children.empty()) {
+    AnalyzeStage0SourceExpr(stmt.children[0], gp64, fp64, &step->read_regs, &step->reads_mem,
+                            &step->has_side_effects);
+    return;
+  }
+  if (stmt.op == RtlOp::kParallel) {
+    for (const RtlExpr& elem : stmt.children) {
+      AnalyzeStage0Stmt(elem, gp64, fp64, step);
+    }
+    return;
+  }
+  step->has_side_effects = true;
+  AnalyzeStage0SourceExpr(stmt, gp64, fp64, &step->read_regs, &step->reads_mem,
+                          &step->has_side_effects);
+}
+
+bool BuildStage0PreReorgSteps(const RtlBasicBlock& blk, bool gp64, bool fp64,
+                              std::vector<Stage0PreReorgBlockInsn>* parsed_insns,
+                              std::vector<Stage0PreReorgExecStep>* steps) {
+  parsed_insns->clear();
+  steps->clear();
+  parsed_insns->resize(blk.instructions.size());
+  for (size_t i = 0; i < blk.instructions.size(); ++i) {
+    auto parsed = ParsePatternAndNotes(blk.instructions[i]);
+    if (!parsed.ok()) {
+      return false;
+    }
+    Stage0PreReorgBlockInsn& item = (*parsed_insns)[i];
+    if (parsed->pattern.op == RtlOp::kSequence && parsed->pattern.children.size() == 2) {
+      auto head_pn = RtlPatternAndNotes::FromSequenceSubInsn(parsed->pattern.children[0]);
+      auto slot_pn = RtlPatternAndNotes::FromSequenceSubInsn(parsed->pattern.children[1]);
+      if (!head_pn.ok() || !slot_pn.ok()) {
+        return false;
+      }
+      item.is_sequence = true;
+      item.seq_head_wrap = parsed->pattern.children[0];
+      item.seq_slot_wrap = parsed->pattern.children[1];
+      item.head_pn = std::move(*head_pn);
+      item.slot_pn = std::move(*slot_pn);
+      if (!item.seq_slot_wrap.flags.in_struct) {
+        Stage0PreReorgExecStep slot_step{
+            .insn_idx = i, .pn = &item.slot_pn, .mutated = &item.mutated};
+        AnalyzeStage0Stmt(item.slot_pn.pattern, gp64, fp64, &slot_step);
+        steps->push_back(std::move(slot_step));
+      }
+      Stage0PreReorgExecStep head_step{
+          .insn_idx = i, .pn = &item.head_pn, .mutated = &item.mutated};
+      AnalyzeStage0Stmt(item.head_pn.pattern, gp64, fp64, &head_step);
+      steps->push_back(std::move(head_step));
+    } else {
+      item.top_pn = std::move(*parsed);
+      Stage0PreReorgExecStep top_step{.insn_idx = i, .pn = &item.top_pn, .mutated = &item.mutated};
+      AnalyzeStage0Stmt(item.top_pn.pattern, gp64, fp64, &top_step);
+      steps->push_back(std::move(top_step));
+    }
+  }
+  return true;
+}
+
+void FlushStage0MutatedBlockInsns(const std::vector<Stage0PreReorgBlockInsn>& parsed_insns,
+                                  RtlBasicBlock* blk) {
+  const bool had_synced_rtl = (blk->rtl_insns.size() == blk->instructions.size());
+  bool any_mutated = false;
+  for (size_t i = 0; i < parsed_insns.size(); ++i) {
+    const Stage0PreReorgBlockInsn& item = parsed_insns[i];
+    if (!item.mutated) {
+      continue;
+    }
+    any_mutated = true;
+    if (item.is_sequence) {
+      RtlPatternAndNotes seq_head_pn = item.head_pn;
+      if (item.seq_head_wrap.op == RtlOp::kCallInsn) {
+        seq_head_pn.reg_notes.clear();
+        seq_head_pn.has_explicit_call_fusage = false;
+        seq_head_pn.call_fusage.clear();
+      }
+      blk->instructions[i] =
+          RtlExpr::MakeSequence(
+              {
+                  RtlExpr::MakeInsnWrapper(item.seq_head_wrap.op, item.seq_head_wrap.flags,
+                                           seq_head_pn),
+                  RtlExpr::MakeInsnWrapper(item.seq_slot_wrap.op, item.seq_slot_wrap.flags,
+                                           item.slot_pn),
+              })
+              .ToGccPrintRtlString();
+    } else {
+      blk->instructions[i] = FormatGccPrintRtlPatternAndNotes(
+          item.top_pn.pattern, item.top_pn.reg_notes, item.top_pn.bracketed_notes,
+          /*call_fusage=*/{});
+    }
+    if (had_synced_rtl) {
+      blk->rtl_insns[i].canonical_pattern = blk->instructions[i];
+    }
+  }
+  if (any_mutated && !had_synced_rtl) {
+    blk->SyncRtlInsnsFromInstructions();
+  }
+}
+
+bool Stage0ExprHasCall(const RtlExpr& pat) {
+  if (pat.op == RtlOp::kCall) {
+    return true;
+  }
+  for (const RtlExpr& ch : pat.children) {
+    if (Stage0ExprHasCall(ch)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Stage0ExprIsJumpOrReturn(const RtlExpr& pat) {
+  if (pat.op == RtlOp::kReturn) {
+    return true;
+  }
+  if (pat.op == RtlOp::kSet && !pat.children.empty() && pat.children[0].op == RtlOp::kPc) {
+    return true;
+  }
+  if (pat.op == RtlOp::kParallel) {
+    for (const RtlExpr& elem : pat.children) {
+      if (Stage0ExprIsJumpOrReturn(elem)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool Stage0HasOnlyFlowLivenessNotes(const RtlPatternAndNotes& pn) {
+  for (const RtlRegNote& note : pn.reg_notes) {
+    if (note.kind != RtlMachineMode::kRegDead && note.kind != RtlMachineMode::kRegUnused) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool MatchStage0PrologueSpDecrement(const RtlExpr& pat, int* out_tsize) {
+  if (pat.op != RtlOp::kSet || pat.children.size() != 2) {
+    return false;
+  }
+  const RtlExpr& dst = pat.children[0];
+  const RtlExpr& src = pat.children[1];
+  if (dst.op != RtlOp::kReg || dst.RegNo() != 29 || src.children.size() != 2 ||
+      src.children[0].op != RtlOp::kReg || src.children[0].RegNo() != 29) {
+    return false;
+  }
+  if (src.op == RtlOp::kMinus && src.children[1].op == RtlOp::kConstInt &&
+      src.children[1].int_val > 0) {
+    *out_tsize = static_cast<int>(src.children[1].int_val);
+    return true;
+  }
+  if (src.op == RtlOp::kPlus && src.children[1].op == RtlOp::kConstInt &&
+      src.children[1].int_val < 0) {
+    *out_tsize = static_cast<int>(-src.children[1].int_val);
+    return true;
+  }
+  return false;
+}
+
+bool MatchStage0PrologueSaveStore(const RtlExpr& pat, int tsize, int* out_saved_regno) {
+  if (pat.op != RtlOp::kSet || pat.children.size() != 2) {
+    return false;
+  }
+  const RtlExpr& dst = pat.children[0];
+  const RtlExpr& src = pat.children[1];
+  if (dst.op != RtlOp::kMem || dst.children.size() != 1 || dst.flags.volatil ||
+      dst.flags.in_struct || src.op != RtlOp::kReg || src.flags.volatil || src.flags.in_struct) {
+    return false;
+  }
+  const int regno = src.RegNo();
+  const bool is_callee_saved_gpr = (regno >= 16 && regno <= 23) || regno == 30 || regno == 31;
+  const bool is_callee_saved_fpr = (regno >= 52 && regno <= 63);
+  if (!is_callee_saved_gpr && !is_callee_saved_fpr) {
+    return false;
+  }
+  const RtlExpr& addr = dst.children[0];
+  if (addr.op == RtlOp::kReg && addr.RegNo() == 29) {
+    *out_saved_regno = regno;
+    return tsize > 0;
+  }
+  if (addr.op == RtlOp::kPlus && addr.children.size() == 2 && addr.children[0].op == RtlOp::kReg &&
+      addr.children[0].RegNo() == 29 && addr.children[1].op == RtlOp::kConstInt) {
+    const int64_t off = addr.children[1].int_val;
+    if (off >= 0 && off < tsize) {
+      *out_saved_regno = regno;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool IsStage0CalleeSavedGpr(int r) {
+  return (r >= 16 && r <= 23) || r == 28 || r == 29 || r == 30 || r == 31;
+}
+
+// Recovers `RTX_UNCHANGING_P` (`mem/u`) in Stage 0 (`.12.dbr`) from post-`sched2`
+// prologue-store hoisting (`sched.c:true_dependence` + `rtlanal.c:rtx_varies_p`,
+// where `stack_pointer_rtx` has `rtx_addr_varies_p == 1` so a general varying
+// pointer `MEM` read can only be scheduled ahead of a `$sp`-based callee-saved
+// prologue store when `RTX_UNCHANGING_P(mem) == 1`).
+void MarkPrologueHoistedUnchangingPtrMems(RtlControlFlowGraph* cfg,
+                                          const CompilationProfile& profile) {
+  if (cfg == nullptr || cfg->rpo_blocks.empty() || cfg->rpo_blocks[0].instructions.empty()) {
+    return;
+  }
+  bool gp64 = false;
+  bool fp64 = false;
+  DetectMipsRegisterWidthFlags(*cfg, &profile, &gp64, &fp64);
+
+  RtlBasicBlock& entry = cfg->rpo_blocks[0];
+  std::vector<Stage0PreReorgBlockInsn> parsed_insns;
+  std::vector<Stage0PreReorgExecStep> steps;
+  if (!BuildStage0PreReorgSteps(entry, gp64, fp64, &parsed_insns, &steps)) {
+    return;
+  }
+
+  std::optional<size_t> sp_dec_step;
+  int tsize = 0;
+  for (size_t s = 0; s < steps.size(); ++s) {
+    int sp_dec = 0;
+    if (Stage0HasOnlyFlowLivenessNotes(*steps[s].pn) &&
+        MatchStage0PrologueSpDecrement(steps[s].pn->pattern, &sp_dec) && sp_dec > 0) {
+      sp_dec_step = s;
+      tsize = sp_dec;
+      break;
+    }
+    if (Stage0ExprHasCall(steps[s].pn->pattern) || Stage0ExprIsJumpOrReturn(steps[s].pn->pattern) ||
+        steps[s].write_regs.contains(29)) {
+      break;
+    }
+  }
+  if (!sp_dec_step.has_value()) {
+    return;
+  }
+
+  std::vector<bool> is_prologue(steps.size(), false);
+  is_prologue[*sp_dec_step] = true;
+  bool frame_pointer_needed = cfg->sideband.frame_pointer_needed;
+  absl::flat_hash_set<int> stripped_saves;
+  absl::flat_hash_set<int> body_writes;
+  std::optional<size_t> last_prologue_store_step;
+  for (size_t s = *sp_dec_step + 1; s < steps.size(); ++s) {
+    const RtlExpr& pat = steps[s].pn->pattern;
+    if (Stage0ExprHasCall(pat) || Stage0ExprIsJumpOrReturn(pat)) {
+      break;
+    }
+    if (Stage0HasOnlyFlowLivenessNotes(*steps[s].pn)) {
+      int saved_reg = -1;
+      if (MatchStage0PrologueSaveStore(pat, tsize, &saved_reg) &&
+          !stripped_saves.contains(saved_reg) && !body_writes.contains(saved_reg)) {
+        const RtlMachineMode src_mode = pat.children[1].mode;
+        const bool second_half_clobbered = MipsHardRegNregs(saved_reg, src_mode, gp64, fp64) == 2 &&
+                                           body_writes.contains(saved_reg + 1);
+        if (!second_half_clobbered) {
+          stripped_saves.insert(saved_reg);
+          is_prologue[s] = true;
+          last_prologue_store_step = s;
+          continue;
+        }
+      }
+      if (pat.op == RtlOp::kSet && pat.children.size() == 2 && pat.children[0].op == RtlOp::kReg &&
+          pat.children[0].RegNo() == 30 && !pat.children[0].flags.volatil &&
+          pat.children[1].op == RtlOp::kReg && pat.children[1].RegNo() == 29 &&
+          !body_writes.contains(30)) {
+        frame_pointer_needed = true;
+        is_prologue[s] = true;
+        continue;
+      }
+    }
+    if (steps[s].write_regs.contains(29)) {
+      break;
+    }
+    for (int r : steps[s].write_regs) {
+      body_writes.insert(r);
+    }
+  }
+  if (!last_prologue_store_step.has_value()) {
+    return;
+  }
+
+  auto extract_general_varying_ptr_base = [&](const RtlExpr& addr) -> int {
+    if (addr.op == RtlOp::kLoSum || addr.op == RtlOp::kSymbolRef || addr.op == RtlOp::kLabelRef ||
+        addr.op == RtlOp::kConst || addr.op == RtlOp::kConstInt) {
+      return -1;
+    }
+    const RtlExpr* base = &addr;
+    if (addr.op == RtlOp::kPlus && addr.children.size() == 2 &&
+        addr.children[1].op == RtlOp::kConstInt) {
+      base = &addr.children[0];
+    }
+    if (base->op != RtlOp::kReg || base->IsArgPointerReg()) {
+      return -1;
+    }
+    const int breg = base->RegNo();
+    if (breg == 29 || breg == 13 || (breg == 30 && frame_pointer_needed)) {
+      return -1;
+    }
+    return (breg >= 1 && breg < 32) ? breg : -1;
+  };
+
+  absl::flat_hash_set<int> unchanging_ptr_regs;
+  auto mark_read_mems = [&](auto& self, RtlExpr* expr, bool before_prologue_store) -> bool {
+    bool changed = false;
+    if (expr->op == RtlOp::kMem && !expr->children.empty()) {
+      const int breg = extract_general_varying_ptr_base(expr->children[0]);
+      if (!expr->flags.volatil && breg != -1) {
+        if (before_prologue_store || expr->flags.unchanging) {
+          unchanging_ptr_regs.insert(breg);
+          if (!expr->flags.unchanging) {
+            expr->flags.unchanging = true;
+            changed = true;
+          }
+        } else if (unchanging_ptr_regs.contains(breg)) {
+          expr->flags.unchanging = true;
+          changed = true;
+        }
+      }
+      if (self(self, &expr->children[0], before_prologue_store)) {
+        changed = true;
+      }
+      return changed;
+    }
+    for (RtlExpr& ch : expr->children) {
+      if (self(self, &ch, before_prologue_store)) {
+        changed = true;
+      }
+    }
+    return changed;
+  };
+  auto mark_stmt_reads = [&](auto& self, RtlExpr* stmt, bool before_prologue_store) -> bool {
+    if (stmt->op == RtlOp::kSet && stmt->children.size() == 2) {
+      bool changed = false;
+      if (stmt->children[0].op == RtlOp::kMem && !stmt->children[0].children.empty()) {
+        const int w_breg = extract_general_varying_ptr_base(stmt->children[0].children[0]);
+        if (w_breg != -1) {
+          unchanging_ptr_regs.erase(w_breg);
+        }
+        if (mark_read_mems(mark_read_mems, &stmt->children[0].children[0], before_prologue_store)) {
+          changed = true;
+        }
+      }
+      if (mark_read_mems(mark_read_mems, &stmt->children[1], before_prologue_store)) {
+        changed = true;
+      }
+      return changed;
+    }
+    if (stmt->op == RtlOp::kParallel) {
+      bool changed = false;
+      for (RtlExpr& elem : stmt->children) {
+        if (self(self, &elem, before_prologue_store)) {
+          changed = true;
+        }
+      }
+      return changed;
+    }
+    if (stmt->op == RtlOp::kClobber) {
+      return false;
+    }
+    return mark_read_mems(mark_read_mems, stmt, before_prologue_store);
+  };
+
+  for (size_t s = 0; s < steps.size(); ++s) {
+    if (is_prologue[s]) {
+      continue;
+    }
+    const bool before_prologue_store = (s < *last_prologue_store_step);
+    if (mark_stmt_reads(mark_stmt_reads, &steps[s].pn->pattern, before_prologue_store)) {
+      *steps[s].mutated = true;
+    }
+    const RtlExpr& pat = steps[s].pn->pattern;
+    int preserved_dst = -1;
+    if (pat.op == RtlOp::kSet && pat.children.size() == 2 && pat.children[0].op == RtlOp::kReg &&
+        !pat.children[0].IsArgPointerReg()) {
+      const int dst_reg = pat.children[0].RegNo();
+      const RtlExpr& rhs = pat.children[1];
+      int src_ptr_reg = -1;
+      if (rhs.op == RtlOp::kReg && !rhs.IsArgPointerReg()) {
+        src_ptr_reg = rhs.RegNo();
+      } else if (rhs.op == RtlOp::kPlus && rhs.children.size() == 2 &&
+                 rhs.children[0].op == RtlOp::kReg && !rhs.children[0].IsArgPointerReg() &&
+                 rhs.children[1].op == RtlOp::kConstInt) {
+        src_ptr_reg = rhs.children[0].RegNo();
+      }
+      if (dst_reg >= 1 && dst_reg < 32 && unchanging_ptr_regs.contains(src_ptr_reg)) {
+        unchanging_ptr_regs.insert(dst_reg);
+        preserved_dst = dst_reg;
+      }
+    }
+    for (int w : steps[s].write_regs) {
+      if (w != preserved_dst) {
+        unchanging_ptr_regs.erase(w);
+      }
+    }
+    if (Stage0ExprHasCall(pat)) {
+      for (int r = 1; r < 32; ++r) {
+        if (!IsStage0CalleeSavedGpr(r)) {
+          unchanging_ptr_regs.erase(r);
+        }
+      }
+    }
+  }
+
+  // When `sched2` hoisted a `mem/u` load `l_s` ahead of prologue saves after
+  // `pending_lists_length > 32` (`sched.c:1740`) flushed pending memory stores,
+  // `l_s` originally followed the intervening readers of `breg` in `.09.greg`
+  // and therefore retained `(REG_DEAD (reg breg))` (`sched.c` ignores
+  // reader-reader `REG_DEAD` placement).
+  if (ParseCompilationProfileFlags(profile).RunsSched2()) {
+    std::optional<size_t> first_call_step;
+    for (size_t s = 0; s < steps.size(); ++s) {
+      if (Stage0ExprHasCall(steps[s].pn->pattern)) {
+        first_call_step = s;
+        break;
+      }
+      if (Stage0ExprIsJumpOrReturn(steps[s].pn->pattern)) {
+        break;
+      }
+    }
+    if (first_call_step.has_value()) {
+      auto count_expr_mems = [](auto& self, const RtlExpr& e) -> int {
+        int cnt = (e.op == RtlOp::kMem) ? 1 : 0;
+        for (const RtlExpr& ch : e.children) {
+          cnt += self(self, ch);
+        }
+        return cnt;
+      };
+      auto is_sp_reg_store = [](const Stage0PreReorgExecStep& st) -> bool {
+        if (st.has_side_effects || st.reads_mem || !st.writes_mem) {
+          return false;
+        }
+        const RtlExpr& p = st.pn->pattern;
+        if (p.op != RtlOp::kSet || p.children.size() != 2 || p.children[0].op != RtlOp::kMem ||
+            p.children[0].flags.volatil || p.children[0].children.size() != 1 ||
+            p.children[1].op != RtlOp::kReg) {
+          return false;
+        }
+        const RtlExpr& addr = p.children[0].children[0];
+        if (addr.op == RtlOp::kReg) {
+          return addr.RegNo() == 29;
+        }
+        return addr.op == RtlOp::kPlus && addr.children.size() == 2 &&
+               addr.children[0].op == RtlOp::kReg && addr.children[0].RegNo() == 29 &&
+               addr.children[1].op == RtlOp::kConstInt;
+      };
+      int pending_lists_len = 0;
+      bool overflowed_pending_lists = false;
+      std::optional<size_t> max_body_sp_store_step;
+      for (size_t i = 0; i < *first_call_step; ++i) {
+        if (steps[i].writes_mem && pending_lists_len > 32) {
+          overflowed_pending_lists = true;
+        }
+        if (!is_prologue[i] && is_sp_reg_store(steps[i])) {
+          max_body_sp_store_step = i;
+        }
+        pending_lists_len += count_expr_mems(count_expr_mems, steps[i].pn->pattern);
+      }
+      if (overflowed_pending_lists && max_body_sp_store_step.has_value() &&
+          *last_prologue_store_step < *max_body_sp_store_step) {
+        struct HoistedPtrLoadCand {
+          size_t l_s = 0;
+          int breg = -1;
+          size_t consumer_s = 0;
+        };
+        std::vector<HoistedPtrLoadCand> cands;
+        for (size_t l_s = 0; l_s < *last_prologue_store_step; ++l_s) {
+          if (is_prologue[l_s] || steps[l_s].has_side_effects || steps[l_s].writes_mem ||
+              !steps[l_s].reads_mem) {
+            continue;
+          }
+          const RtlExpr& lpat = steps[l_s].pn->pattern;
+          if (lpat.op != RtlOp::kSet || lpat.children.size() != 2 ||
+              lpat.children[0].op != RtlOp::kReg) {
+            continue;
+          }
+          const int load_dst = lpat.children[0].RegNo();
+          if (load_dst < 1 || load_dst >= 32 || load_dst == 29 ||
+              (frame_pointer_needed && load_dst == 30)) {
+            continue;
+          }
+          const RtlExpr* load_rhs = &lpat.children[1];
+          if ((load_rhs->op == RtlOp::kSignExtend || load_rhs->op == RtlOp::kZeroExtend) &&
+              load_rhs->children.size() == 1) {
+            load_rhs = &load_rhs->children[0];
+          }
+          if (load_rhs->op != RtlOp::kMem || !load_rhs->flags.unchanging ||
+              load_rhs->flags.volatil || load_rhs->children.size() != 1) {
+            continue;
+          }
+          const int breg = extract_general_varying_ptr_base(load_rhs->children[0]);
+          if (breg == -1 || breg == load_dst) {
+            continue;
+          }
+          std::optional<size_t> consumer_s;
+          bool blocked = false;
+          for (size_t k = l_s + 1; k < *first_call_step; ++k) {
+            if (steps[k].read_regs.contains(load_dst)) {
+              consumer_s = k;
+              break;
+            }
+            if (steps[k].has_side_effects || steps[k].write_regs.contains(load_dst) ||
+                steps[k].write_regs.contains(breg) ||
+                (steps[k].writes_mem && !is_sp_reg_store(steps[k]))) {
+              blocked = true;
+              break;
+            }
+          }
+          if (blocked || !consumer_s.has_value()) {
+            continue;
+          }
+          bool breg_used_after_consumer = false;
+          for (size_t k = *consumer_s; k < *first_call_step; ++k) {
+            if (steps[k].read_regs.contains(breg) || steps[k].write_regs.contains(breg)) {
+              breg_used_after_consumer = true;
+              break;
+            }
+          }
+          if (breg_used_after_consumer) {
+            continue;
+          }
+          cands.push_back(HoistedPtrLoadCand{.l_s = l_s, .breg = breg, .consumer_s = *consumer_s});
+        }
+        for (size_t m = *last_prologue_store_step + 1; m < *first_call_step; ++m) {
+          auto& m_notes = steps[m].pn->reg_notes;
+          for (size_t ni = 0; ni < m_notes.size();) {
+            if (m_notes[ni].kind != RtlMachineMode::kRegDead ||
+                m_notes[ni].datum.op != RtlOp::kReg || m_notes[ni].datum.IsArgPointerReg()) {
+              ++ni;
+              continue;
+            }
+            const int breg = m_notes[ni].datum.RegNo();
+            if (!steps[m].read_regs.contains(breg)) {
+              ++ni;
+              continue;
+            }
+            std::optional<size_t> best_l_s;
+            size_t best_consumer_s = 0;
+            for (const HoistedPtrLoadCand& c : cands) {
+              if (c.breg != breg || c.l_s >= m || c.consumer_s <= m) {
+                continue;
+              }
+              if (!(c.consumer_s > *max_body_sp_store_step || m <= *max_body_sp_store_step)) {
+                continue;
+              }
+              if (!best_l_s.has_value() || c.consumer_s > best_consumer_s ||
+                  (c.consumer_s == best_consumer_s && c.l_s > *best_l_s)) {
+                best_l_s = c.l_s;
+                best_consumer_s = c.consumer_s;
+              }
+            }
+            if (!best_l_s.has_value()) {
+              ++ni;
+              continue;
+            }
+            RtlRegNote moved_note = m_notes[ni];
+            m_notes.erase(m_notes.begin() + static_cast<ptrdiff_t>(ni));
+            *steps[m].mutated = true;
+            bool l_has_dead = false;
+            for (const RtlRegNote& ln : steps[*best_l_s].pn->reg_notes) {
+              if (ln.kind == RtlMachineMode::kRegDead && ln.datum.op == RtlOp::kReg &&
+                  !ln.datum.IsArgPointerReg() && ln.datum.RegNo() == breg) {
+                l_has_dead = true;
+                break;
+              }
+            }
+            if (!l_has_dead) {
+              steps[*best_l_s].pn->reg_notes.push_back(std::move(moved_note));
+              *steps[*best_l_s].mutated = true;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  FlushStage0MutatedBlockInsns(parsed_insns, &entry);
+}
+
+bool IsStage0MipsLargeInt(int64_t val) {
+  const uint32_t u32 = static_cast<uint32_t>(val);
+  const uint32_t high = u32 & 0xffff0000u;
+  const uint32_t low = u32 & 0x0000ffffu;
+  return high != 0u && high != 0xffff0000u && low != 0u;
+}
+
+bool IsStage0SingleCycleIntAluExpr(const RtlExpr& expr) {
+  switch (expr.op) {
+    case RtlOp::kReg: {
+      const int r = expr.RegNo();
+      return r >= 0 && (r < 32 || r > 66);
+    }
+    case RtlOp::kSubreg:
+      return !expr.children.empty() && IsStage0SingleCycleIntAluExpr(expr.children[0]);
+    case RtlOp::kConstInt:
+      return !IsStage0MipsLargeInt(expr.int_val);
+    case RtlOp::kSymbolRef:
+    case RtlOp::kLabelRef:
+    case RtlOp::kConst:
+    case RtlOp::kHigh:
+      return true;
+    case RtlOp::kLoSum:
+    case RtlOp::kPlus:
+    case RtlOp::kMinus:
+    case RtlOp::kAnd:
+    case RtlOp::kIor:
+    case RtlOp::kXor:
+    case RtlOp::kNot:
+    case RtlOp::kNeg:
+    case RtlOp::kAshift:
+    case RtlOp::kAshiftrt:
+    case RtlOp::kLshiftrt:
+    case RtlOp::kSignExtend:
+    case RtlOp::kZeroExtend:
+    case RtlOp::kTruncate:
+    case RtlOp::kEq:
+    case RtlOp::kNe:
+    case RtlOp::kLt:
+    case RtlOp::kLe:
+    case RtlOp::kGt:
+    case RtlOp::kGe:
+    case RtlOp::kLtu:
+    case RtlOp::kLeu:
+    case RtlOp::kGtu:
+    case RtlOp::kGeu: {
+      if (expr.mode == RtlMachineMode::kSf || expr.mode == RtlMachineMode::kDf ||
+          expr.mode == RtlMachineMode::kDi) {
+        return false;
+      }
+      for (const RtlExpr& ch : expr.children) {
+        if (!IsStage0SingleCycleIntAluExpr(ch)) {
+          return false;
+        }
+      }
+      return true;
+    }
+    default:
+      return false;
+  }
+}
+
+bool IsStage0SingleCycleIntAluStep(const Stage0PreReorgExecStep& step, int* out_dest_regno) {
+  if (step.has_side_effects || step.reads_mem || step.writes_mem) {
+    return false;
+  }
+  const RtlExpr& pat = step.pn->pattern;
+  if (pat.op != RtlOp::kSet || pat.children.size() != 2) {
+    return false;
+  }
+  const RtlExpr& dst = pat.children[0];
+  if (dst.op != RtlOp::kReg || dst.mode == RtlMachineMode::kDi || dst.mode == RtlMachineMode::kSf ||
+      dst.mode == RtlMachineMode::kDf) {
+    return false;
+  }
+  const int dst_regno = dst.RegNo();
+  if (dst_regno < 0 || dst_regno == 29 || (dst_regno >= 32 && dst_regno <= 66) ||
+      !IsStage0SingleCycleIntAluExpr(pat.children[1])) {
+    return false;
+  }
+  *out_dest_regno = dst_regno;
+  return true;
+}
+
+bool IsStage0SimpleRegMemStoreStep(const Stage0PreReorgExecStep& step, int* out_src_regno) {
+  if (step.has_side_effects || step.reads_mem || !step.writes_mem) {
+    return false;
+  }
+  const RtlExpr& pat = step.pn->pattern;
+  if (pat.op != RtlOp::kSet || pat.children.size() != 2) {
+    return false;
+  }
+  const RtlExpr& dst = pat.children[0];
+  const RtlExpr& src = pat.children[1];
+  if (dst.op != RtlOp::kMem || dst.flags.volatil || dst.children.size() != 1 ||
+      src.op != RtlOp::kReg) {
+    return false;
+  }
+  *out_src_regno = src.RegNo();
+  return *out_src_regno >= 0;
+}
+
+bool IsStage0SchedulableLoadStep(const Stage0PreReorgExecStep& step, int* out_dest_regno,
+                                 const RtlExpr** out_mem) {
+  if (step.has_side_effects || step.writes_mem || !step.reads_mem) {
+    return false;
+  }
+  const RtlExpr& pat = step.pn->pattern;
+  if (pat.op != RtlOp::kSet || pat.children.size() != 2 || pat.children[0].op != RtlOp::kReg) {
+    return false;
+  }
+  const int dst_regno = pat.children[0].RegNo();
+  if (dst_regno < 0 || dst_regno == 29 || dst_regno == 30 || (dst_regno >= 64 && dst_regno <= 66)) {
+    return false;
+  }
+  const RtlExpr* src = &pat.children[1];
+  if ((src->op == RtlOp::kSignExtend || src->op == RtlOp::kZeroExtend) &&
+      src->children.size() == 1) {
+    src = &src->children[0];
+  }
+  if (src->op != RtlOp::kMem || src->flags.volatil || src->children.size() != 1) {
+    return false;
+  }
+  *out_dest_regno = dst_regno;
+  *out_mem = src;
+  return true;
+}
+
+bool ExtractStage0NonStackBaseDispMem(const RtlExpr& mem, int* out_base, int64_t* out_off,
+                                      int64_t* out_size) {
+  if (mem.op != RtlOp::kMem || mem.children.size() != 1) {
+    return false;
+  }
+  const int64_t sz = Stage0ScalarMemModeByteSize(mem.mode);
+  if (sz <= 0) {
+    return false;
+  }
+  const RtlExpr& addr = mem.children[0];
+  int base = -1;
+  int64_t off = 0;
+  if (addr.op == RtlOp::kReg) {
+    base = addr.RegNo();
+  } else if (addr.op == RtlOp::kPlus && addr.children.size() == 2 &&
+             addr.children[0].op == RtlOp::kReg && addr.children[1].op == RtlOp::kConstInt) {
+    base = addr.children[0].RegNo();
+    off = addr.children[1].int_val;
+  } else {
+    return false;
+  }
+  if (base < 1 || base >= 32 || base == 29 || base == 30) {
+    return false;
+  }
+  *out_base = base;
+  *out_off = off;
+  *out_size = sz;
+  return true;
+}
+
+bool Stage0MarkVolatileMemsOnBaseInExpr(RtlExpr* expr,
+                                        const absl::flat_hash_set<int>& volatile_bases) {
+  bool changed = false;
+  int base = -1;
+  int64_t off = 0;
+  int64_t sz = 0;
+  if (ExtractStage0NonStackBaseDispMem(*expr, &base, &off, &sz) && volatile_bases.contains(base) &&
+      !expr->flags.volatil) {
+    expr->flags.volatil = true;
+    changed = true;
+  }
+  for (RtlExpr& child : expr->children) {
+    if (Stage0MarkVolatileMemsOnBaseInExpr(&child, volatile_bases)) {
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+// Recovers `MEM_VOLATILE_P` (`mem/v`) in Stage 0 (`.12.dbr`) on memory-mapped
+// hardware struct pointer bases from post-`sched2` ordering invariants.
+void MarkMmioVolatileMemBaseRegs(RtlControlFlowGraph* cfg, const CompilationProfile& profile) {
+  if (cfg == nullptr || cfg->rpo_blocks.empty()) {
+    return;
+  }
+  bool gp64 = false;
+  bool fp64 = false;
+  DetectMipsRegisterWidthFlags(*cfg, &profile, &gp64, &fp64);
+
+  absl::flat_hash_set<int> written_gprs;
+  std::vector<std::vector<Stage0PreReorgBlockInsn>> all_parsed(cfg->rpo_blocks.size());
+  std::vector<std::vector<Stage0PreReorgExecStep>> all_steps(cfg->rpo_blocks.size());
+  std::optional<RtlPatternAndNotes> epilogue_delay_pn;
+  bool epilogue_delay_mutated = false;
+  std::optional<Stage0PreReorgExecStep> epilogue_delay_step;
+  if (cfg->sideband.epilogue_delay_pattern.has_value() &&
+      !cfg->sideband.epilogue_delay_pattern->empty()) {
+    auto ep_pn = ParsePatternAndNotes(*cfg->sideband.epilogue_delay_pattern);
+    if (ep_pn.ok()) {
+      epilogue_delay_pn = std::move(*ep_pn);
+      Stage0PreReorgExecStep ep_st{
+          .insn_idx = 0, .pn = &*epilogue_delay_pn, .mutated = &epilogue_delay_mutated};
+      AnalyzeStage0Stmt(epilogue_delay_pn->pattern, gp64, fp64, &ep_st);
+      for (int w : ep_st.write_regs) {
+        if (w >= 1 && w < 32) {
+          written_gprs.insert(w);
+        }
+      }
+      epilogue_delay_step = std::move(ep_st);
+    }
+  }
+  for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
+    if (!BuildStage0PreReorgSteps(cfg->rpo_blocks[b], gp64, fp64, &all_parsed[b], &all_steps[b])) {
+      return;
+    }
+    for (const Stage0PreReorgExecStep& st : all_steps[b]) {
+      for (int w : st.write_regs) {
+        if (w >= 1 && w < 32) {
+          written_gprs.insert(w);
+        }
+      }
+      if (Stage0ExprHasCall(st.pn->pattern)) {
+        for (int r = 1; r <= 15; ++r) {
+          written_gprs.insert(r);
+        }
+        written_gprs.insert(24);
+        written_gprs.insert(25);
+        written_gprs.insert(31);
+      }
+    }
+    for (const Stage0PreReorgBlockInsn& item : all_parsed[b]) {
+      if (item.is_sequence && item.seq_slot_wrap.flags.in_struct) {
+        Stage0PreReorgExecStep slot_step;
+        AnalyzeStage0Stmt(item.slot_pn.pattern, gp64, fp64, &slot_step);
+        for (int w : slot_step.write_regs) {
+          if (w >= 1 && w < 32) {
+            written_gprs.insert(w);
+          }
+        }
+      }
+    }
+  }
+
+  auto byte_ranges_disjoint = [](int64_t off1, int64_t sz1, int64_t off2, int64_t sz2) {
+    return (off1 + sz1 <= off2) || (off2 + sz2 <= off1);
+  };
+  auto sets_disjoint = [](const absl::flat_hash_set<int>& a, const absl::flat_hash_set<int>& b) {
+    for (int x : a) {
+      if (b.contains(x)) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  absl::flat_hash_set<int> volatile_bases;
+  for (size_t b = 0; b < all_steps.size(); ++b) {
+    absl::flat_hash_set<int> block_exit_used_regs;
+    std::vector<Stage0PreReorgExecStep> steps;
+    steps.reserve(all_steps[b].size() + 1);
+    bool has_return_step = false;
+    for (const Stage0PreReorgExecStep& st : all_steps[b]) {
+      const RtlOp op = st.pn->pattern.op;
+      if (op == RtlOp::kUse) {
+        for (int r : st.read_regs) {
+          block_exit_used_regs.insert(r);
+        }
+        continue;
+      }
+      if (op == RtlOp::kClobber || op == RtlOp::kNote) {
+        continue;
+      }
+      if (op == RtlOp::kReturn) {
+        has_return_step = true;
+      }
+      steps.push_back(st);
+    }
+    if (cfg->rpo_blocks[b].successors.empty() && !cfg->rpo_blocks[b].has_trailing_barrier &&
+        !has_return_step && epilogue_delay_step.has_value()) {
+      steps.push_back(*epilogue_delay_step);
+    }
+    const bool is_exit_block = cfg->rpo_blocks[b].successors.empty() || has_return_step;
+    for (size_t s = 1; s + 2 < steps.size(); ++s) {
+      int alu_dst = -1;
+      int store_s_val = -1;
+      int store_next_val = -1;
+      int load_dst = -1;
+      const RtlExpr* load_mem = nullptr;
+      if (!IsStage0SingleCycleIntAluStep(steps[s - 1], &alu_dst) ||
+          !IsStage0SimpleRegMemStoreStep(steps[s], &store_s_val) ||
+          steps[s].read_regs.contains(alu_dst) ||
+          !IsStage0SimpleRegMemStoreStep(steps[s + 1], &store_next_val) ||
+          store_next_val != alu_dst ||
+          !IsStage0SchedulableLoadStep(steps[s + 2], &load_dst, &load_mem) || load_dst != alu_dst) {
+        continue;
+      }
+      int base_s = -1, base_next = -1, base_load = -1;
+      int64_t off_s = 0, sz_s = 0, off_next = 0, sz_next = 0, off_load = 0, sz_load = 0;
+      if (!ExtractStage0NonStackBaseDispMem(steps[s].pn->pattern.children[0], &base_s, &off_s,
+                                            &sz_s) ||
+          !ExtractStage0NonStackBaseDispMem(steps[s + 1].pn->pattern.children[0], &base_next,
+                                            &off_next, &sz_next) ||
+          !ExtractStage0NonStackBaseDispMem(*load_mem, &base_load, &off_load, &sz_load)) {
+        continue;
+      }
+      if (base_s != base_next || base_s != base_load || written_gprs.contains(base_s)) {
+        continue;
+      }
+      if (!byte_ranges_disjoint(off_s, sz_s, off_next, sz_next) ||
+          !byte_ranges_disjoint(off_s, sz_s, off_load, sz_load) ||
+          !byte_ranges_disjoint(off_next, sz_next, off_load, sz_load)) {
+        continue;
+      }
+      bool later_writes_s_reads = false;
+      bool later_consumes_load = false;
+      bool load_dst_overwritten = false;
+      for (size_t k = s + 1; k < steps.size(); ++k) {
+        if (!sets_disjoint(steps[k].write_regs, steps[s].read_regs)) {
+          later_writes_s_reads = true;
+          break;
+        }
+        if (k > s + 2) {
+          if (steps[k].read_regs.contains(load_dst)) {
+            later_consumes_load = true;
+          }
+          if (steps[k].write_regs.contains(load_dst)) {
+            load_dst_overwritten = true;
+          }
+        }
+      }
+      if (!later_consumes_load && !load_dst_overwritten && is_exit_block &&
+          block_exit_used_regs.contains(load_dst)) {
+        later_consumes_load = true;
+      }
+      if (!later_writes_s_reads && later_consumes_load) {
+        volatile_bases.insert(base_s);
+      }
+    }
+  }
+
+  if (volatile_bases.empty()) {
+    return;
+  }
+
+  for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
+    for (Stage0PreReorgBlockInsn& item : all_parsed[b]) {
+      if (item.is_sequence) {
+        if (Stage0MarkVolatileMemsOnBaseInExpr(&item.head_pn.pattern, volatile_bases)) {
+          item.mutated = true;
+        }
+        if (Stage0MarkVolatileMemsOnBaseInExpr(&item.slot_pn.pattern, volatile_bases)) {
+          item.mutated = true;
+        }
+      } else if (Stage0MarkVolatileMemsOnBaseInExpr(&item.top_pn.pattern, volatile_bases)) {
+        item.mutated = true;
+      }
+    }
+    FlushStage0MutatedBlockInsns(all_parsed[b], &cfg->rpo_blocks[b]);
+  }
+  if (cfg->sideband.epilogue_delay_pattern.has_value() &&
+      !cfg->sideband.epilogue_delay_pattern->empty()) {
+    auto ep_pn = ParsePatternAndNotes(*cfg->sideband.epilogue_delay_pattern);
+    if (ep_pn.ok() && Stage0MarkVolatileMemsOnBaseInExpr(&ep_pn->pattern, volatile_bases)) {
+      cfg->sideband.epilogue_delay_pattern = FormatGccPrintRtlPatternAndNotes(
+          ep_pn->pattern, ep_pn->reg_notes, ep_pn->bracketed_notes, /*call_fusage=*/{});
+    }
   }
 }
 
@@ -3250,6 +4936,8 @@ void UpgradeCallReturnValues(RtlControlFlowGraph* cfg) {
   uint32_t fn_exit_ret_mask = 0u;
   bool fn_exit_r2_di = false;
   bool fn_exit_f0_df = false;
+  bool saw_scalar_r2_exit = false;
+  bool saw_scalar_f0_exit = false;
   if (cfg->sideband.epilogue_delay_pattern.has_value()) {
     auto ep = ParsePatternAndNotes(*cfg->sideband.epilogue_delay_pattern);
     if (ep.ok()) {
@@ -3259,6 +4947,8 @@ void UpgradeCallReturnValues(RtlControlFlowGraph* cfg) {
       fn_exit_ret_mask |= pm;
       if ((pm & 2u) != 0u) fn_exit_r2_di = true;
       if ((pm & 8u) != 0u) fn_exit_f0_df = true;
+      if ((pm & 1u) != 0u && (pm & 2u) == 0u && !r2_di) saw_scalar_r2_exit = true;
+      if ((pm & 4u) != 0u && (pm & 8u) == 0u && !f0_df) saw_scalar_f0_exit = true;
     }
   }
   auto is_empty_exit_block = [&](size_t sb) {
@@ -3326,6 +5016,16 @@ void UpgradeCallReturnValues(RtlControlFlowGraph* cfg) {
     fn_exit_ret_mask |= unread_set;
     if ((unread_set & 2u) != 0u) fn_exit_r2_di = true;
     if ((unread_set & 8u) != 0u) fn_exit_f0_df = true;
+    if ((unread_set & 1u) != 0u && (unread_set & 2u) == 0u) saw_scalar_r2_exit = true;
+    if ((unread_set & 4u) != 0u && (unread_set & 8u) == 0u) saw_scalar_f0_exit = true;
+  }
+  if (saw_scalar_r2_exit) {
+    fn_exit_ret_mask &= ~2u;
+    fn_exit_r2_di = false;
+  }
+  if (saw_scalar_f0_exit) {
+    fn_exit_ret_mask &= ~8u;
+    fn_exit_f0_df = false;
   }
 
   for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
@@ -3600,9 +5300,6 @@ bool FoldFinalScanMultiInsnTemplates(RtlControlFlowGraph* cfg, const Compilation
     return false;
   }
   const ParsedCompilerFlags flags = ParseCompilationProfileFlags(profile);
-  if (flags.opt_level <= 0) {
-    return false;
-  }
   bool gp64 = false;
   bool fp64 = false;
   DetectMipsRegisterWidthFlags(*cfg, &profile, &gp64, &fp64);
@@ -3610,10 +5307,16 @@ bool FoldFinalScanMultiInsnTemplates(RtlControlFlowGraph* cfg, const Compilation
   std::vector<std::vector<RtlPatternAndNotes>> parsed_blocks(cfg->rpo_blocks.size());
   for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
     parsed_blocks[b].reserve(cfg->rpo_blocks[b].instructions.size());
-    for (const std::string& pat_str : cfg->rpo_blocks[b].instructions) {
-      auto parsed = ParsePatternAndNotes(pat_str);
+    for (size_t i = 0; i < cfg->rpo_blocks[b].instructions.size(); ++i) {
+      auto parsed = ParsePatternAndNotes(cfg->rpo_blocks[b].instructions[i]);
       if (!parsed.ok()) {
         return false;
+      }
+      if (i < cfg->rpo_blocks[b].rtl_insns.size() &&
+          cfg->rpo_blocks[b].rtl_insns[i].has_explicit_call_fusage &&
+          !parsed->has_explicit_call_fusage) {
+        parsed->has_explicit_call_fusage = true;
+        parsed->call_fusage = cfg->rpo_blocks[b].rtl_insns[i].call_fusage;
       }
       parsed_blocks[b].push_back(std::move(*parsed));
     }
@@ -3635,7 +5338,9 @@ bool FoldFinalScanMultiInsnTemplates(RtlControlFlowGraph* cfg, const Compilation
   if (!gp64) {
     for (size_t b = 0; b < parsed_blocks.size(); ++b) {
       if (TryFoldGp32DiMultiInsnIdiomsInBlock(*cfg, b, /*mark_newly_folded_sentinel=*/false,
-                                              &parsed_blocks[b])) {
+                                              &parsed_blocks[b],
+                                              /*compute_live_in_when_sideband_empty=*/
+                                              flags.opt_level <= 0)) {
         folded_any = true;
       }
     }
@@ -3650,8 +5355,9 @@ bool FoldFinalScanMultiInsnTemplates(RtlControlFlowGraph* cfg, const Compilation
       .fp64 = fp64,
       .has_di_witness = has_di_witness,
       .skip_unfilled_dbr_jump_tail = flags.flag_delayed_branch,
-      .allow_delay_slot_split_movstrsi = true,
+      .allow_delay_slot_split_movstrsi = (flags.opt_level > 0),
       .mark_newly_folded_sentinel = false,
+      .compute_live_in_when_sideband_empty = (flags.opt_level <= 0),
   };
   for (size_t b = 0; b < parsed_blocks.size(); ++b) {
     std::optional<RtlPatternAndNotes>* ep_ptr =
@@ -3661,14 +5367,21 @@ bool FoldFinalScanMultiInsnTemplates(RtlControlFlowGraph* cfg, const Compilation
     }
   }
 
-  if (has_di_witness) {
+  if (!gp64) {
     const int frame_size = DetectStackFrameSize(*cfg);
-    const MipsWitnessedDiFoldOptions witnessed_opts{
-        .allow_noncontiguous_reg_move = false,
-        .mark_newly_folded_sentinel = false,
-    };
-    if (TryFoldGp32DiWitnessedIdioms(*cfg, frame_size, compare_di_pairs, existing_di_regs,
-                                     witnessed_opts, &parsed_blocks)) {
+    if (has_di_witness) {
+      const MipsWitnessedDiFoldOptions witnessed_opts{
+          .allow_noncontiguous_reg_move = false,
+          .mark_newly_folded_sentinel = false,
+      };
+      if (TryFoldGp32DiWitnessedIdioms(*cfg, frame_size, compare_di_pairs, existing_di_regs,
+                                       witnessed_opts, &parsed_blocks)) {
+        folded_any = true;
+      }
+    }
+    if (!fp64 &&
+        TryFoldGp32DfInGprPairMoves(*cfg, frame_size, compare_di_pairs, existing_di_regs,
+                                    /*mark_newly_folded_sentinel=*/false, &parsed_blocks)) {
       folded_any = true;
     }
   }
@@ -3681,12 +5394,23 @@ bool FoldFinalScanMultiInsnTemplates(RtlControlFlowGraph* cfg, const Compilation
     cfg->rpo_blocks[b].instructions.clear();
     cfg->rpo_blocks[b].instructions.reserve(parsed_blocks[b].size());
     for (const auto& pn : parsed_blocks[b]) {
-      cfg->rpo_blocks[b].instructions.push_back(pn.ToGccPrintRtlString());
+      cfg->rpo_blocks[b].instructions.push_back(FormatGccPrintRtlPatternAndNotes(
+          pn.pattern, pn.reg_notes, pn.bracketed_notes, /*call_fusage=*/{}));
     }
     cfg->rpo_blocks[b].SyncRtlInsnsFromInstructions();
+    for (size_t i = 0; i < cfg->rpo_blocks[b].rtl_insns.size() && i < parsed_blocks[b].size();
+         ++i) {
+      if (parsed_blocks[b][i].has_explicit_call_fusage &&
+          !cfg->rpo_blocks[b].rtl_insns[i].has_explicit_call_fusage) {
+        cfg->rpo_blocks[b].rtl_insns[i].has_explicit_call_fusage = true;
+        cfg->rpo_blocks[b].rtl_insns[i].call_fusage = parsed_blocks[b][i].call_fusage;
+      }
+    }
   }
   if (epilogue_delay_pn.has_value()) {
-    cfg->sideband.epilogue_delay_pattern = epilogue_delay_pn->ToGccPrintRtlString();
+    cfg->sideband.epilogue_delay_pattern =
+        FormatGccPrintRtlPatternAndNotes(epilogue_delay_pn->pattern, epilogue_delay_pn->reg_notes,
+                                         epilogue_delay_pn->bracketed_notes, /*call_fusage=*/{});
   }
   return true;
 }
@@ -4778,43 +6502,29 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
     if (profile->optimize_level > 0) {
       UpgradeDivModInsnsForOptimize(&cfg);
       NarrowDuplicateConstLoadsInBlocks(&cfg);
+      NarrowSubwordMaskedLoadsInBlocks(&cfg);
+      NarrowMultiUseSubwordZeroExtendWebs(&cfg);
       MarkSelfLoopSpinWaitLoadsVolatile(&cfg);
     }
     ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, *profile);
-    if (profile->optimize_level > 0 && FoldFinalScanMultiInsnTemplates(&cfg, *profile)) {
+    if (FoldFinalScanMultiInsnTemplates(&cfg, *profile)) {
       StripRegDeadAndUnusedNotesOnCfg(&cfg);
       ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, *profile);
-    } else if (profile->optimize_level == 0) {
+    }
+    if (profile->optimize_level > 0) {
+      MarkPrologueHoistedUnchangingPtrMems(&cfg, *profile);
+      MarkMmioVolatileMemBaseRegs(&cfg, *profile);
       bool gp64 = false;
       bool fp64 = false;
       DetectMipsRegisterWidthFlags(cfg, profile, &gp64, &fp64);
-      for (RtlBasicBlock& blk : cfg.rpo_blocks) {
-        if (blk.instructions.size() < 2) {
-          continue;
-        }
-        std::vector<RtlPatternAndNotes> parsed_blk;
-        parsed_blk.reserve(blk.instructions.size());
-        bool ok = true;
-        for (const std::string& s : blk.instructions) {
-          auto p = ParsePatternAndNotes(s);
-          if (!p.ok()) {
-            ok = false;
-            break;
-          }
-          parsed_blk.push_back(std::move(*p));
-        }
-        if (ok && TryCoalesceMultiBatchMovstrsiInBlock(&parsed_blk, gp64,
-                                                       /*mark_newly_folded_sentinel=*/false)) {
-          blk.instructions.clear();
-          blk.instructions.reserve(parsed_blk.size());
-          for (const auto& pn : parsed_blk) {
-            blk.instructions.push_back(pn.ToGccPrintRtlString());
-          }
-          blk.SyncRtlInsnsFromInstructions();
-        }
-      }
+      RestoreNoConflictExtendClobbers(&cfg, gp64, fp64,
+                                      ParseCompilationProfileFlags(*profile).RunsSched2());
     }
     UpgradeCallOutgoingArgBytes(&cfg, *profile);
+    ReconstructMissingCallFusage(&cfg, *profile);
+    if (profile->optimize_level == 0) {
+      ReconstructO0FinalScanDeletions(&cfg, *profile);
+    }
   }
   CanonicalizeCfgLabels(&cfg);
   return cfg;

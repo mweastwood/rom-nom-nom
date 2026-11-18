@@ -39,6 +39,21 @@ struct RtlLivenessOptions {
   // `reg_n_sets == 0`, zero RTL occurrences) along with their `reg_n_refs`,
   // `reg_n_deaths`, `reg_live_length`, and `max_regno` bound.
   bool preserve_phantom_pseudos = false;
+
+  // When `true` (at `profile.optimize_level > 0` with `reload_completed == false`,
+  // i.e. `.08.lreg` / `.07.greg` entering `global_alloc`), applies the post-`flow`
+  // `reg_live_length` updates performed by `sched.c:schedule_insns`
+  // (`sched_reg_live_length` when `ParsedCompilerFlags::RunsSched1()` is true)
+  // and `local-alloc.c:update_equiv_regs` (`reg_live_length[r] *= 2` on
+  // single-set `REG_EQUIV` definitions).
+  bool apply_post_sched_and_equiv_live_length = false;
+
+  // When `true` (with `update_reg_notes == true` at `profile.optimize_level > 0`),
+  // also commits `flow.c`-synthesized `REG_DEAD` and `REG_UNUSED` notes onto
+  // `CALL_INSN` instructions (e.g. for internal `global_alloc` / `local_alloc`
+  // conflict modeling). Leave `false` (default) for serialized RTL outputs, as
+  // `GccContext` omits `REG_NOTES` on `CALL_INSN` strings.
+  bool include_call_reg_notes = false;
 };
 
 // Reconstructs GCC 2.7.2 dataflow liveness and `RtlSidebandState` flow

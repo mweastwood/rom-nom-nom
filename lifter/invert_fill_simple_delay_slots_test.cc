@@ -538,5 +538,184 @@ TEST(InvertFillSimpleDelaySlotsUnitTest, CoalescesSplitAndMultiBatchMovstrsiBloc
   EXPECT_TRUE(res.matches) << res.diff_detail;
 }
 
+class CorruptedFillSimpleDelaySlotsProvider final : public SubfunctionInverseProvider {
+ public:
+  RtlControlFlowGraph InvertFillSimpleDelaySlots(
+      const RtlControlFlowGraph& dbr_simple_cfg_x) const override {
+    return Corrupt(dbr_simple_cfg_x);
+  }
+
+  RtlControlFlowGraph InvertFillSimpleDelaySlots(
+      const RtlControlFlowGraph& dbr_simple_cfg_x,
+      const CompilationProfile& /*profile*/) const override {
+    return Corrupt(dbr_simple_cfg_x);
+  }
+
+ private:
+  static RtlControlFlowGraph Corrupt(const RtlControlFlowGraph& cfg) {
+    RtlControlFlowGraph out = cfg;
+    out.pass = RtlPassKind::kJump2;
+    if (!out.rpo_blocks.empty()) {
+      out.rpo_blocks[0].instructions = {
+          "(set (reg:SI 2 v0) (const_int 777))",
+          "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+      };
+      out.rpo_blocks[0].successors.clear();
+      out.rpo_blocks.resize(1);
+      out.rpo_blocks[0].SyncRtlInsnsFromInstructions();
+    }
+    return out;
+  }
+};
+
+TEST(InvertFillSimpleDelaySlotsUnitTest,
+     DirectRightInverseVerifierAcceptsValidAndRejectsCorrupted) {
+  RtlControlFlowGraph pre_cfg;
+  pre_cfg.pass = RtlPassKind::kJump2;
+  pre_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 4 a0) (reg:SI 5 a1)))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+
+  const CompilationProfile profile{.optimize_level = 2,
+                                   .c_flags = {"-O2", "-mips2", "-mcpu=r4000"}};
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  EnsureMips2TargetConfigured(&hooks);
+  const SubfunctionBoundarySnapshot simple_snap = hooks.ExecuteSubfunctionBoundary(
+      SubfunctionId::kFillSimpleDelaySlots, pre_cfg, {}, profile.optimize_level, profile.c_flags);
+
+  ProductionFillSimpleDelaySlotsProvider good_provider;
+  RightInverseVerifier good_verifier(&ctx, &hooks, &good_provider);
+  const RightInverseResult good_direct =
+      good_verifier.VerifyFillSimpleDelaySlotsRightInverse(simple_snap.post_state);
+  EXPECT_TRUE(good_direct.matches) << good_direct.diff_detail;
+  const RightInverseResult good_snap =
+      good_verifier.VerifySubfunctionBoundaryRightInverse(simple_snap);
+  EXPECT_TRUE(good_snap.matches) << good_snap.diff_detail;
+
+  CorruptedFillSimpleDelaySlotsProvider bad_provider;
+  RightInverseVerifier bad_verifier(&ctx, &hooks, &bad_provider);
+  const RightInverseResult bad_direct =
+      bad_verifier.VerifyFillSimpleDelaySlotsRightInverse(simple_snap.post_state);
+  EXPECT_FALSE(bad_direct.matches);
+  EXPECT_FALSE(bad_direct.diff_detail.empty());
+  const RightInverseResult bad_snap =
+      bad_verifier.VerifySubfunctionBoundaryRightInverse(simple_snap);
+  EXPECT_FALSE(bad_snap.matches);
+  EXPECT_FALSE(bad_snap.diff_detail.empty());
+}
+
+TEST(InvertFillSimpleDelaySlotsUnitTest,
+     O1FoldedDelaySlotDiArithNormalizesEarlyclobberAndReturnRmwDeadNotes) {
+  // At `-O1 -mips2` (`!RunsSched2()`), when `InvertFillSimpleDelaySlots` unpacks
+  // the trailing instruction of a 4-insn `adddi3` out of a `return` `SEQUENCE`
+  // and `RecombineReorgSplitIdioms` folds `adddi3`, `NormalizePostReloadHardRegNotes`
+  // must:
+  //   1. Strip `REG_DEAD (reg:DI 10 t2)` from the Stage-0-folded `"=&d"`
+  //      earlyclobber output reload `(set (reg:DI 2 v0) (reg:DI 10 t2))`; and
+  //   2. Preserve `REG_DEAD (reg:DI 2 v0)` on the split return-value RMW
+  //      `(parallel [(set (reg/i:DI 2 v0) (plus:DI (reg:DI 2 v0) (reg:DI 6 a2))) ...])`.
+  RtlControlFlowGraph dbr_cfg;
+  dbr_cfg.pass = RtlPassKind::kDbr;
+  dbr_cfg.sideband.basic_block_live_at_start[0] = {4, 5, 6, 7, 29, 31};
+  dbr_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 16))))",
+                    "(set (reg:SI 2 v0) (and:SI (reg:SI 2 v0) (const_int 63)))",
+                    "(parallel[ (set (reg:DI 10 t2) (ashiftrt:DI (reg:DI 4 a0) (reg:SI 2 v0))) "
+                    "(clobber (reg:SI 8 t0)) ] ) (expr_list:REG_DEAD (reg:SI 2 v0) "
+                    "(expr_list:REG_UNUSED (reg:SI 8 t0) (nil)))",
+                    "(set (reg:DI 2 v0) (reg:DI 10 t2)) (expr_list:REG_DEAD (reg:DI 10 t2) (nil))",
+                    "(set (reg:SI 3 v1) (plus:SI (reg:SI 3 v1) (reg:SI 7 a3)))",
+                    "(set (reg:SI 4 a0) (ltu:SI (reg:SI 3 v1) (reg:SI 7 a3)))",
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 6 a2)))",
+                    "(use (reg/i:DI 2 v0))",
+                    "(sequence[ (jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] )) "
+                    "(insn (set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 4 a0))) "
+                    "(expr_list:REG_DEAD (const_int 0) (nil))) ] )",
+                },
+                {}),
+  };
+
+  const CompilationProfile o1_profile{.optimize_level = 1, .c_flags = {"-O1", "-mips2"}};
+  const RtlControlFlowGraph lifted = InvertFillSimpleDelaySlots(dbr_cfg, o1_profile);
+  ASSERT_EQ(lifted.rpo_blocks.size(), 1u);
+  ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 7u) << lifted.FormatSummary();
+  EXPECT_EQ(lifted.rpo_blocks[0].instructions[3], "(set (reg:DI 2 v0) (reg:DI 10 t2))");
+  EXPECT_EQ(lifted.rpo_blocks[0].instructions[4],
+            "(parallel[ (set (reg/i:DI 2 v0) (plus:DI (reg:DI 2 v0) (reg:DI 6 a2))) "
+            "(clobber (reg:SI 4 a0)) ] ) (expr_list:REG_DEAD (reg:DI 2 v0) "
+            "(expr_list:REG_DEAD (reg:DI 6 a2) "
+            "(expr_list:REG_UNUSED (reg:SI 4 a0) (nil))))");
+
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  EnsureMips2TargetConfigured(&hooks);
+  const SubfunctionBoundarySnapshot simple_snap =
+      hooks.ExecuteSubfunctionBoundary(SubfunctionId::kFillSimpleDelaySlots, lifted, {},
+                                       o1_profile.optimize_level, o1_profile.c_flags);
+  ProductionFillSimpleDelaySlotsProvider provider;
+  RightInverseVerifier verifier(&ctx, &hooks, &provider);
+  const RightInverseResult res = verifier.VerifySubfunctionBoundaryRightInverse(simple_snap);
+  EXPECT_TRUE(res.matches) << res.diff_detail;
+}
+
+TEST(InvertFillSimpleDelaySlotsUnitTest,
+     O1CallDelaySlotArgSetupHoistsBeforeMultiInsnHigherArgMove) {
+  // At `-O1` (`!RunsSched1() && !RunsSched2()`), `expand_call` emits outgoing argument setups in
+  // ascending ABI slot order (`$a0`, then 2-insn `DImode` `$a2/$a3`), and `fill_simple_delay_slots`
+  // skips the 2-insn `DImode` move (`insn_length > 4`) to pull the 1-insn `$a0` setup into `jal`'s
+  // delay slot. Verify `InvertFillSimpleDelaySlots` hoists `$a0` back ahead of `$a2:DI` and
+  // satisfies `VerifySubfunctionBoundaryRightInverse`.
+  RtlControlFlowGraph dbr_cfg;
+  dbr_cfg.pass = RtlPassKind::kDbr;
+  dbr_cfg.sideband.basic_block_live_at_start[0] = {16, 18, 19, 29, 31};
+  dbr_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:DI 6 a2) (reg:DI 18 s2))",
+                    "(sequence[ (call_insn (parallel[ (set (reg:SI 2 v0) "
+                    "(call (mem:SI (symbol_ref:SI \"callee\")) (const_int 16))) "
+                    "(clobber (reg:SI 31 ra)) ] )) "
+                    "(insn (set (reg:SI 4 a0) (reg:SI 16 s0))) ] )",
+                    "(set (reg/i:SI 2 v0) (reg:SI 2 v0))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  dbr_cfg.rpo_blocks[0].SyncRtlInsnsFromInstructions();
+  dbr_cfg.rpo_blocks[0].rtl_insns[1].has_explicit_call_fusage = true;
+  auto u0 = ParsePatternAndNotes("(use (reg:SI 4 a0))");
+  auto u1 = ParsePatternAndNotes("(use (reg:DI 6 a2))");
+  ASSERT_TRUE(u0.ok() && u1.ok());
+  dbr_cfg.rpo_blocks[0].rtl_insns[1].call_fusage = {u0->pattern, u1->pattern};
+
+  const CompilationProfile o1_profile{.optimize_level = 1, .c_flags = {"-O1", "-mips2"}};
+  const RtlControlFlowGraph lifted = InvertFillSimpleDelaySlots(dbr_cfg, o1_profile);
+  ASSERT_EQ(lifted.rpo_blocks.size(), 1u);
+  ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 6u) << lifted.FormatSummary();
+  EXPECT_EQ(lifted.rpo_blocks[0].instructions[0], "(set (reg:SI 4 a0) (reg:SI 16 s0))");
+  EXPECT_EQ(lifted.rpo_blocks[0].instructions[1], "(set (reg:DI 6 a2) (reg:DI 18 s2))");
+
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  EnsureMips2TargetConfigured(&hooks);
+  const SubfunctionBoundarySnapshot simple_snap =
+      hooks.ExecuteSubfunctionBoundary(SubfunctionId::kFillSimpleDelaySlots, lifted, {},
+                                       o1_profile.optimize_level, o1_profile.c_flags);
+  ProductionFillSimpleDelaySlotsProvider provider;
+  RightInverseVerifier verifier(&ctx, &hooks, &provider);
+  const RightInverseResult res = verifier.VerifySubfunctionBoundaryRightInverse(simple_snap);
+  EXPECT_TRUE(res.matches) << res.diff_detail;
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::lifter

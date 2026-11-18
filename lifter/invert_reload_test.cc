@@ -26,6 +26,8 @@
 #include "lifter/pass02_jump2_cross_jump.h"
 #include "lifter/pass03_sched2_post_reload.h"
 
+extern "C" void regclass_init();  // NOLINT(readability-identifier-naming)
+
 namespace rom_nom_nom::lifter {
 namespace {
 
@@ -531,13 +533,13 @@ TEST_F(InvertReloadTest, ZeroOracleCallerSaveUnifiesSplitPseudosAcrossCall) {
       InvertAlterReg(expected_greg.post_state, prof);
   ASSERT_TRUE(post_alter_lifted.ok()) << post_alter_lifted.status();
   ASSERT_TRUE(post_alter_lifted->sideband.reg_n_calls_crossed.empty());
-  ASSERT_EQ(post_alter_lifted->sideband.reg_renumber.size(), 2u);
+  ASSERT_EQ(post_alter_lifted->sideband.reg_renumber.size(), 1u);
 
   absl::StatusOr<RtlControlFlowGraph> lifted = InvertReload(*post_alter_lifted, prof);
   ASSERT_TRUE(lifted.ok()) << lifted.status();
 
-  // Save & restore stripped (`6 -> 4` insns), split pseudos unified, `frame_size_bytes` shrunk `8
-  // -> 0`, and `reg_n_calls_crossed` reconstructed to `1`!
+  // Save & restore stripped (`6 -> 4` insns), pre-`alter_reg` pseudo preserved, `frame_size_bytes`
+  // shrunk `4 -> 0`, and `reg_n_calls_crossed` reconstructed to `1`!
   ASSERT_EQ(lifted->rpo_blocks[0].instructions.size(), 4u);
   EXPECT_EQ(lifted->sideband.frame_size_bytes, 0);
   ASSERT_EQ(lifted->sideband.reg_renumber.size(), 1u);
@@ -551,6 +553,8 @@ TEST_F(InvertReloadTest, ZeroOracleCallerSaveUnifiesSplitPseudosAcrossCall) {
       << verifier.VerifySubfunctionBoundaryRightInverse(reload_snap).diff_detail;
   EXPECT_TRUE(verifier.VerifyReloadRightInverse(reload_snap.post_state).matches)
       << verifier.VerifyReloadRightInverse(reload_snap.post_state).diff_detail;
+  EXPECT_TRUE(verifier.VerifyReloadRightInverse(*post_alter_lifted).matches)
+      << verifier.VerifyReloadRightInverse(*post_alter_lifted).diff_detail;
 
   // Also verify `VerifyRtlPassRightInverse` across the composed `InvertAlterReg -> InvertReload`
   // pipeline on `expected_greg.post_state`!
@@ -818,10 +822,10 @@ TEST_F(InvertReloadTest, ReversesEarlyclobberClobberOutputReloadsOnParallel) {
   ASSERT_TRUE(lifted.ok()) << lifted.status();
   ASSERT_EQ(lifted->rpo_blocks[0].instructions.size(), 1u);
   EXPECT_EQ(lifted->rpo_blocks[0].instructions[0],
-            "(parallel [(set (mem:BLK (reg:SI 4 a0)) (mem:BLK (reg:SI 5 a1))) "
+            "(parallel[ (set (mem:BLK (reg:SI 4 a0)) (mem:BLK (reg:SI 5 a1))) "
             "(clobber (reg:SI 2 v0)) (clobber (reg:SI 3 v1)) "
             "(clobber (reg:SI 4 a0)) (clobber (reg:SI 5 a1)) "
-            "(use (const_int 8)) (use (const_int 1)) (use (const_int 0))]) "
+            "(use (const_int 8)) (use (const_int 1)) (use (const_int 0)) ] ) "
             "(expr_list:REG_DEAD (reg:SI 5 a1) (expr_list:REG_UNUSED (scratch:SI) "
             "(expr_list:REG_UNUSED (scratch:SI) (expr_list:REG_UNUSED (scratch:SI) "
             "(expr_list:REG_UNUSED (scratch:SI) (expr_list:REG_DEAD (reg:SI 4 a0) (nil)))))))");
@@ -1428,11 +1432,304 @@ TEST_F(InvertReloadTest,
   EXPECT_TRUE(stage_res.matches) << stage_res.diff_detail;
 }
 
+TEST_F(InvertReloadTest, UnifiesFlaggedUserVarCallerSaveWebAcrossCallAlongsideSpills) {
+  // When a user variable `(reg/v:SI ...)` is allocated to a caller-saved hard register (`$v1 = 3`)
+  // across a call, `caller-save.c:insert_save_restore` emits unflagged `(reg:SI 3 v1)` save/restore
+  // instructions at the top of the frame. Because of the `/v` vs non-`/v` signature boundary,
+  // `InvertAlterReg` keeps both the pre-call and post-call webs on physical hard register `3`.
+  // `InvertReload` must unify the pre-call and post-call webs into a cross-call pseudo and strip
+  // the 4-byte caller-save slot so all underlying 8-byte spill slots and their `REG_DEAD` `MEM`
+  // notes lift cleanly without leaving raw `MEM` nodes in `REG_NOTES`.
+  const std::vector<std::string> flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"};
+  ctx->BeginFunction("harness_init");
+  hooks->ApplyCompilationProfile({2, flags, {}});
+  regclass_init();
+  const FunctionCompilationTrace trace = hooks->TraceForwardCompilation(
+      "int DispatchMany(int a, int b, int c, int d, int e, int f, int g, int h);\n"
+      "int FlaggedCallerSavePlusSpills(const int* p, int seed) {\n"
+      "  int x0 = p[0] + seed, x1 = p[1] ^ seed, x2 = p[2] - seed, x3 = p[3] + 1;\n"
+      "  int x4 = p[4] + 2, x5 = p[5] + 3, x6 = p[6] + 4, x7 = p[7] + 5;\n"
+      "  int x8 = p[8] + 6, x9 = p[9] + 7, x10 = p[10] + 8, x11 = p[11] + 9;\n"
+      "  int x12 = p[12] + 10, x13 = p[13] + 11;\n"
+      "  int c1 = DispatchMany(x0 + x1, x2 + x3, x4 + x5, x6 + x7,\n"
+      "                        x8 ^ x9, x10 ^ x11, x12 - x13, x0 ^ x13);\n"
+      "  int y = c1 + x0;\n"
+      "  int c2 = DispatchMany(y, x1 + x2, x3 + x4, x5 + x6,\n"
+      "                        x7 + x8, x9 + x10, x11 + x12, x13);\n"
+      "  return c2 + x1 + x2 + x3 + x4 + x5 + x6 + x7 + x8 + x9 + x10 + x11 + x12 + x13;\n"
+      "}\n",
+      "FlaggedCallerSavePlusSpills", flags);
+  ASSERT_TRUE(trace.pass_snapshots.contains(RtlPassKind::kGreg));
+  const RtlControlFlowGraph& greg_cfg = trace.pass_snapshots.at(RtlPassKind::kGreg);
+
+  const RtlControlFlowGraph pre_alter = InvertAlterReg(greg_cfg, trace.stage0_input.profile, 72);
+  ASSERT_FALSE(pre_alter.rpo_blocks.empty());
+  const absl::StatusOr<RtlControlFlowGraph> pre_reload =
+      InvertReload(pre_alter, trace.stage0_input.profile);
+  ASSERT_TRUE(pre_reload.ok()) << pre_reload.status();
+  EXPECT_EQ(pre_reload->sideband.frame_size_bytes, 0);
+
+  // Verify zero `(expr_list:REG_DEAD (mem:...))` stack notes remain in `pre_reload`.
+  for (const RtlBasicBlock& blk : pre_reload->rpo_blocks) {
+    for (const std::string& s : blk.instructions) {
+      auto pn = ParsePatternAndNotes(s);
+      ASSERT_TRUE(pn.ok()) << pn.status();
+      for (const RtlRegNote& note : pn->reg_notes) {
+        if (note.kind == RtlMachineMode::kRegDead) {
+          EXPECT_FALSE(note.datum.IsMem()) << "Unlifted MEM REG_DEAD note left in: " << s;
+        }
+      }
+    }
+  }
+
+  const SubfunctionBoundarySnapshot* reload_snap = nullptr;
+  for (const SubfunctionBoundarySnapshot& snap : trace.subfunction_snapshots) {
+    if (snap.subfunction_id == SubfunctionId::kReload) {
+      reload_snap = &snap;
+      break;
+    }
+  }
+  ASSERT_NE(reload_snap, nullptr);
+
+  ReloadOnlyInverseProvider provider;
+  RightInverseVerifier verifier(ctx, hooks, &provider);
+  const RightInverseResult sub_res = verifier.VerifySubfunctionBoundaryRightInverse(*reload_snap);
+  EXPECT_TRUE(sub_res.matches) << sub_res.diff_detail;
+  hooks->ApplyCompilationProfile(trace.stage0_input.profile);
+  const RightInverseResult vres = verifier.VerifyReloadRightInverse(reload_snap->post_state);
+  EXPECT_TRUE(vres.matches) << vres.diff_detail;
+
+  // Also verify that forward `kReload -> kAlterReg` replay from `*pre_reload`
+  // reproduces `greg_cfg` exactly.
+  const CompilationProfile& prof = trace.stage0_input.profile;
+  ctx->BeginFunction("replay_flagged_caller_save");
+  hooks->ApplyCompilationProfile(prof);
+  regclass_init();
+  RtlControlFlowGraph replayed =
+      hooks
+          ->ExecuteSubfunctionBoundary(SubfunctionId::kReload, *pre_reload, {}, prof.optimize_level,
+                                       prof.c_flags, prof.gp_symbol_sizes)
+          .post_state;
+  replayed =
+      hooks
+          ->ExecuteSubfunctionBoundary(SubfunctionId::kAlterReg, replayed, {}, prof.optimize_level,
+                                       prof.c_flags, prof.gp_symbol_sizes)
+          .post_state;
+  const RtlCfgPassComparison cmp = replayed.CompareAgainst(greg_cfg);
+  EXPECT_TRUE(cmp.MatchesExactly()) << cmp.mismatch_detail;
+}
+
+TEST_F(InvertReloadTest, PreservesPhysicalHiLoClobberAtO0WhenHiLoLiveAcrossNonClobberInsns) {
+  // At `-O0`, when `hi` (`64`) / `lo` (`65`) is explicitly live across non-clobber instructions in
+  // the block (e.g. `-O0` `divmodsi4` quotient + remainder extraction), `(clobber (reg:SI 66
+  // accum))` / physical `hi`/`lo` operands must NOT be rewritten into `(clobber (scratch:SI))`
+  // where `stupid_life_analysis` marks `hi`/`lo` live.
+  const std::vector<std::string> o0_flags = {"-O0", "-mips2", "-mcpu=r4000", "-Wa,-g"};
+  ctx->BeginFunction("harness_init");
+  hooks->ApplyCompilationProfile({0, o0_flags, {}});
+  regclass_init();
+  const FunctionCompilationTrace trace = hooks->TraceForwardCompilation(
+      "int DivAndModO0(int a, int b) {\n"
+      "  int q = a / b;\n"
+      "  int r = a % b;\n"
+      "  return q + r;\n"
+      "}\n",
+      "DivAndModO0", o0_flags);
+
+  ReloadOnlyInverseProvider provider;
+  RightInverseVerifier verifier(ctx, hooks, &provider);
+  bool found_reload = false;
+  for (const SubfunctionBoundarySnapshot& snap : trace.subfunction_snapshots) {
+    if (snap.subfunction_id == SubfunctionId::kReload) {
+      found_reload = true;
+      const RightInverseResult sub_res = verifier.VerifySubfunctionBoundaryRightInverse(snap);
+      EXPECT_TRUE(sub_res.matches) << sub_res.diff_detail;
+      hooks->ApplyCompilationProfile({0, o0_flags, {}});
+      const RightInverseResult stage_res = verifier.VerifyReloadRightInverse(snap.post_state);
+      EXPECT_TRUE(stage_res.matches) << stage_res.diff_detail;
+    }
+  }
+  EXPECT_TRUE(found_reload);
+}
+
+TEST_F(InvertReloadTest,
+       MdConsumerRegDeadOrderAndMultiStepBitfieldRmwChainSatisfyFreshReloadRightInverse) {
+  ReloadOnlyInverseProvider provider;
+  RightInverseVerifier verifier(ctx, hooks, &provider);
+
+  auto verify_trace_reload_and_fresh_greg_replay =
+      [&](const FunctionCompilationTrace& trace) -> RtlControlFlowGraph {
+    bool found_reload = false;
+    for (const SubfunctionBoundarySnapshot& snap : trace.subfunction_snapshots) {
+      if (snap.subfunction_id == SubfunctionId::kReload) {
+        found_reload = true;
+        const RightInverseResult sub_res = verifier.VerifySubfunctionBoundaryRightInverse(snap);
+        EXPECT_TRUE(sub_res.matches) << sub_res.diff_detail;
+        hooks->ApplyCompilationProfile(trace.stage0_input.profile);
+        const RightInverseResult vres = verifier.VerifyReloadRightInverse(snap.post_state);
+        EXPECT_TRUE(vres.matches) << vres.diff_detail;
+      }
+    }
+    EXPECT_TRUE(found_reload);
+
+    const CompilationProfile prof = EffectiveStage0Profile(trace.stage0_input);
+    const RtlControlFlowGraph y0 = InvertFinalAndGasFunction(trace.stage0_input);
+    const RtlControlFlowGraph y1 = InvertPass01DbrSchedule(y0, prof);
+    const RtlControlFlowGraph y2 = InvertPass02Jump2CrossJump(y1, prof);
+    const RtlControlFlowGraph fresh_greg = InvertPass03Sched2PostReload(y2, prof);
+    const RtlControlFlowGraph pre_alter = InvertAlterReg(fresh_greg, prof, 72);
+    hooks->ApplyCompilationProfile(prof);
+    const RightInverseResult fresh_reload_res = verifier.VerifyReloadRightInverse(pre_alter);
+    EXPECT_TRUE(fresh_reload_res.matches) << fresh_reload_res.diff_detail;
+    const absl::StatusOr<RtlControlFlowGraph> pre_reload = InvertReload(pre_alter, prof);
+    EXPECT_TRUE(pre_reload.ok()) << pre_reload.status();
+    if (!pre_reload.ok()) {
+      return RtlControlFlowGraph{};
+    }
+
+    ctx->BeginFunction("replay_fresh_greg");
+    hooks->ApplyCompilationProfile(prof);
+    regclass_init();
+    ctx->MaterializeFromCfg(*pre_reload);
+    {
+      std::string bad_insn;
+      EXPECT_TRUE(hooks->ValidateMaterializedInsnsRecognizable(&bad_insn)) << bad_insn;
+    }
+    RtlControlFlowGraph replayed =
+        hooks
+            ->ExecuteSubfunctionBoundary(SubfunctionId::kReload, *pre_reload, {},
+                                         prof.optimize_level, prof.c_flags, prof.gp_symbol_sizes)
+            .post_state;
+    replayed =
+        hooks
+            ->ExecuteSubfunctionBoundary(SubfunctionId::kAlterReg, replayed, {},
+                                         prof.optimize_level, prof.c_flags, prof.gp_symbol_sizes)
+            .post_state;
+    EXPECT_EQ(replayed.sideband.frame_pointer_needed, fresh_greg.sideband.frame_pointer_needed);
+    EXPECT_EQ(replayed.sideband.outgoing_args_size, fresh_greg.sideband.outgoing_args_size);
+
+    constexpr SubfunctionId kPostAlterSubs[] = {
+        SubfunctionId::kScheduleBlockSched2,  SubfunctionId::kDoCrossJump,
+        SubfunctionId::kFillSimpleDelaySlots, SubfunctionId::kFillEagerDelaySlots,
+        SubfunctionId::kRelaxDelaySlots,      SubfunctionId::kMakeReturnInsns,
+    };
+    for (SubfunctionId sub : kPostAlterSubs) {
+      replayed = hooks
+                     ->ExecuteSubfunctionBoundary(sub, replayed, {}, prof.optimize_level,
+                                                  prof.c_flags, prof.gp_symbol_sizes)
+                     .post_state;
+    }
+    hooks->ApplyCompilationProfile(prof);
+    ctx->MaterializeFromCfg(replayed);
+    const std::string combined_asm = hooks->RunFinal();
+    const Stage0FunctionInput actual_stage0 = hooks->RunGasMdAssembleWithMetadata(combined_asm);
+    const std::string stage0_diff =
+        CompareStage0ReplayResult(trace.stage0_input, actual_stage0, combined_asm);
+    EXPECT_TRUE(stage0_diff.empty()) << stage0_diff;
+    return *pre_reload;
+  };
+
+  // 1. MD (`65 lo`) input-reload / promotion must rewrite `REG_DEAD (reg:SI 65 lo)` in-place on
+  //    the consumer instruction so its `REG_NOTES` list order before `REG_EQUAL` / sibling
+  //    `REG_DEAD` notes matches `flow` + `reload`.
+  {
+    const std::vector<std::string> flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"};
+    ctx->BeginFunction("harness_init");
+    hooks->ApplyCompilationProfile({2, flags, {}});
+    regclass_init();
+    const FunctionCompilationTrace trace = hooks->TraceForwardCompilation(
+        "int MulAccumConsumerNoteOrder(int a, int b, int c) {\n"
+        "  int p = a * b;\n"
+        "  return (p + c) ^ c;\n"
+        "}\n",
+        "MulAccumConsumerNoteOrder", flags);
+    verify_trace_reload_and_fresh_greg_replay(trace);
+  }
+
+  // 2. Multi-step bitfield RMW chain (`load -> and -> ior`) where `load` and `and` are single-block
+  //    and `ior` spans a diamond branch must coalesce the entire 3-step RMW web cleanly.
+  {
+    const std::vector<std::string> flags = {"-O2", "-mips1", "-funsigned-char", "-Wa,-O2"};
+    ctx->BeginFunction("harness_init");
+    hooks->ApplyCompilationProfile({2, flags, {}});
+    regclass_init();
+    const FunctionCompilationTrace trace = hooks->TraceForwardCompilation(
+        "struct Packet { unsigned int kind : 3; unsigned int len : 13; unsigned int tag : 16; };\n"
+        "void EncodePacket(struct Packet* pkt, unsigned int kind, unsigned int len, int clamp) {\n"
+        "  if (clamp && len > 1024u) len = 1024u;\n"
+        "  pkt->kind = kind;\n"
+        "  pkt->len = len;\n"
+        "}\n",
+        "EncodePacket", flags);
+    const RtlControlFlowGraph encode_pre_reload = verify_trace_reload_and_fresh_greg_replay(trace);
+    absl::flat_hash_map<int, int> pseudo_rmw_ops_mask;
+    for (const RtlBasicBlock& blk : encode_pre_reload.rpo_blocks) {
+      for (const std::string& insn_s : blk.instructions) {
+        absl::StatusOr<RtlPatternAndNotes> pn = ParsePatternAndNotes(insn_s);
+        if (!pn.ok() || pn->pattern.op != RtlOp::kSet || pn->pattern.children.size() < 2) {
+          continue;
+        }
+        const RtlExpr& dst = pn->pattern.children[0];
+        const RtlExpr& src = pn->pattern.children[1];
+        if (dst.op != RtlOp::kReg || dst.RegNo() < 68) {
+          continue;
+        }
+        const int regno = static_cast<int>(dst.RegNo());
+        if (src.IsMem()) {
+          pseudo_rmw_ops_mask[regno] |= 1;
+        } else if (src.op == RtlOp::kAnd) {
+          pseudo_rmw_ops_mask[regno] |= 2;
+        } else if (src.op == RtlOp::kIor) {
+          pseudo_rmw_ops_mask[regno] |= 4;
+        }
+      }
+    }
+    bool found_coalesced_rmw_web = false;
+    for (const auto& [regno, mask] : pseudo_rmw_ops_mask) {
+      if (mask == 7) {
+        found_coalesced_rmw_web = true;
+      }
+    }
+    EXPECT_TRUE(found_coalesced_rmw_web) << encode_pre_reload.FormatSummary();
+  }
+
+  // 3. `-O0 -mips1` GP32 64-bit zero store (`*dst = 0LL`) folds `reload`'s two-word zero
+  //    materialization scratch back into `(set (mem:DI ...) (const_int 0))` cleanly.
+  {
+    const std::vector<std::string> flags = {"-O0", "-mips1", "-Wa,-g"};
+    ctx->BeginFunction("harness_init");
+    hooks->ApplyCompilationProfile({0, flags, {}});
+    regclass_init();
+    const FunctionCompilationTrace trace = hooks->TraceForwardCompilation(
+        "long long StoreZeroAndAddPair(long long* dst, long long a, long long b) {\n"
+        "  *dst = 0LL;\n"
+        "  return a + b;\n"
+        "}\n",
+        "StoreZeroAndAddPair", flags);
+    const RtlControlFlowGraph zero_pre_reload = verify_trace_reload_and_fresh_greg_replay(trace);
+    bool saw_direct_di_zero_store = false;
+    for (const RtlBasicBlock& blk : zero_pre_reload.rpo_blocks) {
+      for (const std::string& insn_s : blk.instructions) {
+        absl::StatusOr<RtlPatternAndNotes> pn = ParsePatternAndNotes(insn_s);
+        if (pn.ok() && pn->pattern.IsSet() && pn->pattern.SetDest().IsMem() &&
+            pn->pattern.SetDest().mode == RtlMachineMode::kDi &&
+            pn->pattern.SetSrc().IsConstInt() && pn->pattern.SetSrc().int_val == 0) {
+          saw_direct_di_zero_store = true;
+        }
+      }
+    }
+    EXPECT_TRUE(saw_direct_di_zero_store) << zero_pre_reload.FormatSummary();
+  }
+}
+
 class InvertReloadCorpusTest : public InvertReloadTest,
                                public ::testing::WithParamInterface<RoundTripTestCase> {};
 
 TEST_P(InvertReloadCorpusTest, All4172CasesSatisfyBoundaryAndFreshPreReloadRightInverse) {
   const RoundTripTestCase& tc = GetParam();
+  ctx->BeginFunction("harness_init");
+  hooks->ApplyCompilationProfile({2, tc.options.c_flags, {}});
+  regclass_init();
   const FunctionCompilationTrace trace = hooks->TraceForwardCompilation(tc);
   ASSERT_FALSE(trace.subfunction_snapshots.empty())
       << "Failed to capture snapshots for " << tc.test_name;
@@ -1482,6 +1779,16 @@ TEST_P(InvertReloadCorpusTest, All4172CasesSatisfyBoundaryAndFreshPreReloadRight
   const RtlControlFlowGraph& lifted_pre_reload = *lifted_pre_reload_or;
   ASSERT_FALSE(lifted_pre_reload.rpo_blocks.empty()) << tc.test_name;
   EXPECT_EQ(lifted_pre_reload.pass, RtlPassKind::kLreg) << tc.test_name;
+
+  ctx->BeginFunction("harness_reload_fresh");
+  hooks->ApplyCompilationProfile(effective_profile);
+  const RightInverseResult fresh_reload_res = verifier.VerifyReloadRightInverse(lifted_pre_alter);
+  EXPECT_TRUE(fresh_reload_res.matches)
+      << "Case " << tc.test_name << " failed fresh VerifyReloadRightInverse(lifted_pre_alter): "
+      << fresh_reload_res.diff_detail << "\nlifted_pre_alter:\n"
+      << lifted_pre_alter.FormatSummary() << "\nlifted_pre_reload:\n"
+      << lifted_pre_reload.FormatSummary() << "\nactual:\n"
+      << fresh_reload_res.actual_summary;
 
   for (const auto& [pseudo, hard] : lifted_pre_reload.sideband.reg_renumber) {
     EXPECT_GE(pseudo, 68) << tc.test_name;

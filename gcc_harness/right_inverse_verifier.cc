@@ -42,6 +42,9 @@ extern int flag_delayed_branch;
 extern int flag_schedule_insns;
 extern int flag_schedule_insns_after_reload;
 extern int flag_expensive_optimizations;
+extern int flag_caller_saves;
+extern int caller_save_needed;
+extern char call_used_regs[];
 extern int rtx_equal_function_value_matters;
 extern int cse_jumps_altered;
 void restore_reg_data(rtx_def* first);
@@ -68,6 +71,149 @@ bool PatternHasCallAst(std::string_view pat) {
     }
   });
   return has_call;
+}
+
+int RtlExprModeByteSize(const RtlExpr& expr) {
+  if (expr.mode == RtlMachineMode::kUnknown) {
+    if (expr.raw_mode == "CQI") {
+      return 2;
+    }
+    if (expr.raw_mode == "CHI" || expr.raw_mode == "CC_FP" || expr.raw_mode == "CC_REV_FP") {
+      return 4;
+    }
+    if (expr.raw_mode == "SC" || expr.raw_mode == "CSI") {
+      return 8;
+    }
+    if (expr.raw_mode == "DC" || expr.raw_mode == "CDI") {
+      return 16;
+    }
+    if (expr.raw_mode == "TC" || expr.raw_mode == "CTI") {
+      return 32;
+    }
+  }
+  switch (expr.mode) {
+    case RtlMachineMode::kQi:
+      return 1;
+    case RtlMachineMode::kHi:
+      return 2;
+    case RtlMachineMode::kSi:
+    case RtlMachineMode::kSf:
+    case RtlMachineMode::kCc:
+      return 4;
+    case RtlMachineMode::kDi:
+    case RtlMachineMode::kDf:
+      return 8;
+    case RtlMachineMode::kTi:
+    case RtlMachineMode::kTf:
+      return 16;
+    default:
+      return 4;
+  }
+}
+
+void CollectPatternRegReadsAndFullDefs(const RtlExpr& expr, absl::flat_hash_set<int>* reads,
+                                       absl::flat_hash_set<int>* full_defs, bool* has_call) {
+  if (expr.op == RtlOp::kParallel) {
+    for (const RtlExpr& arm : expr.children) {
+      CollectPatternRegReadsAndFullDefs(arm, reads, full_defs, has_call);
+    }
+    return;
+  }
+  expr.Visit([&](const RtlExpr& node) {
+    if (node.op == RtlOp::kCall || node.op == RtlOp::kCallInsn) {
+      *has_call = true;
+    }
+  });
+  if (expr.op == RtlOp::kSet && expr.children.size() == 2) {
+    const RtlExpr& lhs = expr.children[0];
+    const RtlExpr& rhs = expr.children[1];
+    rhs.Visit([&](const RtlExpr& node) {
+      if (node.op == RtlOp::kReg) {
+        reads->insert(node.RegNo());
+      }
+    });
+    if (lhs.op == RtlOp::kReg) {
+      full_defs->insert(lhs.RegNo());
+    } else if (lhs.op == RtlOp::kSubreg && !lhs.children.empty() &&
+               lhs.children[0].op == RtlOp::kReg) {
+      constexpr int kMipsMask64Bit = 0x00002000;
+      const int word_bytes = (target_flags & kMipsMask64Bit) != 0 ? 8 : 4;
+      const int outer_bytes = RtlExprModeByteSize(lhs);
+      const int inner_bytes = RtlExprModeByteSize(lhs.children[0]);
+      if (!(inner_bytes > word_bytes && inner_bytes > outer_bytes)) {
+        full_defs->insert(lhs.children[0].RegNo());
+      }
+    } else {
+      lhs.Visit([&](const RtlExpr& node) {
+        if (node.op == RtlOp::kReg) {
+          reads->insert(node.RegNo());
+        }
+      });
+    }
+    return;
+  }
+  if (expr.op == RtlOp::kClobber && expr.children.size() == 1) {
+    if (expr.children[0].op == RtlOp::kReg) {
+      full_defs->insert(expr.children[0].RegNo());
+    } else {
+      expr.children[0].Visit([&](const RtlExpr& node) {
+        if (node.op == RtlOp::kReg) {
+          reads->insert(node.RegNo());
+        }
+      });
+    }
+    return;
+  }
+  expr.Visit([&](const RtlExpr& node) {
+    if (node.op == RtlOp::kReg) {
+      reads->insert(node.RegNo());
+    }
+  });
+}
+
+// Reconstructs `caller_save_needed` (`local-alloc.c:2213`) produced by
+// `local_alloc()` prior to `global_alloc()` when replaying from a `.08.lreg`
+// boundary without re-running `local_alloc()`.
+bool HasLocalCallerSaveNeeded(const RtlControlFlowGraph& lreg_cfg) {
+  if (flag_caller_saves == 0) {
+    return false;
+  }
+  absl::flat_hash_set<int> cand_pseudos;
+  for (const auto& [regno, hr] : lreg_cfg.sideband.reg_renumber) {
+    if (regno >= kMipsFirstPseudoRegister && hr >= 0 && hr < kMipsFirstPseudoRegister &&
+        call_used_regs[hr] != 0) {
+      cand_pseudos.insert(regno);
+    }
+  }
+  if (cand_pseudos.empty()) {
+    return false;
+  }
+  for (const RtlBasicBlock& blk : lreg_cfg.rpo_blocks) {
+    absl::flat_hash_set<int> live_now;
+    for (size_t idx = blk.instructions.size(); idx > 0; --idx) {
+      const size_t k = idx - 1;
+      auto parsed = ParsePatternAndNotes(blk.instructions[k]);
+      if (!parsed.ok()) {
+        continue;
+      }
+      absl::flat_hash_set<int> reads;
+      absl::flat_hash_set<int> full_defs;
+      bool has_call = false;
+      CollectPatternRegReadsAndFullDefs(parsed->pattern, &reads, &full_defs, &has_call);
+      for (int def_r : full_defs) {
+        live_now.erase(def_r);
+      }
+      if (has_call && !live_now.empty()) {
+        return true;
+      }
+      for (int read_r : reads) {
+        if (cand_pseudos.contains(read_r)) {
+          live_now.insert(read_r);
+        }
+      }
+    }
+  }
+  return false;
 }
 
 bool BlockInsnHasExplicitCallFusage(const RtlBasicBlock& blk, size_t k) {
@@ -1355,10 +1501,8 @@ RightInverseResult RightInverseVerifier::VerifySuffixRightInverse(
     if (y.rpo_blocks.empty()) return step_fail("InvertAlterReg");
     y = inverses_->InvertReload(y, effective_profile);
     if (y.rpo_blocks.empty()) return step_fail("InvertReload");
-    if (opt_enabled) {
-      y = inverses_->InvertGlobalAlloc(y);
-      if (y.rpo_blocks.empty()) return step_fail("InvertGlobalAlloc");
-    }
+    y = inverses_->InvertGlobalAlloc(y, effective_profile);
+    if (y.rpo_blocks.empty()) return step_fail("InvertGlobalAlloc");
     y.pass = RtlPassKind::kLreg;
   }
   if (target_rank <= PassPipelineRank(RtlPassKind::kSched)) {
@@ -1471,11 +1615,15 @@ RightInverseResult RightInverseVerifier::VerifySuffixRightInverse(
     }
   }
   for (int idx = start_sub_idx; idx <= end_sub_idx; ++idx) {
-    current_cfg =
-        fresh_hooks
-            .ExecuteSubfunctionBoundary(all_subs[idx], current_cfg, {},
-                                        effective_profile.optimize_level, effective_profile.c_flags)
-            .post_state;
+    if (idx == start_sub_idx && all_subs[idx] == SubfunctionId::kGlobalAlloc) {
+      regclass_init();
+      caller_save_needed = HasLocalCallerSaveNeeded(current_cfg) ? 1 : 0;
+    }
+    current_cfg = fresh_hooks
+                      .ExecuteSubfunctionBoundary(
+                          all_subs[idx], current_cfg, {}, effective_profile.optimize_level,
+                          effective_profile.c_flags, effective_profile.gp_symbol_sizes)
+                      .post_state;
   }
 
   fresh_hooks.ApplyCompilationProfile(effective_profile);
@@ -1667,31 +1815,46 @@ RightInverseResult RightInverseVerifier::VerifyAlterRegRightInverse(
 
 RightInverseResult RightInverseVerifier::VerifyReloadRightInverse(
     const RtlControlFlowGraph& reload_cfg_x) const {
-  RightInverseResult result;
-  result.expected_summary = reload_cfg_x.FormatSummary();
-
   const CompilationProfile profile = hooks_->ActiveCompilationProfile();
-  const RtlControlFlowGraph lifted_y = inverses_->InvertReload(reload_cfg_x, profile);
-  if (!reload_cfg_x.rpo_blocks.empty() && lifted_y.rpo_blocks.empty()) {
-    result.matches = false;
-    result.diff_detail = "Inverse returned empty RtlControlFlowGraph";
-    return result;
-  }
-  {
-    std::string fusage_err;
-    if (!VerifyCandidatePreservesExplicitCallFusage(reload_cfg_x, lifted_y, &fusage_err)) {
-      result.matches = false;
-      result.diff_detail = std::move(fusage_err);
-      return result;
-    }
-  }
-  const SubfunctionBoundarySnapshot replayed =
-      hooks_->ExecuteSubfunctionBoundary(SubfunctionId::kReload, lifted_y);
-  result.actual_summary = replayed.post_state.FormatSummary();
-  result.cfg_comparison = replayed.post_state.CompareAgainst(reload_cfg_x);
-  result.matches = result.cfg_comparison.MatchesExactly();
-  result.diff_detail = result.cfg_comparison.mismatch_detail;
-  return result;
+  absl::flat_hash_map<int, int> pre_renumber;
+  return VerifyRtlPassRightInverse(
+      reload_cfg_x,
+      [this, &profile, &pre_renumber](const RtlControlFlowGraph& x) {
+        RtlControlFlowGraph lifted_y = inverses_->InvertReload(x, profile);
+        pre_renumber = lifted_y.sideband.reg_renumber;
+        return lifted_y;
+      },
+      [&profile, &pre_renumber](GccContext* ctx, FunctionHooks* hooks) {
+        // Preserve `regno_pointer_flag` across harness-only `restore_reg_data`
+        // calls inside `RunReload`: in real GCC (`toplev.c:3075-3084`), `reload`
+        // never invokes `restore_reg_data` or mutates `regno_pointer_flag`.
+        std::vector<char> saved_pointer_flags;
+        if (regno_pointer_flag != nullptr && regno_pointer_flag_length > 0) {
+          saved_pointer_flags.assign(
+              regno_pointer_flag,
+              regno_pointer_flag + static_cast<size_t>(regno_pointer_flag_length));
+        }
+        Rtx head = ctx->GetInsns();
+        if (head != nullptr) {
+          hooks->RunReload(head, /*global=*/profile.optimize_level > 0 ? 1 : 0);
+          for (const auto& [regno, hard_reg] : pre_renumber) {
+            if (regno >= kMipsFirstPseudoRegister && hard_reg >= 0 && regno < max_regno &&
+                reg_renumber != nullptr && reg_renumber[regno] >= 0 && regno_reg_rtx != nullptr &&
+                regno_reg_rtx[regno] != nullptr && regno_reg_rtx[regno]->code == kReg) {
+              regno_reg_rtx[regno]->fld[0].rtint = regno;
+            }
+          }
+        }
+        if (regno_pointer_flag != nullptr && regno_pointer_flag_length > 0) {
+          std::memset(regno_pointer_flag, 0, static_cast<size_t>(regno_pointer_flag_length));
+          const size_t copy_len =
+              std::min(saved_pointer_flags.size(), static_cast<size_t>(regno_pointer_flag_length));
+          if (copy_len > 0) {
+            std::memcpy(regno_pointer_flag, saved_pointer_flags.data(), copy_len);
+          }
+        }
+      },
+      RtlPassKind::kGreg);
 }
 
 RightInverseResult RightInverseVerifier::VerifyGlobalAllocRightInverse(
@@ -1699,7 +1862,8 @@ RightInverseResult RightInverseVerifier::VerifyGlobalAllocRightInverse(
   RightInverseResult result;
   result.expected_summary = greg_cfg_x.FormatSummary();
 
-  const RtlControlFlowGraph lifted_y = inverses_->InvertGlobalAlloc(greg_cfg_x);
+  const CompilationProfile profile = hooks_->ActiveCompilationProfile();
+  const RtlControlFlowGraph lifted_y = inverses_->InvertGlobalAlloc(greg_cfg_x, profile);
   if (!greg_cfg_x.rpo_blocks.empty() && lifted_y.rpo_blocks.empty()) {
     result.matches = false;
     result.diff_detail = "Inverse returned empty RtlControlFlowGraph";
@@ -1713,8 +1877,11 @@ RightInverseResult RightInverseVerifier::VerifyGlobalAllocRightInverse(
       return result;
     }
   }
-  const SubfunctionBoundarySnapshot replayed =
-      hooks_->ExecuteSubfunctionBoundary(SubfunctionId::kGlobalAlloc, lifted_y);
+  regclass_init();
+  caller_save_needed = HasLocalCallerSaveNeeded(lifted_y) ? 1 : 0;
+  const SubfunctionBoundarySnapshot replayed = hooks_->ExecuteSubfunctionBoundary(
+      SubfunctionId::kGlobalAlloc, lifted_y, {}, profile.optimize_level, profile.c_flags,
+      profile.gp_symbol_sizes);
   result.actual_summary = replayed.post_state.FormatSummary();
   result.cfg_comparison = replayed.post_state.CompareAgainst(greg_cfg_x);
   const bool reg_renumber_matches =
@@ -1744,9 +1911,10 @@ RightInverseResult RightInverseVerifier::VerifyGlobalAllocRightInverse(
 RightInverseResult RightInverseVerifier::VerifyGlobalReloadStageRightInverse(
     const RtlControlFlowGraph& greg_cfg_x) const {
   const CompilationProfile profile = hooks_->ActiveCompilationProfile();
+  bool local_caller_save_needed = false;
   return VerifyRtlPassRightInverse(
       greg_cfg_x,
-      [this, &profile](const RtlControlFlowGraph& x) {
+      [this, &profile, &local_caller_save_needed](const RtlControlFlowGraph& x) {
         RtlControlFlowGraph pre_alter = inverses_->InvertAlterReg(x, profile, /*pseudo_regno=*/72);
         if (!x.rpo_blocks.empty() && pre_alter.rpo_blocks.empty()) {
           return RtlControlFlowGraph{};
@@ -1755,10 +1923,24 @@ RightInverseResult RightInverseVerifier::VerifyGlobalReloadStageRightInverse(
         if (!pre_alter.rpo_blocks.empty() && pre_reload.rpo_blocks.empty()) {
           return RtlControlFlowGraph{};
         }
-        return inverses_->InvertGlobalAlloc(pre_reload);
+        RtlControlFlowGraph pre_global = inverses_->InvertGlobalAlloc(pre_reload, profile);
+        local_caller_save_needed = HasLocalCallerSaveNeeded(pre_global);
+        return pre_global;
       },
-      [](GccContext* ctx, FunctionHooks* hooks) {
+      [&local_caller_save_needed](GccContext* ctx, FunctionHooks* hooks) {
+        // Preserve `regno_pointer_flag` across harness-only `restore_reg_data`
+        // calls inside `RunGlobalAlloc` / `-O0` `stupid_life_analysis` setup:
+        // in real GCC (`toplev.c:3075-3084`), `global_alloc` and `reload` never
+        // invoke `restore_reg_data` or mutate `regno_pointer_flag`.
+        std::vector<char> saved_pointer_flags;
+        if (regno_pointer_flag != nullptr && regno_pointer_flag_length > 0) {
+          saved_pointer_flags.assign(
+              regno_pointer_flag,
+              regno_pointer_flag + static_cast<size_t>(regno_pointer_flag_length));
+        }
         if (optimize > 0) {
+          regclass_init();
+          caller_save_needed = local_caller_save_needed ? 1 : 0;
           hooks->RunGlobalAlloc();
         } else {
           Rtx head = ctx->GetInsns();
@@ -1771,6 +1953,14 @@ RightInverseResult RightInverseVerifier::VerifyGlobalReloadStageRightInverse(
             regclass(head, max_regno);
             stupid_life_analysis(head, max_regno, nullptr);
             hooks->RunReload(head, /*global=*/0);
+          }
+        }
+        if (regno_pointer_flag != nullptr && regno_pointer_flag_length > 0) {
+          std::memset(regno_pointer_flag, 0, static_cast<size_t>(regno_pointer_flag_length));
+          const size_t copy_len =
+              std::min(saved_pointer_flags.size(), static_cast<size_t>(regno_pointer_flag_length));
+          if (copy_len > 0) {
+            std::memcpy(regno_pointer_flag, saved_pointer_flags.data(), copy_len);
           }
         }
       },
@@ -2809,7 +2999,7 @@ RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
       cand_pre = inverses_->InvertBlockAlloc(snap.post_state);
       break;
     case SubfunctionId::kGlobalAlloc:
-      cand_pre = inverses_->InvertGlobalAlloc(snap.post_state);
+      cand_pre = inverses_->InvertGlobalAlloc(snap.post_state, snap_profile);
       break;
     case SubfunctionId::kReload:
       cand_pre = inverses_->InvertReload(snap.post_state, snap_profile);
@@ -2854,6 +3044,10 @@ RightInverseResult RightInverseVerifier::VerifySubfunctionBoundaryRightInverse(
     }
   }
 
+  if (snap.subfunction_id == SubfunctionId::kGlobalAlloc) {
+    regclass_init();
+    caller_save_needed = HasLocalCallerSaveNeeded(cand_pre) ? 1 : 0;
+  }
   const SubfunctionBoundarySnapshot replayed = hooks_->ExecuteSubfunctionBoundary(snap, cand_pre);
   RightInverseResult result = BuildCfgRightInverseResult(snap.post_state, replayed.post_state);
   if (result.matches &&

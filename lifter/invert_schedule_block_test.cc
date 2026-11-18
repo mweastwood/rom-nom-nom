@@ -1076,6 +1076,298 @@ int SpillsPlus8Args(const int* p, int k) {
   }
 }
 
+TEST_F(InvertScheduleBlockTest, Sched2ConsecutiveCallerSaveRestoresAndEarlyclobberDiRightInverse) {
+  const std::string src = R"(
+int CallHook(int a, int b);
+
+int ConsecutiveCallerSaveLoop(const int* v, int n) {
+  int c0 = 1, c1 = 2, c2 = 3, c3 = 4, c4 = 5, c5 = 6, c6 = 7, c7 = 8, c8 = 9, c9 = 10;
+  int m0 = v[0], m1 = v[1], m2 = v[2], m3 = v[3], m4 = v[4], m5 = v[5];
+  int c10 = 11, c11 = 12, i;
+  for (i = 0; i < n; i++) {
+    int r = CallHook(i, c0 + c11);
+    c0 = (c0 + m0) ^ r;
+    c1 = (c1 + m1) + c0;
+    c2 = (c2 ^ m2) + c1;
+    c3 = (c3 + m3) ^ c2;
+    c4 = (c4 - m4) + c3;
+    c5 = (c5 + m5) ^ c4;
+    c6 = (c6 ^ c5) + m5;
+    c7 = (c7 + c6) ^ m4;
+    c8 = (c8 - c7) + m3;
+    c9 = (c9 ^ c8) + m2;
+    c10 = (c10 + c9) ^ m1;
+    c11 = (c11 - c10) + m0;
+  }
+  return c0 + c1 + c2 + c3 + c4 + c5 + c6 + c7 + c8 + c9 + c10 + c11;
+}
+
+long long EarlyclobberDiAccum(long long a, long long b, long long c) {
+  return (a + b - c) + 0x100000005LL;
+}
+)";
+
+  for (const auto& flags : {std::vector<std::string>{"-O2", "-mips1", "-funsigned-char", "-Wa,-O2"},
+                            std::vector<std::string>{"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"}}) {
+    for (const char* fn : {"ConsecutiveCallerSaveLoop", "EarlyclobberDiAccum"}) {
+      const auto trace = hooks_.TraceForwardCompilation(src, fn, flags, "sched2_cs_and_di");
+      bool found_sched2 = false;
+      for (const auto& snap : trace.subfunction_snapshots) {
+        if (snap.subfunction_id != gcc_harness::SubfunctionId::kScheduleBlockSched2) {
+          continue;
+        }
+        found_sched2 = true;
+        const gcc_harness::RightInverseResult boundary_res =
+            verifier_.VerifySubfunctionBoundaryRightInverse(snap);
+        EXPECT_TRUE(boundary_res.matches) << fn << ": " << boundary_res.diff_detail;
+        hooks_.ApplyCompilationProfile(trace.stage0_input.profile);
+        const gcc_harness::RightInverseResult stage_res =
+            verifier_.VerifySched2StageRightInverse(snap.post_state);
+        EXPECT_TRUE(stage_res.matches) << fn << ": " << stage_res.diff_detail;
+      }
+      EXPECT_TRUE(found_sched2) << fn;
+    }
+  }
+}
+
+TEST_F(InvertScheduleBlockTest, Sched2HoistsSpillOutputReloadStorePastUnchangingMemRead) {
+  // GCC `sched.c:828, 852` (`true_dependence` / `anti_dependence`): an unchanging non-volatile
+  // `(mem/s/u:SI ...)` read (such as an incoming stack-passed parameter) never conflicts with a
+  // non-unchanging reload spill-slot store `(set (mem:SI (plus:SI sp off)) ...)`. When `sched2`
+  // schedules the `mem/s/u` load into the 1-cycle load-delay shadow of a reload producer load
+  // `(set v1 (mem a0))`, verify `InvertScheduleBlock` hoists the spill output-reload store back up
+  // to `prod_idx + 1` past the intervening `mem/s/u` load and satisfies
+  // `VerifySched2StageRightInverse`.
+  hooks_.ApplyCompilationProfile({.optimize_level = 2, .c_flags = {"-O2", "-mips1"}});
+  RtlControlFlowGraph sched2_cfg;
+  sched2_cfg.pass = RtlPassKind::kSched2;
+  sched2_cfg.sideband.frame_size_bytes = 8;
+  sched2_cfg.sideband.outgoing_args_size = 16;
+  sched2_cfg.sideband.saved_gpr_regnos = {16, 17, 18, 19, 20, 21, 22, 23, 30, 31};
+  sched2_cfg.sideband.basic_block_live_at_start = {{0, {4, 29}}, {1, {6, 29}}};
+  sched2_cfg.rpo_blocks.resize(2);
+
+  // `B0`: producer `v1 = *a0` (priority 4), intervening `mem/s/u` incoming-arg load into `a2`
+  // (priority 3, scheduled into `v1`'s load-delay slot), and sunk pure output-reload store
+  // `[sp + 20] = v1` (`bucket 16`, `off = 16 + (8 - 4) = 20`).
+  sched2_cfg.rpo_blocks[0].id = 0;
+  sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg:SI 3 v1) (mem:SI (reg:SI 4 a0))) "
+      "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg:SI 6 a2) (mem/s/u:SI (plus:SI (reg:SI 29 sp) (const_int 80))))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))) (reg:SI 3 v1))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly("(set (pc) (label_ref L0))");
+  sched2_cfg.rpo_blocks[0].successors = {1};
+
+  // `B1`: reload from `[sp + 20]` so `IdentifySched2CallerSaveAndSpillOffsets` proves `off == 20`
+  // is a reload spill slot (`all_saved_gprs_used && n_stores >= 1 && n_loads >= 1`).
+  sched2_cfg.rpo_blocks[1].id = 1;
+  sched2_cfg.rpo_blocks[1].has_label = true;
+  sched2_cfg.rpo_blocks[1].AddPatternOnly(
+      "(set (reg:SI 3 v1) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))))");
+  sched2_cfg.rpo_blocks[1].AddPatternOnly(
+      "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 3 v1) (reg:SI 6 a2))) "
+      "(expr_list:REG_DEAD (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))) "
+      "(expr_list:REG_DEAD (reg:SI 6 a2) (nil)))");
+  sched2_cfg.rpo_blocks[1].AddPatternOnly(
+      "(use (reg/i:SI 2 v0)) (expr_list:REG_DEAD (reg/i:SI 2 v0) (nil))");
+
+  const CompilationProfile profile{.optimize_level = 2, .c_flags = {"-O2", "-mips1"}};
+  const RtlControlFlowGraph lifted = InvertScheduleBlock(sched2_cfg, profile);
+  ASSERT_EQ(lifted.BlockCount(), 2u);
+  ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 4u);
+  EXPECT_EQ(lifted.rpo_blocks[0].instructions[0],
+            "(set (reg:SI 3 v1) (mem:SI (reg:SI 4 a0))) "
+            "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+  EXPECT_EQ(lifted.rpo_blocks[0].instructions[1],
+            "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))) (reg:SI 3 v1))");
+  EXPECT_EQ(lifted.rpo_blocks[0].instructions[2],
+            "(set (reg:SI 6 a2) (mem/s/u:SI (plus:SI (reg:SI 29 sp) (const_int 80))))");
+
+  const gcc_harness::RightInverseResult sb_res =
+      verifier_.VerifySched2StageRightInverse(sched2_cfg);
+  EXPECT_TRUE(sb_res.matches) << sb_res.diff_detail;
+}
+
+TEST_F(InvertScheduleBlockTest, CanonicalizesAdjacentSpillInputReloadPairsToOperandOrder) {
+  // When `sched2` reorders two adjacent reload spill-slot input loads feeding the same binary
+  // instruction (`operand 1` loaded before `operand 0`), `InvertScheduleBlock` restores GCC
+  // `find_reloads` ascending operand order (`operand 0` reload before `operand 1` reload).
+  hooks_.ApplyCompilationProfile({.optimize_level = 2, .c_flags = {"-O2", "-mips2"}});
+  RtlControlFlowGraph sched2_cfg;
+  sched2_cfg.pass = RtlPassKind::kSched2;
+  sched2_cfg.sideband.frame_size_bytes = 16;
+  sched2_cfg.sideband.outgoing_args_size = 16;
+  sched2_cfg.sideband.saved_gpr_regnos = {16, 17, 18, 19, 20, 21, 22, 23, 30, 31};
+  sched2_cfg.rpo_blocks.resize(2);
+
+  // Two 8-byte reload spill buckets at `16` (`off = 20`) and `24` (`off = 28`).
+  sched2_cfg.rpo_blocks[0].id = 0;
+  sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))) (reg:SI 4 a0)) "
+      "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 28))) (reg:SI 5 a1)) "
+      "(expr_list:REG_DEAD (reg:SI 5 a1) (nil))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly("(set (pc) (label_ref L0))");
+  sched2_cfg.rpo_blocks[0].successors = {1};
+
+  // In `B1`, `[sp+28] -> t2` (`operand 1` of `minus`) appears before `[sp+20] -> t1` (`operand 0`
+  // of `minus`).
+  sched2_cfg.rpo_blocks[1].id = 1;
+  sched2_cfg.rpo_blocks[1].has_label = true;
+  sched2_cfg.rpo_blocks[1].AddPatternOnly(
+      "(set (reg:SI 10 t2) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 28))))");
+  sched2_cfg.rpo_blocks[1].AddPatternOnly(
+      "(set (reg:SI 9 t1) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))))");
+  sched2_cfg.rpo_blocks[1].AddPatternOnly(
+      "(set (reg/i:SI 2 v0) (minus:SI (reg:SI 9 t1) (reg:SI 10 t2))) "
+      "(expr_list:REG_DEAD (reg:SI 10 t2) "
+      "(expr_list:REG_DEAD (reg:SI 9 t1) (nil)))");
+  sched2_cfg.rpo_blocks[1].AddPatternOnly(
+      "(use (reg/i:SI 2 v0)) (expr_list:REG_DEAD (reg/i:SI 2 v0) (nil))");
+
+  const CompilationProfile profile{.optimize_level = 2, .c_flags = {"-O2", "-mips2"}};
+  const RtlControlFlowGraph lifted = InvertScheduleBlock(sched2_cfg, profile);
+  ASSERT_EQ(lifted.BlockCount(), 2u);
+  ASSERT_EQ(lifted.rpo_blocks[1].instructions.size(), 4u);
+  EXPECT_EQ(lifted.rpo_blocks[1].instructions[0],
+            "(set (reg:SI 9 t1) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))))");
+  EXPECT_EQ(lifted.rpo_blocks[1].instructions[1],
+            "(set (reg:SI 10 t2) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 28))))");
+}
+
+TEST_F(InvertScheduleBlockTest, RestoresCrossBankReloadSpillRoundRobinOrder) {
+  // In `reload1.c` (`compare_spill_regs` + `allocate_reload_reg`), `GR_REGS` spill registers
+  // (`9 = t1`, `10 = t2`) precede `FP_REGS` spill registers (`40 = $f8`) in `spill_regs[]`.
+  // Witnessing `t1` (`[sp+20]`), then `$f8` (`mtc1 $fp, $f8`), then `t2` (`[sp+28]`) proves
+  // `sched2` hoisted the `t1` reload + consumer ahead of the `$f8` reload + consumer; verify
+  // `InvertScheduleBlock` sinks `[g1, g1 + 1]` back immediately after `[f, f + 1]`.
+  hooks_.ApplyCompilationProfile({.optimize_level = 2, .c_flags = {"-O2", "-mips2"}});
+  RtlControlFlowGraph sched2_cfg;
+  sched2_cfg.pass = RtlPassKind::kSched2;
+  sched2_cfg.sideband.frame_size_bytes = 16;
+  sched2_cfg.sideband.outgoing_args_size = 16;
+  sched2_cfg.sideband.saved_gpr_regnos = {16, 17, 18, 19, 20, 21, 22, 23, 30, 31};
+  sched2_cfg.rpo_blocks.resize(2);
+
+  sched2_cfg.rpo_blocks[0].id = 0;
+  sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))) (reg:SI 4 a0)) "
+      "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 28))) (reg:SI 5 a1)) "
+      "(expr_list:REG_DEAD (reg:SI 5 a1) (nil))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly("(set (pc) (label_ref L0))");
+  sched2_cfg.rpo_blocks[0].successors = {1};
+
+  sched2_cfg.rpo_blocks[1].id = 1;
+  sched2_cfg.rpo_blocks[1].has_label = true;
+  sched2_cfg.rpo_blocks[1].AddPatternOnly(
+      "(set (reg:SI 9 t1) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))))");
+  sched2_cfg.rpo_blocks[1].AddPatternOnly(
+      "(set (reg:SI 2 v0) (xor:SI (reg:SI 9 t1) (reg:SI 19 s3))) "
+      "(expr_list:REG_DEAD (reg:SI 9 t1) (expr_list:REG_DEAD (reg:SI 19 s3) (nil)))");
+  sched2_cfg.rpo_blocks[1].AddPatternOnly("(set (reg:SF 40 $f8) (reg:SF 30 $fp))");
+  sched2_cfg.rpo_blocks[1].AddPatternOnly(
+      "(set (reg:SF 32 $f0) (mult:SF (reg:SF 40 $f8) (reg:SF 62 $f30))) "
+      "(expr_list:REG_DEAD (reg:SF 40 $f8) (expr_list:REG_DEAD (reg:SF 62 $f30) "
+      "(expr_list:REG_DEAD (reg:SF 30 $fp) (nil))))");
+  sched2_cfg.rpo_blocks[1].AddPatternOnly(
+      "(set (reg:SI 16 s0) (plus:SI (reg:SI 16 s0) (reg:SI 2 v0))) "
+      "(expr_list:REG_DEAD (reg:SI 2 v0) (nil))");
+  sched2_cfg.rpo_blocks[1].AddPatternOnly(
+      "(set (reg:SI 10 t2) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 28))))");
+  sched2_cfg.rpo_blocks[1].AddPatternOnly(
+      "(set (reg:SI 16 s0) (xor:SI (reg:SI 16 s0) (reg:SI 10 t2))) "
+      "(expr_list:REG_DEAD (reg:SI 10 t2) (nil))");
+  sched2_cfg.rpo_blocks[1].AddPatternOnly(
+      "(set (reg:SF 34 $f2) (float:SF (reg:SI 16 s0))) "
+      "(expr_list:REG_DEAD (reg:SI 16 s0) (nil))");
+  sched2_cfg.rpo_blocks[1].AddPatternOnly(
+      "(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 32 $f0) (reg:SF 34 $f2))) "
+      "(expr_list:REG_DEAD (reg:SF 34 $f2) (expr_list:REG_DEAD (reg:SF 32 $f0) (nil)))");
+  sched2_cfg.rpo_blocks[1].AddPatternOnly(
+      "(use (reg/i:SF 32 $f0)) (expr_list:REG_DEAD (reg/i:SF 32 $f0) (nil))");
+
+  const CompilationProfile profile{.optimize_level = 2, .c_flags = {"-O2", "-mips2"}};
+  const RtlControlFlowGraph lifted = InvertScheduleBlock(sched2_cfg, profile);
+  ASSERT_EQ(lifted.BlockCount(), 2u);
+  ASSERT_EQ(lifted.rpo_blocks[1].instructions.size(), 10u);
+  EXPECT_EQ(lifted.rpo_blocks[1].instructions[0], "(set (reg:SF 40 $f8) (reg:SF 30 $fp))");
+  EXPECT_EQ(lifted.rpo_blocks[1].instructions[2],
+            "(set (reg:SI 9 t1) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))))");
+}
+
+TEST_F(InvertScheduleBlockTest,
+       UnschedulesSunkMdOutputReloadHoistedFprProducerAndReloadOtherDeadNotes) {
+  hooks_.ApplyCompilationProfile({.optimize_level = 2, .c_flags = {"-O2", "-mips1"}});
+  RtlControlFlowGraph sched2_cfg;
+  sched2_cfg.pass = RtlPassKind::kSched2;
+  sched2_cfg.rpo_blocks.resize(1);
+  sched2_cfg.rpo_blocks[0].id = 0;
+  // 1. Two `mulsi3_internal` `PARALLEL`s in one block (`other_md == true`), with the second
+  //    `mflo` (`(set 3 v1 (reg:SI 65 lo))`) sunk past `(set 6 a2 (plus 9 t1 6 a2))`.
+  // 2. A `sched2`-hoisted `"=f"` output reload producer `(set 34 $f2 (float:SF 6 a2))` ahead of
+  //    `(set 2 v0 (mem:SI 5 a1))` reading `5 a1` (`WAR` hazard preventing hoisting `(set 5 a1
+  //    $f2)`).
+  // 3. A `RELOAD_OTHER` cross-bank `"f"` reload `(set 36 $f4 7 a3) ; (set 36 $f4 (plus 36 $f4
+  // ...))`
+  //    followed by `(set 7 a3 36 $f4)`.
+  sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(parallel[ (set (reg:SI 65 lo) (mult:SI (reg:SI 4 a0) (reg:SI 5 a1))) "
+      "(clobber (reg:SI 64 hi)) (clobber (reg:SI 66 accum)) ] ) "
+      "(expr_list:REG_DEAD (reg:SI 4 a0) (expr_list:REG_UNUSED (reg:SI 64 hi) "
+      "(expr_list:REG_UNUSED (reg:SI 66 accum) (nil))))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 9 t1) (reg:SI 65 lo))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(parallel[ (set (reg:SI 65 lo) (mult:SI (reg:SI 6 a2) (reg:SI 5 a1))) "
+      "(clobber (reg:SI 64 hi)) (clobber (reg:SI 66 accum)) ] ) "
+      "(expr_list:REG_UNUSED (reg:SI 64 hi) (expr_list:REG_UNUSED (reg:SI 66 accum) (nil)))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg:SI 6 a2) (plus:SI (reg:SI 9 t1) (reg:SI 6 a2))) "
+      "(expr_list:REG_DEAD (reg:SI 9 t1) (nil))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 3 v1) (reg:SI 65 lo))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg:SI 6 a2) (minus:SI (reg:SI 6 a2) (reg:SI 3 v1))) "
+      "(expr_list:REG_DEAD (reg:SI 3 v1) (nil))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg:SF 34 $f2) (float:SF (reg:SI 6 a2))) "
+      "(expr_list:REG_DEAD (reg:SI 6 a2) (nil))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg:SI 2 v0) (mem:SI (reg:SI 5 a1))) "
+      "(expr_list:REG_DEAD (reg:SI 5 a1) (nil))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SF 5 a1) (reg:SF 34 $f2))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg:SF 36 $f4) (reg:SF 7 a3)) (expr_list:REG_DEAD (reg:SI 7 a3) (nil))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg:SF 36 $f4) (plus:SF (reg:SF 36 $f4) (reg:SF 44 $f12))) "
+      "(expr_list:REG_DEAD (reg:SF 44 $f12) (nil))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SF 7 a3) (reg:SF 36 $f4))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 1))) "
+      "(expr_list:REG_DEAD (reg:SF 5 a1) (expr_list:REG_DEAD (reg:SF 7 a3) (nil)))");
+  sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(use (reg/i:SI 2 v0)) (expr_list:REG_DEAD (reg/i:SI 2 v0) (nil))");
+
+  const CompilationProfile profile{.optimize_level = 2, .c_flags = {"-O2", "-mips1"}};
+  const RtlControlFlowGraph lifted = InvertScheduleBlock(sched2_cfg, profile);
+  ASSERT_EQ(lifted.BlockCount(), 1u);
+  const auto& insns = lifted.rpo_blocks[0].instructions;
+  ASSERT_EQ(insns.size(), 14u);
+  EXPECT_EQ(insns[3], "(set (reg:SI 3 v1) (reg:SI 65 lo))");
+  EXPECT_EQ(insns[7],
+            "(set (reg:SF 34 $f2) (float:SF (reg:SI 6 a2))) "
+            "(expr_list:REG_DEAD (reg:SI 6 a2) (nil))");
+  EXPECT_EQ(insns[8], "(set (reg:SF 5 a1) (reg:SF 34 $f2))");
+  EXPECT_EQ(insns[9], "(set (reg:SF 36 $f4) (reg:SF 7 a3))");
+  EXPECT_EQ(insns[10],
+            "(set (reg:SF 36 $f4) (plus:SF (reg:SF 36 $f4) (reg:SF 44 $f12))) "
+            "(expr_list:REG_DEAD (reg:SF 7 a3) (expr_list:REG_DEAD (reg:SF 44 $f12) (nil)))");
+}
+
 class InvertScheduleBlockCorpusTest : public ::testing::TestWithParam<RoundTripTestCase> {
  protected:
   gcc_harness::GccContext ctx_;

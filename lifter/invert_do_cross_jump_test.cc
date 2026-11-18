@@ -534,7 +534,9 @@ TEST_F(InvertDoCrossJumpTest, RestoresDeletedNoopCallArgMoveOnlyForUsedArgWithou
             "(set (reg:SI 16 s0) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
   EXPECT_EQ(pre.rpo_blocks[0].instructions[4],
             "(set (reg:SI 17 s1) (reg:SI 5 a1)) (expr_list:REG_DEAD (reg:SI 5 a1) (nil))");
-  EXPECT_EQ(pre.rpo_blocks[0].instructions[6], "(set (reg:SI 4 a0) (reg:SI 16 s0))");
+  EXPECT_EQ(pre.rpo_blocks[0].instructions[5], "(set (reg:SI 4 a0) (reg:SI 16 s0))");
+  EXPECT_EQ(pre.rpo_blocks[0].instructions[6],
+            "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 24))) (reg:SI 31 ra))");
   ASSERT_EQ(pre.rpo_blocks[0].rtl_insns[7].call_fusage.size(), 1u);
 
   const RightInverseResult res = verifier_.VerifyDoCrossJumpRightInverse(cfg);
@@ -756,6 +758,259 @@ TEST_F(InvertDoCrossJumpTest,
   };
   const RightInverseResult multi_res = verifier_.VerifyDoCrossJumpRightInverse(multi_ret_cfg);
   EXPECT_TRUE(multi_res.matches) << multi_res.diff_detail;
+}
+
+TEST_F(InvertDoCrossJumpTest, RestoresDeletedNoopSharedReturnMoveForFourPredsAndDfReturn) {
+  RtlControlFlowGraph cfg;
+  cfg.pass = RtlPassKind::kJump2;
+  cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:DF 34 $f2) (mem:DF (reg:SI 4 a0))) "
+                    "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                    "(set (pc) (if_then_else (eq:SI (reg:SI 5 a1) (const_int 0)) "
+                    "(label_ref L0) (pc)))",
+                },
+                {2, 1}),
+      MakeBlock(1, false,
+                {
+                    "(set (reg:DF 32 $f0) (plus:DF (reg:DF 34 $f2) (reg:DF 34 $f2))) "
+                    "(expr_list:REG_DEAD (reg:DF 34 $f2) (nil))",
+                    "(set (pc) (label_ref L3))",
+                },
+                {7}),
+      MakeBlock(2, true,
+                {
+                    "(set (pc) (if_then_else (eq:SI (reg:SI 5 a1) (const_int 1)) "
+                    "(label_ref L1) (pc)))",
+                },
+                {4, 3}),
+      MakeBlock(3, false,
+                {
+                    "(set (reg:DF 32 $f0) (mult:DF (reg:DF 34 $f2) (reg:DF 34 $f2))) "
+                    "(expr_list:REG_DEAD (reg:DF 34 $f2) (nil))",
+                    "(set (pc) (label_ref L3))",
+                },
+                {7}),
+      MakeBlock(4, true,
+                {
+                    "(set (reg:SI 2 v0) (const_int 2))",
+                    "(set (pc) (if_then_else (eq:SI (reg:SI 5 a1) (reg:SI 2 v0)) "
+                    "(label_ref L2) (pc))) "
+                    "(expr_list:REG_DEAD (reg:SI 5 a1) "
+                    "(expr_list:REG_DEAD (reg:SI 2 v0) (nil)))",
+                },
+                {6, 5}),
+      MakeBlock(5, false,
+                {
+                    "(set (reg:DF 32 $f0) (minus:DF (reg:DF 34 $f2) (reg:DF 34 $f2))) "
+                    "(expr_list:REG_DEAD (reg:DF 34 $f2) (nil))",
+                    "(set (pc) (label_ref L3))",
+                },
+                {7}),
+      MakeBlock(6, true,
+                {
+                    "(set (reg:DF 32 $f0) (neg:DF (reg:DF 34 $f2))) "
+                    "(expr_list:REG_DEAD (reg:DF 34 $f2) (nil))",
+                },
+                {7}),
+      MakeBlock(7, true,
+                {
+                    "(use (reg/i:DF 32 $f0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  cfg.sideband.basic_block_live_at_start = {
+      {0, {4, 5}},      {1, {34, 35}}, {2, {5, 34, 35}}, {3, {34, 35}},
+      {4, {5, 34, 35}}, {5, {34, 35}}, {6, {34, 35}},    {7, {32, 33}},
+  };
+
+  const CompilationProfile no_sched2_profile{
+      .optimize_level = 2,
+      .c_flags = {"-O2", "-fno-schedule-insns2", "-mips2", "-mcpu=r4000"},
+  };
+  const RtlControlFlowGraph lifted_no_sched2 = InvertDoCrossJump(cfg, no_sched2_profile);
+  ASSERT_EQ(lifted_no_sched2.rpo_blocks.size(), 8u);
+  ASSERT_EQ(lifted_no_sched2.rpo_blocks[7].instructions.size(), 2u)
+      << lifted_no_sched2.FormatSummary();
+  EXPECT_EQ(lifted_no_sched2.rpo_blocks[7].instructions[0],
+            "(set (reg/i:DF 32 $f0) (reg:DF 32 $f0)) "
+            "(expr_list:REG_DEAD (reg:DF 32 $f0) (nil))");
+  EXPECT_EQ(lifted_no_sched2.rpo_blocks[7].instructions[1], "(use (reg/i:DF 32 $f0))");
+
+  const CompilationProfile sched2_profile{
+      .optimize_level = 2,
+      .c_flags = {"-O2", "-mips2", "-mcpu=r4000"},
+  };
+  RtlControlFlowGraph lifted = InvertDoCrossJump(cfg, sched2_profile);
+  ASSERT_EQ(lifted.rpo_blocks.size(), 8u);
+  ASSERT_EQ(lifted.rpo_blocks[7].instructions.size(), 1u) << lifted.FormatSummary();
+  EXPECT_EQ(lifted.rpo_blocks[7].instructions[0], "(use (reg/i:DF 32 $f0))");
+  RestoreSched2DeletedNoopMoves(&lifted, sched2_profile);
+  ASSERT_EQ(lifted.rpo_blocks[7].instructions.size(), 2u) << lifted.FormatSummary();
+  EXPECT_EQ(lifted.rpo_blocks[7].instructions[0],
+            "(set (reg/i:DF 32 $f0) (reg:DF 32 $f0)) "
+            "(expr_list:REG_DEAD (reg:DF 32 $f0) (nil))");
+
+  const RightInverseResult res = verifier_.VerifyDoCrossJumpRightInverse(cfg);
+  EXPECT_TRUE(res.matches) << res.diff_detail;
+}
+
+TEST_F(InvertDoCrossJumpTest, RestoresSingleDyingMultiBlockArgPreferenceMove) {
+  RtlControlFlowGraph cfg;
+  cfg.pass = RtlPassKind::kJump2;
+  cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 3 v1) (const_int 0))",
+                },
+                {1}),
+      MakeBlock(1, true,
+                {
+                    "(set (reg:SI 3 v1) (plus:SI (reg:SI 3 v1) (const_int 1)))",
+                    "(set (pc) (if_then_else (lt:SI (reg:SI 3 v1) (reg:SI 4 a0)) "
+                    "(label_ref L0) (pc)))",
+                },
+                {1, 2}),
+      MakeBlock(2, false,
+                {
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 4 a0) (reg:SI 3 v1))) "
+                    "(expr_list:REG_DEAD (reg:SI 4 a0) "
+                    "(expr_list:REG_DEAD (reg:SI 3 v1) (nil)))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  cfg.sideband.basic_block_live_at_start = {
+      {0, {4}},
+      {1, {3, 4}},
+      {2, {3, 4}},
+  };
+
+  const CompilationProfile no_sched2_profile{
+      .optimize_level = 2,
+      .c_flags = {"-O2", "-fno-schedule-insns2", "-mips2", "-mcpu=r4000"},
+  };
+  const RtlControlFlowGraph lifted_no_sched2 = InvertDoCrossJump(cfg, no_sched2_profile);
+  ASSERT_EQ(lifted_no_sched2.rpo_blocks.size(), 3u);
+  ASSERT_GE(lifted_no_sched2.rpo_blocks[0].instructions.size(), 2u)
+      << lifted_no_sched2.FormatSummary();
+  EXPECT_EQ(lifted_no_sched2.rpo_blocks[0].instructions[0],
+            "(set (reg:SI 4 a0) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+
+  const CompilationProfile sched2_profile{
+      .optimize_level = 2,
+      .c_flags = {"-O2", "-mips2", "-mcpu=r4000"},
+  };
+  RtlControlFlowGraph lifted = InvertDoCrossJump(cfg, sched2_profile);
+  ASSERT_EQ(lifted.rpo_blocks.size(), 3u);
+  ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 1u) << lifted.FormatSummary();
+  RestoreSched2DeletedNoopMoves(&lifted, sched2_profile);
+  ASSERT_GE(lifted.rpo_blocks[0].instructions.size(), 2u) << lifted.FormatSummary();
+  EXPECT_EQ(lifted.rpo_blocks[0].instructions[0],
+            "(set (reg:SI 4 a0) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+
+  const RightInverseResult res = verifier_.VerifyDoCrossJumpRightInverse(cfg);
+  EXPECT_TRUE(res.matches) << res.diff_detail;
+}
+
+TEST_F(InvertDoCrossJumpTest, RestoreNoopMovesConsumedDeathsRequiresInterveningShield) {
+  // 1. Unshielded register-to-register overwrite `(set (reg:SI 5 a1) (reg:SI 4 a0))`
+  //    immediately after an earlier write `(set (reg:SI 5 a1) (const_int 0))` with
+  //    no intervening read of `$5` and no `NOTE_INSN_LOOP_END` must NOT duplicate
+  //    `REG_DEAD (reg:SI 5 a1)` onto an earlier consumer of `$5` (which `jump2`
+  //    only strips when `find_reg_note(p, REG_DEAD, dreg)` did not cross a write
+  //    without an intervening read or `NOTE_INSN_LOOP_END` shield).
+  RtlControlFlowGraph unshielded_cfg;
+  unshielded_cfg.pass = RtlPassKind::kJump2;
+  unshielded_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 5 a1) (const_int 1))) "
+                    "(expr_list:REG_DEAD (reg:SI 5 a1) (nil))",
+                    "(set (reg:SI 5 a1) (const_int 0))",
+                    "(set (mem:SI (reg:SI 6 a2)) (reg:SI 5 a1))",
+                    "(set (reg:SI 5 a1) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 5 a1))) "
+                    "(expr_list:REG_DEAD (reg:SI 5 a1) (nil))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  unshielded_cfg.sideband.basic_block_live_at_start = {{0, {4, 5, 6}}};
+
+  const RtlControlFlowGraph lifted_shielded = InvertDoCrossJump(unshielded_cfg);
+  ASSERT_EQ(lifted_shielded.rpo_blocks.size(), 1u);
+  // Because `(set (mem:SI (reg:SI 6 a2)) (reg:SI 5 a1))` reads `$5` between the
+  // `REG_DEAD (reg:SI 5 a1)` on `insn[0]` and `(set (reg:SI 5 a1) (reg:SI 4 a0))`,
+  // `insn[0]`'s `REG_DEAD` IS shielded and preserved cleanly, while an unshielded
+  // overwrite without any intervening read does not duplicate `REG_DEAD`.
+  const RightInverseResult ok_res = verifier_.VerifyDoCrossJumpRightInverse(unshielded_cfg);
+  EXPECT_TRUE(ok_res.matches) << ok_res.diff_detail;
+
+  RtlControlFlowGraph no_read_cfg;
+  no_read_cfg.pass = RtlPassKind::kJump2;
+  no_read_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 5 a1) (const_int 1)))",
+                    "(set (reg:SI 5 a1) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 5 a1))) "
+                    "(expr_list:REG_DEAD (reg:SI 5 a1) (nil))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  no_read_cfg.sideband.basic_block_live_at_start = {{0, {4, 5}}};
+  const RtlControlFlowGraph lifted_no_read = InvertDoCrossJump(no_read_cfg);
+  ASSERT_EQ(lifted_no_read.rpo_blocks.size(), 1u);
+  EXPECT_EQ(lifted_no_read.rpo_blocks[0].instructions[0],
+            "(set (reg:SI 2 v0) (plus:SI (reg:SI 5 a1) (const_int 1)))");
+  const RightInverseResult no_read_res = verifier_.VerifyDoCrossJumpRightInverse(no_read_cfg);
+  EXPECT_TRUE(no_read_res.matches) << no_read_res.diff_detail;
+
+  // `NOTE_INSN_LOOP_END` between a `REG_DEAD (reg:SI 5 a1)` instruction and a subsequent
+  // `(set (reg:SI 5 a1) (reg:SI 4 a0))` move also shields `insn[0]` in GCC `jump2` (`noop_moves=1`
+  // strips one `REG_DEAD` note without deleting across the loop boundary). Verify structured AST
+  // `RtlLoopNoteKind::kLoopEnd` detection both with synced `rtl_insns` and with cleared
+  // `rtl_insns`, plus `VerifyDoCrossJumpRightInverse`.
+  RtlControlFlowGraph loop_end_shield_cfg;
+  loop_end_shield_cfg.pass = RtlPassKind::kJump2;
+  loop_end_shield_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 5 a1) (const_int 1))) "
+                    "(expr_list:REG_DEAD (reg:SI 5 a1) (nil))",
+                    "(note NOTE_INSN_LOOP_END)",
+                    "(set (reg:SI 5 a1) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 5 a1))) "
+                    "(expr_list:REG_DEAD (reg:SI 5 a1) (nil))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  loop_end_shield_cfg.sideband.basic_block_live_at_start = {{0, {4, 5}}};
+  const RtlControlFlowGraph lifted_loop_end = InvertDoCrossJump(loop_end_shield_cfg);
+  ASSERT_EQ(lifted_loop_end.rpo_blocks.size(), 1u);
+  RtlControlFlowGraph loop_end_unsynced = loop_end_shield_cfg;
+  loop_end_unsynced.rpo_blocks[0].rtl_insns.clear();
+  const RtlControlFlowGraph lifted_loop_end_unsynced = InvertDoCrossJump(loop_end_unsynced);
+  ASSERT_EQ(lifted_loop_end_unsynced.rpo_blocks.size(), 1u);
+  EXPECT_EQ(lifted_loop_end_unsynced.rpo_blocks[0].instructions,
+            lifted_loop_end.rpo_blocks[0].instructions);
+  const RightInverseResult loop_end_res =
+      verifier_.VerifyDoCrossJumpRightInverse(loop_end_shield_cfg);
+  EXPECT_TRUE(loop_end_res.matches) << loop_end_res.diff_detail;
+
+  BrokenDoCrossJumpProvider bad_provider;
+  RightInverseVerifier bad_verifier(&ctx_, &hooks_, &bad_provider);
+  const RightInverseResult bad_res = bad_verifier.VerifyDoCrossJumpRightInverse(no_read_cfg);
+  EXPECT_FALSE(bad_res.matches);
 }
 
 class DoCrossJumpCorpusTest : public ::testing::TestWithParam<RoundTripTestCase> {

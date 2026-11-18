@@ -5,10 +5,12 @@
 #include <string_view>
 #include <vector>
 
+#include "absl/status/statusor.h"
 #include "absl/strings/match.h"
 #include "absl/types/span.h"
 #include "core/round_trip_test_cases.h"
 #include "core/rtl_cfg.h"
+#include "core/rtl_expr.h"
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
 #include "gcc_harness/right_inverse_verifier.h"
@@ -633,6 +635,119 @@ TEST_F(InvertFinalScanInsnTest, InvertFinalScanInsnLinesToCfgStreamTests) {
   }
 }
 
+TEST_F(InvertFinalScanInsnTest, O0SubwordTruncatingSubregsDistinguishesAluFromNarrowMemLoad) {
+  // At `-O0`, GCC 2.7.2 `final_scan_insn` (`final.c:1933, 2095` `alter_subreg`)
+  // rewrites `(subreg:QI|HI (reg:SI hr) 0)` into `(reg:QI|HI hr)` in place,
+  // whereas narrow `movqi`/`movhi` memory loads (`lbu`/`lhu` disassembled as
+  // `(zero_extend:SI (mem:QI|HI ...))`) originally used `(reg:QI|HI hr)`
+  // directly. Verify `ReconstructO0FinalScanDeletions` wraps the subword store
+  // after an `SImode` ALU `ori` into `(subreg:QI (reg:SI 5 a1) 0)` while
+  // keeping the `lhu` + `sh` pair on `(reg:HI 3 v1)`, and satisfies
+  // `VerifySubfunctionBoundaryRightInverse(kFinalScanInsn)` at `-O0`.
+  const std::vector<std::string> body_asm_lines = {
+      "ori\t$5,$4,3", "sb\t$5,0($fp)", "lhu\t$3,4($fp)", "sh\t$3,6($fp)", "lbu\t$2,0($fp)",
+  };
+  RtlSidebandState sideband;
+  sideband.frame_size_bytes = 8;
+  sideband.frame_pointer_needed = true;
+  sideband.is_leaf_function = true;
+  sideband.saved_gpr_regnos = {30};
+  const CompilationProfile o0_profile{
+      .optimize_level = 0,
+      .c_flags = {"-O0", "-mips2", "-mcpu=r4000"},
+  };
+  const RtlControlFlowGraph cfg =
+      InvertFinalScanInsnLinesToCfg(body_asm_lines, sideband, {}, {}, &o0_profile);
+  ASSERT_EQ(cfg.rpo_blocks.size(), 1u);
+
+  bool saw_wrapped_alu_subreg = false;
+  bool saw_unwrapped_lhu_store = false;
+  for (const std::string& insn : cfg.rpo_blocks[0].instructions) {
+    if (absl::StrContains(insn, "(subreg:QI (reg:SI 5 a1) 0)")) {
+      saw_wrapped_alu_subreg = true;
+    }
+    if (absl::StrContains(insn, "(reg:HI 3 v1)") &&
+        !absl::StrContains(insn, "(subreg:HI (reg:SI 3 v1) 0)")) {
+      saw_unwrapped_lhu_store = true;
+    }
+  }
+  EXPECT_TRUE(saw_wrapped_alu_subreg) << cfg.FormatSummary();
+  EXPECT_TRUE(saw_unwrapped_lhu_store) << cfg.FormatSummary();
+
+  class O0FinalScanProfileProvider final : public gcc_harness::SubfunctionInverseProvider {
+   public:
+    explicit O0FinalScanProfileProvider(const CompilationProfile* profile) : profile_(profile) {}
+    RtlControlFlowGraph InvertFinalScanInsnStream(absl::Span<const std::string> asm_lines_x,
+                                                  const RtlSidebandState& sb) const override {
+      return lifter::InvertFinalScanInsnLinesToCfg(asm_lines_x, sb, {}, {}, profile_);
+    }
+
+   private:
+    const CompilationProfile* profile_;
+  };
+  O0FinalScanProfileProvider o0_provider(&o0_profile);
+  gcc_harness::RightInverseVerifier o0_verifier(&ctx_, &hooks_, &o0_provider);
+  const auto snap = hooks_.ExecuteSubfunctionBoundary(gcc_harness::SubfunctionId::kFinalScanInsn,
+                                                      cfg, {}, 0, {"-O0", "-mips2", "-mcpu=r4000"});
+  const auto res = o0_verifier.VerifySubfunctionBoundaryRightInverse(snap);
+  EXPECT_TRUE(res.matches) << res.diff_detail;
+}
+
+TEST_F(InvertFinalScanInsnTest, ReconstructsO0NoConflictBlockDiSubregsAndMatchesBoundary) {
+  const std::vector<std::string> body_asm_lines = {
+      "sw\t$4,16($fp)", "lw\t$5,16($fp)", "sra\t$4,$5,31",
+      "lw\t$3,16($fp)", "move\t$2,$4",    "sd\t$2,8($fp)",
+  };
+  RtlSidebandState sideband;
+  sideband.frame_size_bytes = 16;
+  sideband.frame_pointer_needed = true;
+  sideband.is_leaf_function = true;
+  sideband.saved_gpr_regnos = {30};
+  const CompilationProfile o0_profile{
+      .optimize_level = 0,
+      .c_flags = {"-O0", "-mips2", "-mcpu=r4000"},
+  };
+  const RtlControlFlowGraph cfg =
+      InvertFinalScanInsnLinesToCfg(body_asm_lines, sideband, {}, {}, &o0_profile);
+  ASSERT_EQ(cfg.rpo_blocks.size(), 1u);
+
+  bool saw_clobber_di = false;
+  bool saw_subreg_lo = false;
+  bool saw_subreg_hi = false;
+  for (const std::string& insn : cfg.rpo_blocks[0].instructions) {
+    if (insn == "(clobber (reg:DI 2 v0))") {
+      saw_clobber_di = true;
+    }
+    if (absl::StrContains(insn, "(set (subreg:SI (reg:DI 2 v0) 1) ")) {
+      saw_subreg_lo = true;
+    }
+    if (absl::StrContains(insn, "(set (subreg:SI (reg:DI 2 v0) 0) ")) {
+      saw_subreg_hi = true;
+    }
+  }
+  EXPECT_TRUE(saw_clobber_di) << cfg.FormatSummary();
+  EXPECT_TRUE(saw_subreg_lo) << cfg.FormatSummary();
+  EXPECT_TRUE(saw_subreg_hi) << cfg.FormatSummary();
+
+  class O0DiSubregProfileProvider final : public gcc_harness::SubfunctionInverseProvider {
+   public:
+    explicit O0DiSubregProfileProvider(const CompilationProfile* profile) : profile_(profile) {}
+    RtlControlFlowGraph InvertFinalScanInsnStream(absl::Span<const std::string> asm_lines_x,
+                                                  const RtlSidebandState& sb) const override {
+      return lifter::InvertFinalScanInsnLinesToCfg(asm_lines_x, sb, {}, {}, profile_);
+    }
+
+   private:
+    const CompilationProfile* profile_;
+  };
+  O0DiSubregProfileProvider o0_provider(&o0_profile);
+  gcc_harness::RightInverseVerifier o0_verifier(&ctx_, &hooks_, &o0_provider);
+  const auto snap = hooks_.ExecuteSubfunctionBoundary(gcc_harness::SubfunctionId::kFinalScanInsn,
+                                                      cfg, {}, 0, {"-O0", "-mips2", "-mcpu=r4000"});
+  const auto res = o0_verifier.VerifySubfunctionBoundaryRightInverse(snap);
+  EXPECT_TRUE(res.matches) << res.diff_detail;
+}
+
 TEST_F(InvertFinalScanInsnTest, MultiSwitchAndHoistedGlobalsBoundaryRightInverse) {
   constexpr const char* kMultiSwitchSrc = R"(
 extern int g_arr_a[16];
@@ -680,6 +795,230 @@ int multi_switch_final_scan(int n, int x, int y) {
     }
     EXPECT_TRUE(found_snapshot);
   }
+}
+
+class CorruptedFinalScanInsnInverseProvider final : public gcc_harness::SubfunctionInverseProvider {
+ public:
+  std::string InvertFinalScanInsn(std::string_view /*asm_line_x*/) const override {
+    return "(set (reg:SI 3 v1) (plus:SI (reg:SI 4 a0) (reg:SI 5 a1)))";
+  }
+
+  RtlControlFlowGraph InvertFinalScanInsnStream(absl::Span<const std::string> /*asm_lines_x*/,
+                                                const RtlSidebandState& sideband) const override {
+    RtlControlFlowGraph corrupted;
+    corrupted.pass = RtlPassKind::kDbr;
+    corrupted.sideband = sideband;
+    RtlBasicBlock blk;
+    blk.id = 0;
+    blk.instructions = {
+        "(set (reg:SI 2 v0) (const_int 999))",
+        "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+    };
+    blk.SyncRtlInsnsFromInstructions();
+    corrupted.rpo_blocks = {blk};
+    return corrupted;
+  }
+};
+
+TEST_F(InvertFinalScanInsnTest, NegativeVerifierRejectsCorruptedInverseProvider) {
+  CorruptedFinalScanInsnInverseProvider bad_provider;
+  gcc_harness::RightInverseVerifier bad_verifier(&ctx_, &hooks_, &bad_provider);
+
+  const auto good_insn = verifier_.VerifyFinalScanInsnRightInverse("addu\t$2,$4,$5");
+  EXPECT_TRUE(good_insn.matches) << good_insn.diff_detail;
+  const auto bad_insn = bad_verifier.VerifyFinalScanInsnRightInverse("addu\t$2,$4,$5");
+  EXPECT_FALSE(bad_insn.matches);
+  EXPECT_FALSE(bad_insn.diff_detail.empty());
+
+  constexpr std::string_view kSrc = R"(
+int add_pair_for_final_scan(int a, int b) {
+  return a + b + 3;
+}
+)";
+  const auto trace = hooks_.TraceForwardCompilation(kSrc, "add_pair_for_final_scan",
+                                                    {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"},
+                                                    "add_pair_for_final_scan");
+  bool found_snapshot = false;
+  for (const auto& snap : trace.subfunction_snapshots) {
+    if (snap.subfunction_id != gcc_harness::SubfunctionId::kFinalScanInsn) {
+      continue;
+    }
+    found_snapshot = true;
+    EXPECT_TRUE(verifier_.VerifySubfunctionBoundaryRightInverse(snap).matches);
+    const auto bad_stream = bad_verifier.VerifySubfunctionBoundaryRightInverse(snap);
+    EXPECT_FALSE(bad_stream.matches);
+    EXPECT_FALSE(bad_stream.diff_detail.empty());
+  }
+  EXPECT_TRUE(found_snapshot);
+}
+
+TEST_F(InvertFinalScanInsnTest,
+       RecoversO0FinalScanAndMultiUseSubwordZeroExtendAndScalarCallReturn) {
+  // 1. `-O0 -mips1` GP32 `DImode` zero store and signed division trap sequence
+  //    reconstructed in Stage 0 (`reconstruct_o0_final_scan`).
+  {
+    constexpr std::string_view kO0Src = R"(
+int clear_pair_and_divide(long long* dst, int num, int den) {
+  *dst = 0LL;
+  return num / den;
+}
+)";
+    const auto trace = hooks_.TraceForwardCompilation(
+        kO0Src, "clear_pair_and_divide", {"-O0", "-mips1", "-Wa,-g"}, "clear_pair_and_divide");
+    bool found = false;
+    for (const auto& snap : trace.subfunction_snapshots) {
+      if (snap.subfunction_id == gcc_harness::SubfunctionId::kFinalScanInsn) {
+        found = true;
+        const auto res = verifier_.VerifySubfunctionBoundaryRightInverse(snap);
+        EXPECT_TRUE(res.matches) << res.diff_detail;
+      }
+    }
+    EXPECT_TRUE(found);
+  }
+
+  // 2. Multi-use unsigned byte load feeding `zero_extend:SI` and cross-branch
+  //    `(subreg:SI (reg:QI ...) 0)` arithmetic (`-O2 -mips1 -funsigned-char -Wa,-O2`).
+  {
+    constexpr std::string_view kSubwordSrc = R"(
+void fold_ascii_upper(unsigned char* s, int mark) {
+  for (; *s != 0; ++s) {
+    unsigned char c = *s;
+    if (mark != 0) {
+      continue;
+    }
+    if ((unsigned char)(c - 65u) < 26u) {
+      *s = (unsigned char)(c + 32u);
+    }
+  }
+}
+)";
+    const auto trace = hooks_.TraceForwardCompilation(
+        kSubwordSrc, "fold_ascii_upper", {"-O2", "-mips1", "-funsigned-char", "-Wa,-O2"},
+        "fold_ascii_upper");
+    bool found = false;
+    for (const auto& snap : trace.subfunction_snapshots) {
+      if (snap.subfunction_id == gcc_harness::SubfunctionId::kFinalScanInsn) {
+        found = true;
+        const auto res = verifier_.VerifySubfunctionBoundaryRightInverse(snap);
+        EXPECT_TRUE(res.matches) << res.diff_detail;
+      }
+    }
+    EXPECT_TRUE(found);
+  }
+
+  // 3. Discarded scalar `CALL_INSN` return with an unrelated `$3` scratch write on
+  //    an early exit must preserve `(set (reg:SI 2 v0) (call ...))` rather than `DImode`.
+  {
+    constexpr std::string_view kCallSrc = R"(
+extern int side_effect_step(int x);
+int guard_then_discard_call(int* p, int flag) {
+  if (flag == 0) {
+    int v = *p + 7;
+    *p = v;
+    return v ^ 3;
+  }
+  side_effect_step(flag);
+  return 0;
+}
+)";
+    const auto trace =
+        hooks_.TraceForwardCompilation(kCallSrc, "guard_then_discard_call",
+                                       {"-O2", "-mips2", "-Wa,-g"}, "guard_then_discard_call");
+    bool found = false;
+    for (const auto& snap : trace.subfunction_snapshots) {
+      if (snap.subfunction_id == gcc_harness::SubfunctionId::kFinalScanInsn) {
+        found = true;
+        const auto res = verifier_.VerifySubfunctionBoundaryRightInverse(snap);
+        EXPECT_TRUE(res.matches) << res.diff_detail;
+        const CompilationProfile prof{snap.optimize_level, snap.c_flags, snap.gp_symbol_sizes};
+        const RtlControlFlowGraph lifted = InvertFinalScanInsnLinesToCfg(
+            snap.post_asm_lines, snap.post_state.sideband, /*jump_tables=*/{},
+            /*constant_pool=*/{}, &prof);
+        for (const RtlBasicBlock& blk : lifted.rpo_blocks) {
+          for (const std::string& insn : blk.instructions) {
+            if (absl::StrContains(insn, "(call ")) {
+              EXPECT_FALSE(absl::StrContains(insn, "(reg:DI 2 v0)")) << insn;
+            }
+          }
+        }
+      }
+    }
+    EXPECT_TRUE(found);
+  }
+}
+
+TEST_F(InvertFinalScanInsnTest,
+       RecoversPrologueHoistedUnchangingPtrMemFlagAndPropagatesInEntryBlock) {
+  // In `sched2`, a non-volatile general-pointer load `lw $5, 0($4)` can only be hoisted ahead of a
+  // `$sp`-based callee-saved prologue store `sw $31, 20($sp)` when `RTX_UNCHANGING_P(mem) == 1`
+  // (`mem/u`). Verify Stage 0 `InvertFinalScanInsnLinesToCfg` recovers `mem/u` directly in
+  // `.12.dbr` both on the hoisted load (`0($4)`) and on subsequent entry-block reads (`4($4)`)
+  // before `$4` is clobbered by `jal`, while stopping propagation after `jal` clobbers caller-saved
+  // `$4`.
+  const CompilationProfile o2_prof{.optimize_level = 2, .c_flags = {"-O2", "-mips2", "-Wa,-g"}};
+
+  RtlSidebandState sideband;
+  sideband.frame_size_bytes = 24;
+  sideband.outgoing_args_size = 16;
+  sideband.saved_gpr_regnos = {16, 31};
+  sideband.is_leaf_function = false;
+
+  const std::vector<std::string> asm_lines = {
+      "subu\t$sp,$sp,24", "lw\t$5,0($4)", "sw\t$31,20($sp)", "sw\t$16,16($sp)", "lw\t$16,4($4)",
+      "jal\t__callee_0",  "move\t$4,$5",  "lw\t$6,8($4)",    "addu\t$2,$2,$16", "addu\t$2,$2,$6",
+  };
+
+  const RtlControlFlowGraph cfg =
+      InvertFinalScanInsnLinesToCfg(asm_lines, sideband, {}, {}, &o2_prof);
+  ASSERT_EQ(cfg.rpo_blocks.size(), 1u);
+  ASSERT_GE(cfg.rpo_blocks[0].instructions.size(), 7u);
+
+  const auto hoisted_load = ParsePatternAndNotes(cfg.rpo_blocks[0].instructions[1]);
+  ASSERT_TRUE(hoisted_load.ok()) << hoisted_load.status();
+  ASSERT_TRUE(hoisted_load->pattern.IsSet());
+  ASSERT_EQ(hoisted_load->pattern.SetSrc().op, RtlOp::kMem);
+  EXPECT_TRUE(hoisted_load->pattern.SetSrc().flags.unchanging) << cfg.rpo_blocks[0].instructions[1];
+
+  const auto downstream_load = ParsePatternAndNotes(cfg.rpo_blocks[0].instructions[4]);
+  ASSERT_TRUE(downstream_load.ok()) << downstream_load.status();
+  ASSERT_TRUE(downstream_load->pattern.IsSet());
+  ASSERT_EQ(downstream_load->pattern.SetSrc().op, RtlOp::kMem);
+  EXPECT_TRUE(downstream_load->pattern.SetSrc().flags.unchanging)
+      << cfg.rpo_blocks[0].instructions[4];
+
+  // After `jal` clobbers caller-saved `$4`, `lw $6, 8($4)` at index 7 must NOT be marked `mem/u`.
+  ASSERT_GE(cfg.rpo_blocks[0].instructions.size(), 8u);
+  const auto post_call_load = ParsePatternAndNotes(cfg.rpo_blocks[0].instructions[7]);
+  ASSERT_TRUE(post_call_load.ok()) << post_call_load.status();
+  ASSERT_TRUE(post_call_load->pattern.IsSet());
+  ASSERT_EQ(post_call_load->pattern.SetSrc().op, RtlOp::kMem);
+  EXPECT_FALSE(post_call_load->pattern.SetSrc().flags.unchanging)
+      << cfg.rpo_blocks[0].instructions[7];
+
+  // Also test on a forward-compiled `const` struct pointer function with a call.
+  constexpr std::string_view kConstSrc = R"(
+struct Pair {
+  const int a;
+  const int b;
+};
+extern int ext_transform(int x);
+int sum_const_pair_impl(const struct Pair* p) {
+  int x = p->a;
+  int y = p->b;
+  return ext_transform(x) + y;
+}
+)";
+  const auto trace = hooks_.TraceForwardCompilation(
+      kConstSrc, "sum_const_pair_impl", {"-O2", "-mips2", "-Wa,-g"}, "sum_const_pair_impl");
+  bool found = false;
+  for (const auto& snap : trace.subfunction_snapshots) {
+    if (snap.subfunction_id == gcc_harness::SubfunctionId::kFinalScanInsn) {
+      found = true;
+      const auto res = verifier_.VerifySubfunctionBoundaryRightInverse(snap);
+      EXPECT_TRUE(res.matches) << res.diff_detail;
+    }
+  }
+  EXPECT_TRUE(found);
 }
 
 class InvertFinalScanInsnRoundTripTest : public ::testing::TestWithParam<RoundTripTestCase> {

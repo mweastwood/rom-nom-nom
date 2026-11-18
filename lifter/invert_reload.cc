@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -14,6 +15,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_format.h"
+#include "absl/types/span.h"
 #include "core/compiler_flags.h"
 #include "core/rtl_cfg.h"
 #include "core/rtl_expr.h"
@@ -723,6 +725,7 @@ struct CallerSaveHardSaveLift {
   int hard_regno = -1;
   int target_pseudo = -1;
   RtlMachineMode mode = RtlMachineMode::kSI;
+  std::vector<size_t> hard_restore_indices;
 };
 
 struct CallerSaveHardRestoreMove {
@@ -793,6 +796,153 @@ CallerSaveBlockPlan PlanCallerSaveInBlock(size_t block_idx,
     return block_idx == 0;
   };
 
+  // When `caller-save.c:insert_save_restore` saves and restores a hard register
+  // carrying a flag-bearing pseudo (`reg/v`, `reg/s`, or `reg/u`), its emitted
+  // `regno_reg_rtx[hr]` operands carry empty `RtlFlags`, causing `InvertAlterReg`
+  // to pin both the pre-call and post-call webs on hard register `hr`. Verify
+  // that both sides can be cleanly lifted to a single cross-call pseudo.
+  auto can_lift_flagged_hard_save_and_restore = [&](size_t save_idx, size_t restore_idx, int hr,
+                                                    int nregs, RtlMachineMode mode) -> bool {
+    if (!can_lift_pre_call_hard_save(save_idx, hr, nregs, mode)) {
+      return false;
+    }
+    const absl::flat_hash_map<int, int> empty_renum;
+    auto check_read_expr = [&](const RtlExpr& root, bool* saw_read, bool* saw_flagged) -> bool {
+      bool ok = true;
+      auto inspect_elem = [&](const RtlExpr& elem) {
+        if (elem.op == RtlOp::kUse || elem.op == RtlOp::kClobber) {
+          return;
+        }
+        auto visit_node = [&](const RtlExpr& node) {
+          if (!ok || !node.IsHardReg()) {
+            return;
+          }
+          const int r = node.RegNo();
+          const int nw = std::max(1, MipsHardRegNregs(r, node.mode, gp64, fp64));
+          if (r < hr + nregs && hr < r + nw) {
+            if (r != hr || node.mode != mode) {
+              ok = false;
+              return;
+            }
+            *saw_read = true;
+            if (node.flags.volatil || node.flags.in_struct || node.flags.unchanging) {
+              *saw_flagged = true;
+            }
+          }
+        };
+        if (elem.op == RtlOp::kSet && !elem.children.empty()) {
+          const RtlExpr& dst = elem.children[0];
+          if (dst.op == RtlOp::kMem) {
+            dst.Visit(visit_node);
+          } else if ((dst.op == RtlOp::kZeroExtract || dst.op == RtlOp::kSignExtract) &&
+                     dst.children.size() >= 3) {
+            for (size_t k = 1; k < dst.children.size(); ++k) {
+              dst.children[k].Visit(visit_node);
+            }
+          }
+          for (size_t k = 1; k < elem.children.size(); ++k) {
+            elem.children[k].Visit(visit_node);
+          }
+          return;
+        }
+        elem.Visit(visit_node);
+      };
+      if (root.op == RtlOp::kParallel) {
+        for (const RtlExpr& elem : root.children) {
+          inspect_elem(elem);
+        }
+      } else {
+        inspect_elem(root);
+      }
+      return ok;
+    };
+    auto touches_hr_range = [&](const RtlExpr& root) -> bool {
+      bool found = false;
+      root.Visit([&](const RtlExpr& node) {
+        if (node.IsHardReg()) {
+          const int r = node.RegNo();
+          const int nw = std::max(1, MipsHardRegNregs(r, node.mode, gp64, fp64));
+          if (r < hr + nregs && hr < r + nw) {
+            found = true;
+          }
+        }
+      });
+      return found;
+    };
+
+    bool saw_flagged = false;
+    bool unused_pre_read = false;
+    for (int idx = static_cast<int>(save_idx) - 1; idx >= 0; --idx) {
+      const RtlPatternAndNotes& prev = insns[static_cast<size_t>(idx)];
+      for (const RtlExpr& fu : prev.call_fusage) {
+        if (touches_hr_range(fu)) {
+          return false;
+        }
+      }
+      bool writes_range = false;
+      for (int k = 0; k < nregs; ++k) {
+        if (InsnWritesOrClobbersRegOrEffHr(prev.pattern, empty_renum, gp64, fp64, hr + k, hr + k)) {
+          writes_range = true;
+          break;
+        }
+      }
+      if (writes_range) {
+        if (prev.pattern.IsSet() && prev.pattern.SetDest().IsHardReg() &&
+            prev.pattern.SetDest().RegNo() == hr && prev.pattern.SetDest().mode == mode) {
+          const RtlFlags& df = prev.pattern.SetDest().flags;
+          if (df.volatil || df.in_struct || df.unchanging) {
+            saw_flagged = true;
+          }
+        }
+        break;
+      }
+      if (!check_read_expr(prev.pattern, &unused_pre_read, &saw_flagged)) {
+        return false;
+      }
+    }
+
+    bool saw_post_read = false;
+    bool terminated = false;
+    for (size_t m = restore_idx + 1; m < insns.size(); ++m) {
+      const RtlPatternAndNotes& post = insns[m];
+      if (post.pattern.op == RtlOp::kUse && touches_hr_range(post.pattern)) {
+        return false;
+      }
+      for (const RtlExpr& fu : post.call_fusage) {
+        if (touches_hr_range(fu)) {
+          return false;
+        }
+      }
+      if (!check_read_expr(post.pattern, &saw_post_read, &saw_flagged)) {
+        return false;
+      }
+      int writes_count = 0;
+      for (int k = 0; k < nregs; ++k) {
+        if (InsnWritesOrClobbersRegOrEffHr(post.pattern, empty_renum, gp64, fp64, hr + k, hr + k)) {
+          ++writes_count;
+        }
+      }
+      if (writes_count == nregs) {
+        terminated = true;
+        break;
+      }
+      if (writes_count > 0) {
+        return false;
+      }
+      for (const RtlRegNote& note : post.reg_notes) {
+        if (note.kind == RtlMachineMode::kRegDead && note.datum.IsHardReg() &&
+            note.datum.RegNo() == hr && note.datum.mode == mode) {
+          terminated = true;
+          break;
+        }
+      }
+      if (terminated || IsControlFlowBoundaryPattern(post.pattern)) {
+        break;
+      }
+    }
+    return saw_post_read && saw_flagged && terminated;
+  };
+
   struct SaveWordInfo {
     size_t save_insn_idx = 0;
     size_t call_insn_idx = 0;
@@ -853,9 +1003,15 @@ CallerSaveBlockPlan PlanCallerSaveInBlock(size_t block_idx,
           const bool save_is_pseudo = save_regno >= kFirstPseudoRegister;
           const bool rest_is_pseudo = r_rest >= kFirstPseudoRegister;
           const bool hr_already_crosses_call = rtl_cross_call_hrs.contains(hr);
+          bool lift_both_hard_webs = false;
           if (!save_is_pseudo && !rest_is_pseudo) {
             if (!hr_already_crosses_call) {
-              all_match = false;
+              if (nregs == needs_restore[hr].total_words &&
+                  can_lift_flagged_hard_save_and_restore(save_idx, i, hr, nregs, dst.mode)) {
+                lift_both_hard_webs = true;
+              } else {
+                all_match = false;
+              }
             }
           } else if (save_is_pseudo != rest_is_pseudo) {
             if (hr_already_crosses_call || nregs != needs_restore[hr].total_words) {
@@ -906,6 +1062,17 @@ CallerSaveBlockPlan PlanCallerSaveInBlock(size_t block_idx,
                   .src_pseudo = save_regno,
                   .mode = dst.mode,
               });
+            } else if (lift_both_hard_webs) {
+              restore_indices_per_save[save_idx].push_back(i);
+              auto [lift_it, _] =
+                  hard_save_lift_per_save.try_emplace(save_idx, CallerSaveHardSaveLift{
+                                                                    .save_insn_idx = save_idx,
+                                                                    .call_insn_idx = call_idx,
+                                                                    .hard_regno = save_regno,
+                                                                    .target_pseudo = -1,
+                                                                    .mode = dst.mode,
+                                                                });
+              lift_it->second.hard_restore_indices.push_back(i);
             } else {
               restore_indices_per_save[save_idx].push_back(i);
             }
@@ -1085,7 +1252,8 @@ struct CallerSaveReversalOutcome {
 CallerSaveReversalOutcome ReverseCallerSaveAcrossCfg(
     const ParsedCompilerFlags& parsed_flags, const MipsReloadFrameLayout& layout,
     bool frame_pointer_needed, int frame_size_bytes,
-    const absl::flat_hash_set<int>& rtl_cross_call_hrs,
+    const absl::flat_hash_set<int>& rtl_cross_call_hrs, int* max_existing_regno,
+    absl::flat_hash_map<int, RtlMachineMode>* pseudo_widest_mode,
     std::vector<std::vector<RtlPatternAndNotes>>* all_parsed_blocks,
     absl::flat_hash_map<int, int>* reg_renumber) {
   CallerSaveReversalOutcome outcome;
@@ -1154,6 +1322,16 @@ CallerSaveReversalOutcome ReverseCallerSaveAcrossCfg(
               overlaps = true;
               break;
             }
+            for (const RtlRegNote& note : insn.reg_notes) {
+              if (ExprOverlapsByteInterval(note.datum, frame_pointer_needed, layout.elim_to_reg,
+                                           pre_cs_top, max_frame_top)) {
+                overlaps = true;
+                break;
+              }
+            }
+            if (overlaps) {
+              break;
+            }
           }
         }
         if (!overlaps) {
@@ -1166,7 +1344,9 @@ CallerSaveReversalOutcome ReverseCallerSaveAcrossCfg(
   }
 
   // Filter out any candidate `hr` whose stack interval `[off, off + sz)` is
-  // touched by ANY non-dropped instruction or `REG_NOTE` anywhere in the CFG.
+  // touched by ANY non-dropped instruction or ANY `REG_NOTE` anywhere in the
+  // CFG (`caller-save` never places `MEM` in `REG_NOTES`; only `alter_reg`
+  // rewrites `REG_DEAD` / `REG_UNUSED` in-place to `MEM`).
   absl::flat_hash_set<int> invalid_hrs;
   for (const auto& [hr, bound] : global_hr_bounds) {
     const int64_t lo = bound.first;
@@ -1174,14 +1354,6 @@ CallerSaveReversalOutcome ReverseCallerSaveAcrossCfg(
     for (size_t b = 0; b < all_parsed_blocks->size(); ++b) {
       const auto& blk_insns = (*all_parsed_blocks)[b];
       for (size_t i = 0; i < blk_insns.size(); ++i) {
-        if (block_plans[b].drop_insn[i] || block_plans[b].replaced_caller_save_insn[i]) {
-          continue;
-        }
-        if (ExprOverlapsByteInterval(blk_insns[i].pattern, frame_pointer_needed, layout.elim_to_reg,
-                                     lo, hi)) {
-          invalid_hrs.insert(hr);
-          break;
-        }
         for (const RtlRegNote& note : blk_insns[i].reg_notes) {
           if (ExprOverlapsByteInterval(note.datum, frame_pointer_needed, layout.elim_to_reg, lo,
                                        hi)) {
@@ -1190,6 +1362,14 @@ CallerSaveReversalOutcome ReverseCallerSaveAcrossCfg(
           }
         }
         if (invalid_hrs.contains(hr)) {
+          break;
+        }
+        if (block_plans[b].drop_insn[i] || block_plans[b].replaced_caller_save_insn[i]) {
+          continue;
+        }
+        if (ExprOverlapsByteInterval(blk_insns[i].pattern, frame_pointer_needed, layout.elim_to_reg,
+                                     lo, hi)) {
+          invalid_hrs.insert(hr);
           break;
         }
       }
@@ -1259,6 +1439,12 @@ CallerSaveReversalOutcome ReverseCallerSaveAcrossCfg(
     for (size_t b = 0; b < all_parsed_blocks->size(); ++b) {
       const auto& blk_insns = (*all_parsed_blocks)[b];
       for (size_t i = 0; i < blk_insns.size(); ++i) {
+        for (const RtlRegNote& note : blk_insns[i].reg_notes) {
+          if (ExprOverlapsByteInterval(note.datum, frame_pointer_needed, layout.elim_to_reg,
+                                       pre_cs_top, min_off)) {
+            return outcome;
+          }
+        }
         if (block_plans[b].drop_insn[i] || block_plans[b].replaced_caller_save_insn[i]) {
           continue;
         }
@@ -1349,10 +1535,11 @@ CallerSaveReversalOutcome ReverseCallerSaveAcrossCfg(
       }
     };
 
-    for (const CallerSaveHardSaveLift& lift : block_plans[b].hard_save_lifts) {
-      const int p_dst =
-          parent.contains(lift.target_pseudo) ? find_root(lift.target_pseudo) : lift.target_pseudo;
-      outcome.unified_pseudos.insert(p_dst);
+    std::vector<CallerSaveHardSaveLift> sorted_lifts = block_plans[b].hard_save_lifts;
+    std::sort(sorted_lifts.begin(), sorted_lifts.end(),
+              [](const auto& a, const auto& c) { return a.save_insn_idx < c.save_insn_idx; });
+    absl::flat_hash_map<int, int> fresh_pseudo_by_hr;
+    for (const CallerSaveHardSaveLift& lift : sorted_lifts) {
       const int nregs =
           std::max(1, MipsHardRegNregs(lift.hard_regno, lift.mode, layout.gp64, layout.fp64));
 
@@ -1374,22 +1561,42 @@ CallerSaveReversalOutcome ReverseCallerSaveAcrossCfg(
         }
       }
 
+      int p_dst = -1;
+      if (lift.target_pseudo >= kFirstPseudoRegister) {
+        p_dst = parent.contains(lift.target_pseudo) ? find_root(lift.target_pseudo)
+                                                    : lift.target_pseudo;
+      } else if (def_idx.has_value() && block_plans[b].drop_insn[*def_idx] &&
+                 fresh_pseudo_by_hr.contains(lift.hard_regno)) {
+        p_dst = fresh_pseudo_by_hr.at(lift.hard_regno);
+      } else {
+        *max_existing_regno = std::max(kFirstPseudoRegister - 1, *max_existing_regno) + 1;
+        p_dst = *max_existing_regno;
+        fresh_pseudo_by_hr[lift.hard_regno] = p_dst;
+        (*reg_renumber)[p_dst] = lift.hard_regno;
+        if (pseudo_widest_mode != nullptr) {
+          (*pseudo_widest_mode)[p_dst] = lift.mode;
+        }
+      }
+      outcome.unified_pseudos.insert(p_dst);
+
       size_t rewrite_from = 0;
       if (def_idx.has_value()) {
         rewrite_from = *def_idx + 1;
-        RtlPatternAndNotes& def_insn = blk_insns[*def_idx];
-        if (!IsCallPattern(def_insn.pattern) && def_insn.pattern.IsSet() &&
-            def_insn.pattern.SetDest().IsHardReg() &&
-            def_insn.pattern.SetDest().RegNo() == lift.hard_regno &&
-            def_insn.pattern.SetDest().mode == lift.mode) {
-          def_insn.pattern.MutableSetDest() =
-              RtlExpr::MakeReg(lift.mode, p_dst, def_insn.pattern.SetDest().flags);
-          RemoveDeadOrUnusedNotesForReg(&def_insn.reg_notes, lift.hard_regno);
-        } else {
-          insert_after[*def_idx].push_back(RtlPatternAndNotes{
-              .pattern = RtlExpr::MakeSet(RtlExpr::MakeReg(lift.mode, p_dst),
-                                          RtlExpr::MakeReg(lift.mode, lift.hard_regno)),
-          });
+        if (!block_plans[b].drop_insn[*def_idx]) {
+          RtlPatternAndNotes& def_insn = blk_insns[*def_idx];
+          if (!IsCallPattern(def_insn.pattern) && def_insn.pattern.IsSet() &&
+              def_insn.pattern.SetDest().IsHardReg() &&
+              def_insn.pattern.SetDest().RegNo() == lift.hard_regno &&
+              def_insn.pattern.SetDest().mode == lift.mode) {
+            def_insn.pattern.MutableSetDest() =
+                RtlExpr::MakeReg(lift.mode, p_dst, def_insn.pattern.SetDest().flags);
+            RemoveDeadOrUnusedNotesForReg(&def_insn.reg_notes, lift.hard_regno);
+          } else {
+            insert_after[*def_idx].push_back(RtlPatternAndNotes{
+                .pattern = RtlExpr::MakeSet(RtlExpr::MakeReg(lift.mode, p_dst),
+                                            RtlExpr::MakeReg(lift.mode, lift.hard_regno)),
+            });
+          }
         }
       } else {
         insert_before[0].push_back(RtlPatternAndNotes{
@@ -1421,6 +1628,37 @@ CallerSaveReversalOutcome ReverseCallerSaveAcrossCfg(
       if (!overwritten_before_call && lift.call_insn_idx < blk_insns.size()) {
         rewrite_read_hr_to_pseudo(&blk_insns[lift.call_insn_idx].pattern, lift.hard_regno,
                                   lift.mode, p_dst);
+      }
+      for (size_t rest_idx : lift.hard_restore_indices) {
+        block_plans[b].drop_insn[rest_idx] = true;
+        for (size_t m = rest_idx + 1; m < blk_insns.size(); ++m) {
+          if (block_plans[b].drop_insn[m] || block_plans[b].replaced_caller_save_insn[m]) {
+            continue;
+          }
+          rewrite_read_hr_to_pseudo(&blk_insns[m].pattern, lift.hard_regno, lift.mode, p_dst);
+          for (RtlRegNote& note : blk_insns[m].reg_notes) {
+            if (note.kind != RtlMachineMode::kRegDead && note.kind != RtlMachineMode::kRegUnused) {
+              note.datum.Mutate([&](RtlExpr& node) {
+                if (node.IsHardReg() && node.RegNo() == lift.hard_regno && node.mode == lift.mode) {
+                  node = RtlExpr::MakeReg(lift.mode, p_dst, node.flags);
+                }
+              });
+            }
+          }
+          RemoveDeadOrUnusedNotesForReg(&blk_insns[m].reg_notes, lift.hard_regno);
+          bool overwritten_post = false;
+          for (int k = 0; k < nregs; ++k) {
+            if (InsnWritesOrClobbersRegOrEffHr(blk_insns[m].pattern, empty_renum, layout.gp64,
+                                               layout.fp64, lift.hard_regno + k,
+                                               lift.hard_regno + k)) {
+              overwritten_post = true;
+              break;
+            }
+          }
+          if (overwritten_post || IsControlFlowBoundaryPattern(blk_insns[m].pattern)) {
+            break;
+          }
+        }
       }
       block_plans[b].drop_insn[lift.save_insn_idx] = true;
     }
@@ -1482,18 +1720,22 @@ CallerSaveReversalOutcome ReverseCallerSaveAcrossCfg(
   // `caller-save` (e.g. if `new_spill_reg` allocated a slot above `caller-save`).
   int64_t max_surviving_local_end = pre_cs_top;
   const int64_t post_var_limit = layout.starting_frame_offset + layout.post_reload_var_size;
+  auto record_surviving_mem = [&](const RtlExpr& node) {
+    if (node.op == RtlOp::kMem && node.children.size() == 1) {
+      std::optional<int64_t> off = MatchStackSlotAddrOffset(node.children[0], frame_pointer_needed,
+                                                            layout.starting_frame_offset);
+      if (off.has_value() && *off < post_var_limit) {
+        max_surviving_local_end =
+            std::max<int64_t>(max_surviving_local_end, *off + MipsModeByteSize(node.mode));
+      }
+    }
+  };
   for (const auto& blk_insns : *all_parsed_blocks) {
     for (const RtlPatternAndNotes& insn : blk_insns) {
-      insn.pattern.Visit([&](const RtlExpr& node) {
-        if (node.op == RtlOp::kMem && node.children.size() == 1) {
-          std::optional<int64_t> off = MatchStackSlotAddrOffset(
-              node.children[0], frame_pointer_needed, layout.starting_frame_offset);
-          if (off.has_value() && *off < post_var_limit) {
-            max_surviving_local_end =
-                std::max<int64_t>(max_surviving_local_end, *off + MipsModeByteSize(node.mode));
-          }
-        }
-      });
+      insn.pattern.Visit(record_surviving_mem);
+      for (const RtlRegNote& note : insn.reg_notes) {
+        note.datum.Visit(record_surviving_mem);
+      }
     }
   }
   outcome.pre_caller_save_top = std::max(pre_cs_top, max_surviving_local_end);
@@ -2462,14 +2704,28 @@ SpillReversalOutcome ReconstructSpilledPseudosAcrossCfg(
   struct EightByteSlotInfo {
     bool invalidated = false;
     bool has_access = false;
+    bool has_load = false;
+    bool has_store = false;
+    bool has_liveness_note = false;
     RtlMachineMode mode = RtlMachineMode::kNone;
     int64_t exact_offset = -1;
   };
   const int num_slots = static_cast<int>(rel_top / 8);
   std::vector<EightByteSlotInfo> slots(num_slots);
+  int min_escaped_slot = num_slots;
 
-  auto analyze_expr = [&](const RtlExpr& root) {
-    auto walk = [&](auto& self, const RtlExpr& expr, bool inside_mem_addr) -> void {
+  auto analyze_expr = [&](const RtlExpr& root, bool in_reg_note, bool is_liveness_note) {
+    auto walk = [&](auto& self, const RtlExpr& expr, bool inside_mem_addr,
+                    bool is_set_dest) -> void {
+      if (expr.op == RtlOp::kSet && expr.children.size() == 2) {
+        self(self, expr.children[0], /*inside_mem_addr=*/false, /*is_set_dest=*/true);
+        self(self, expr.children[1], /*inside_mem_addr=*/false, /*is_set_dest=*/false);
+        return;
+      }
+      if (expr.op == RtlOp::kClobber && !expr.children.empty()) {
+        self(self, expr.children[0], /*inside_mem_addr=*/false, /*is_set_dest=*/true);
+        return;
+      }
       if (expr.op == RtlOp::kMem && expr.children.size() == 1) {
         std::optional<int64_t> off = MatchStackSlotAddrOffset(
             expr.children[0], frame_pointer_needed, layout.starting_frame_offset);
@@ -2501,9 +2757,18 @@ SpillReversalOutcome ReconstructSpilledPseudosAcrossCfg(
           } else if (info.mode != expr.mode || info.exact_offset != *off) {
             info.invalidated = true;
           }
+          if (is_liveness_note) {
+            info.has_liveness_note = true;
+          } else if (!in_reg_note) {
+            if (is_set_dest) {
+              info.has_store = true;
+            } else {
+              info.has_load = true;
+            }
+          }
           return;
         }
-        self(self, expr.children[0], /*inside_mem_addr=*/true);
+        self(self, expr.children[0], /*inside_mem_addr=*/true, /*is_set_dest=*/false);
         return;
       }
       if (!inside_mem_addr) {
@@ -2513,26 +2778,38 @@ SpillReversalOutcome ReconstructSpilledPseudosAcrossCfg(
           const int s = static_cast<int>((*addr_off - layout.starting_frame_offset) / 8);
           if (s >= 0 && s < num_slots) {
             slots[s].invalidated = true;
+            min_escaped_slot = std::min(min_escaped_slot, s);
           }
           return;
         }
       }
-      for (const RtlExpr& child : expr.children) {
-        self(self, child, inside_mem_addr);
+      const bool pass_dest =
+          is_set_dest && (expr.op == RtlOp::kSubreg || expr.op == RtlOp::kStrictLowPart ||
+                          expr.op == RtlOp::kZeroExtract || expr.op == RtlOp::kSignExtract);
+      for (size_t ci = 0; ci < expr.children.size(); ++ci) {
+        self(self, expr.children[ci], inside_mem_addr, pass_dest && ci == 0);
       }
     };
-    walk(walk, root, /*inside_mem_addr=*/false);
+    walk(walk, root, /*inside_mem_addr=*/false, /*is_set_dest=*/false);
   };
 
   for (const auto& blk_insns : *all_parsed_blocks) {
     for (const RtlPatternAndNotes& insn : blk_insns) {
-      analyze_expr(insn.pattern);
+      analyze_expr(insn.pattern, /*in_reg_note=*/false, /*is_liveness_note=*/false);
       for (const RtlRegNote& note : insn.reg_notes) {
-        analyze_expr(note.datum);
+        const bool is_live_note =
+            (note.kind == RtlMachineMode::kRegDead || note.kind == RtlMachineMode::kRegUnused);
+        analyze_expr(note.datum, /*in_reg_note=*/true, is_live_note);
       }
       for (const RtlExpr& fu : insn.call_fusage) {
-        analyze_expr(fu);
+        analyze_expr(fu, /*in_reg_note=*/false, /*is_liveness_note=*/false);
       }
+    }
+  }
+
+  for (int s = min_escaped_slot; s < num_slots; ++s) {
+    if (slots[s].has_store && !slots[s].has_load && !slots[s].has_liveness_note) {
+      slots[s].invalidated = true;
     }
   }
 
@@ -2831,6 +3108,14 @@ bool ReverseEliminateRegsInExpr(RtlExpr* expr, bool inside_mem, bool frame_point
   return changed;
 }
 
+bool IsHardRegRangeDeadAfterInsn(
+    const std::vector<std::vector<RtlPatternAndNotes>>& all_parsed_blocks,
+    const std::vector<RtlBasicBlock>& rpo_blocks, size_t block_idx,
+    const std::vector<RtlPatternAndNotes>& cur_insns, size_t after_idx,
+    const std::vector<bool>* cur_dropped, int start_hr, int nwords,
+    const absl::flat_hash_map<int, int>& reg_renumber, bool gp64, bool fp64,
+    bool check_implicit_return_regs = true);
+
 // Reverses `reload1.c:emit_reload_insns` / `subst_reloads` for earlyclobber
 // `(clobber (reg:M ...))` operands in a `PARALLEL` instruction where `reload`
 // substituted a reload register `r_reload` into `(clobber (reg:M r_reload))`
@@ -2838,7 +3123,10 @@ bool ReverseEliminateRegsInExpr(RtlExpr* expr, bool inside_mem, bool frame_point
 // `PARALLEL`. Supports both raw hard-register post-states and `InvertAlterReg`
 // pseudo-lifted post-states.
 void ReverseParallelClobberOutputReloads(
-    std::vector<RtlPatternAndNotes>* insns, const absl::flat_hash_map<int, int>& reg_renumber,
+    const std::vector<std::vector<RtlPatternAndNotes>>& all_parsed_blocks,
+    const std::vector<RtlBasicBlock>& rpo_blocks, size_t block_idx,
+    std::vector<RtlPatternAndNotes>* insns, int opt_level, bool gp64, bool fp64,
+    const absl::flat_hash_map<int, int>& reg_renumber,
     const absl::flat_hash_map<int, PseudoUseSummary>& summaries,
     absl::flat_hash_set<int>* reversed_reload_regs, absl::flat_hash_set<int>* proven_spill_regs,
     absl::flat_hash_set<int>* folded_scratch_pseudos,
@@ -2883,9 +3171,95 @@ void ReverseParallelClobberOutputReloads(
         }
       }
 
+      bool consumed_set_dest_reload = false;
+      if (i + 1 < insns->size() && !current.pattern.children.empty() &&
+          current.pattern.children[0].op == RtlOp::kSet &&
+          current.pattern.children[0].children.size() == 2) {
+        const RtlExpr& set_dst = current.pattern.children[0].children[0];
+        const RtlExpr& set_rhs = current.pattern.children[0].children[1];
+        const RtlPatternAndNotes& mv = (*insns)[i + 1];
+        if (set_dst.op == RtlOp::kReg && !set_dst.IsArgPointerReg() &&
+            InsnHasOnlyDeadOrUnusedNotes(mv) && mv.pattern.op == RtlOp::kSet &&
+            mv.pattern.children.size() == 2) {
+          const RtlExpr& dst = mv.pattern.children[0];
+          const RtlExpr& src = mv.pattern.children[1];
+          if (dst.op == RtlOp::kReg && src.op == RtlOp::kReg && !dst.IsArgPointerReg() &&
+              !src.IsArgPointerReg() && (opt_level > 0 || !dst.flags.integrated) &&
+              dst.mode == set_dst.mode && src.mode == set_dst.mode &&
+              src.RegNo() == set_dst.RegNo()) {
+            const int orig_hr = EffectiveHardReg(dst.RegNo(), reg_renumber);
+            const int reload_hr = EffectiveHardReg(src.RegNo(), reg_renumber);
+            const int nw = (dst.mode == RtlMachineMode::kDi) ? 2 : 1;
+            bool scratch_single_use = false;
+            if (src.IsPseudoReg()) {
+              auto sum_it = summaries.find(src.RegNo());
+              scratch_single_use = sum_it != summaries.end() && !sum_it->second.multi_block &&
+                                   sum_it->second.def_count == 1 && sum_it->second.use_count == 1;
+            } else if (src.IsHardReg() && reload_hr >= 2 && reload_hr < 32 &&
+                       mv.reg_notes.empty()) {
+              scratch_single_use = IsHardRegRangeDeadAfterInsn(
+                  all_parsed_blocks, rpo_blocks, block_idx, *insns, i + 1,
+                  /*cur_dropped=*/nullptr, reload_hr, nw, reg_renumber, gp64, fp64);
+            }
+            bool clobber_overlaps_orig = false;
+            for (int w = 0; w < nw; ++w) {
+              if (clobber_hr_to_child_idx.contains(orig_hr + w)) {
+                clobber_overlaps_orig = true;
+              }
+            }
+            bool earlyclobber_triggered = false;
+            if (orig_hr >= 2 && orig_hr < 32 && reload_hr >= 2 && reload_hr < 32 &&
+                orig_hr != reload_hr && scratch_single_use && !clobber_overlaps_orig) {
+              const bool is_di_bin_or_shift =
+                  dst.mode == RtlMachineMode::kDi &&
+                  (set_rhs.op == RtlOp::kPlus || set_rhs.op == RtlOp::kMinus ||
+                   set_rhs.op == RtlOp::kAshift || set_rhs.op == RtlOp::kAshiftrt ||
+                   set_rhs.op == RtlOp::kLshiftrt);
+              const bool plus_imm_same_orig =
+                  set_rhs.op == RtlOp::kPlus && set_rhs.children.size() == 2 &&
+                  set_rhs.children[0].op == RtlOp::kReg && !set_rhs.children[0].IsArgPointerReg() &&
+                  EffectiveHardReg(set_rhs.children[0].RegNo(), reg_renumber) == orig_hr &&
+                  set_rhs.children[1].op == RtlOp::kConstInt;
+              if ((is_di_bin_or_shift && !plus_imm_same_orig) || set_rhs.op == RtlOp::kFfs) {
+                set_rhs.Visit([&](const RtlExpr& n) {
+                  if (n.op == RtlOp::kReg && !n.IsArgPointerReg()) {
+                    const int in_hr = EffectiveHardReg(n.RegNo(), reg_renumber);
+                    const int in_nw = (n.mode == RtlMachineMode::kDi) ? 2 : 1;
+                    if (in_hr >= 0 &&
+                        std::max(orig_hr, in_hr) < std::min(orig_hr + nw, in_hr + in_nw)) {
+                      earlyclobber_triggered = true;
+                    }
+                  }
+                });
+              }
+            }
+            if (earlyclobber_triggered) {
+              current.pattern.children[0].children[0] = dst;
+              if (reversed_reload_regs != nullptr) {
+                for (int w = 0; w < nw; ++w) {
+                  reversed_reload_regs->insert(reload_hr + w);
+                }
+              }
+              if (proven_spill_regs != nullptr) {
+                for (int w = 0; w < nw; ++w) {
+                  proven_spill_regs->insert(reload_hr + w);
+                }
+              }
+              if (folded_scratch_pseudos != nullptr && src.IsPseudoReg()) {
+                folded_scratch_pseudos->insert(src.RegNo());
+              }
+              if (unified_target_pseudos != nullptr && dst.IsPseudoReg()) {
+                unified_target_pseudos->insert(dst.RegNo());
+              }
+              consumed_set_dest_reload = true;
+            }
+          }
+        }
+      }
+
       std::vector<RtlPatternAndNotes> pre_copies;
       if (!clobber_hr_to_child_idx.empty()) {
-        size_t lookahead = i + 1;
+        size_t lookahead = i + (consumed_set_dest_reload ? 2 : 1);
         while (lookahead < insns->size()) {
           const RtlPatternAndNotes& mv = (*insns)[lookahead];
           if (!InsnHasOnlyDeadOrUnusedNotes(mv) || mv.pattern.op != RtlOp::kSet ||
@@ -2916,33 +3290,36 @@ void ReverseParallelClobberOutputReloads(
           const RtlExpr orig_in_par = orig_it->second;
           bool lifted_addr_pseudo_copy = false;
           if (dst.IsPseudoReg() && !orig_in_par.IsPseudoReg()) {
-            if (!orig_in_par.IsHardReg() || set_dest_hrs.contains(orig_hr) ||
-                current.pattern.children.empty() || current.pattern.children[0].op != RtlOp::kSet) {
-              break;
-            }
             auto dst_sum_it = summaries.find(dst.RegNo());
             if (dst_sum_it == summaries.end() || dst_sum_it->second.multi_block ||
                 dst_sum_it->second.def_count != 1) {
               break;
             }
-            const bool referenced_at_or_before =
-                std::any_of(insns->begin(), insns->begin() + static_cast<std::ptrdiff_t>(i + 1),
-                            [&](const RtlPatternAndNotes& prev) {
-                              return prev.pattern.ContainsReg(dst.RegNo());
-                            });
-            if (referenced_at_or_before ||
-                !ReplaceRegInExpr(&current.pattern.children[0], orig_in_par.RegNo(),
-                                  orig_in_par.mode, dst)) {
-              break;
+            if (dst_sum_it->second.use_count > 0) {
+              if (!orig_in_par.IsHardReg() || set_dest_hrs.contains(orig_hr) ||
+                  current.pattern.children.empty() ||
+                  current.pattern.children[0].op != RtlOp::kSet) {
+                break;
+              }
+              const bool referenced_at_or_before =
+                  std::any_of(insns->begin(), insns->begin() + static_cast<std::ptrdiff_t>(i + 1),
+                              [&](const RtlPatternAndNotes& prev) {
+                                return prev.pattern.ContainsReg(dst.RegNo());
+                              });
+              if (referenced_at_or_before ||
+                  !ReplaceRegInExpr(&current.pattern.children[0], orig_in_par.RegNo(),
+                                    orig_in_par.mode, dst)) {
+                break;
+              }
+              RtlPatternAndNotes pre_copy;
+              pre_copy.pattern = RtlExpr::MakeSet(dst, orig_in_par);
+              pre_copies.push_back(std::move(pre_copy));
+              RemoveDeadOrUnusedNotesForReg(&current.reg_notes, orig_in_par.RegNo());
+              if (unified_target_pseudos != nullptr) {
+                unified_target_pseudos->insert(dst.RegNo());
+              }
+              lifted_addr_pseudo_copy = true;
             }
-            RtlPatternAndNotes pre_copy;
-            pre_copy.pattern = RtlExpr::MakeSet(dst, orig_in_par);
-            pre_copies.push_back(std::move(pre_copy));
-            RemoveDeadOrUnusedNotesForReg(&current.reg_notes, orig_in_par.RegNo());
-            if (unified_target_pseudos != nullptr) {
-              unified_target_pseudos->insert(dst.RegNo());
-            }
-            lifted_addr_pseudo_copy = true;
           }
           const size_t child_idx = clob_it->second;
           current.pattern.children[child_idx].children[0] = orig_in_par;
@@ -2973,6 +3350,8 @@ void ReverseParallelClobberOutputReloads(
           ++lookahead;
         }
         i = lookahead - 1;
+      } else if (consumed_set_dest_reload) {
+        ++i;
       }
       for (auto it = pre_copies.rbegin(); it != pre_copies.rend(); ++it) {
         out.push_back(std::move(*it));
@@ -3044,7 +3423,7 @@ bool IsHardRegRangeDeadAfterInsn(
     const std::vector<RtlPatternAndNotes>& cur_insns, size_t after_idx,
     const std::vector<bool>* cur_dropped, int start_hr, int nwords,
     const absl::flat_hash_map<int, int>& reg_renumber, bool gp64, bool fp64,
-    bool check_implicit_return_regs = true) {
+    bool check_implicit_return_regs) {
   if (start_hr < 0 || nwords <= 0) {
     return false;
   }
@@ -3225,289 +3604,674 @@ int FirstRegPreorderIndex(const RtlExpr& expr, int target_regno) {
   return (found >= 0) ? found : idx;
 }
 
-void ReverseRegisterConstraintReloadsAcrossCfg(
+int CountRegOccurrencesInExpr(const RtlExpr& expr, int target_regno) {
+  int count = 0;
+  expr.Visit([&](const RtlExpr& n) {
+    if (n.op == RtlOp::kReg && !n.IsArgPointerReg() && n.RegNo() == target_regno) {
+      ++count;
+    }
+  });
+  return count;
+}
+
+bool ExprContainsRegInsideMem(const RtlExpr& expr, int target_regno, bool inside_mem) {
+  if (expr.op == RtlOp::kReg && !expr.IsArgPointerReg() && expr.RegNo() == target_regno) {
+    return inside_mem;
+  }
+  const bool next_inside_mem = inside_mem || expr.op == RtlOp::kMem;
+  for (const RtlExpr& ch : expr.children) {
+    if (ExprContainsRegInsideMem(ch, target_regno, next_inside_mem)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool FoldMdGprInputReloads(const std::vector<RtlBasicBlock>& rpo_blocks, int opt_level, bool gp64,
+                           bool fp64, const absl::flat_hash_map<int, int>& reg_renumber,
+                           const absl::flat_hash_map<int, PseudoUseSummary>& summaries,
+                           std::vector<std::vector<RtlPatternAndNotes>>* all_parsed_blocks,
+                           absl::flat_hash_set<int>* reversed_reload_regs,
+                           absl::flat_hash_set<int>* proven_spill_regs,
+                           absl::flat_hash_set<int>* folded_scratch_pseudos,
+                           absl::flat_hash_set<int>* target_note_pseudos) {
+  bool any_folded = false;
+  for (size_t b = 0; b < all_parsed_blocks->size(); ++b) {
+    std::vector<RtlPatternAndNotes>& insns = (*all_parsed_blocks)[b];
+    if (insns.size() < 2) {
+      continue;
+    }
+    std::vector<bool> drop_md_in(insns.size(), false);
+    for (int idx = static_cast<int>(insns.size()) - 2; idx >= 0; --idx) {
+      const size_t i = static_cast<size_t>(idx);
+      if (drop_md_in[i]) {
+        continue;
+      }
+      const RtlPatternAndNotes& in_insn = insns[i];
+      if (in_insn.pattern.op != RtlOp::kSet || in_insn.pattern.children.size() != 2) {
+        continue;
+      }
+      const RtlExpr& r_gpr_expr = in_insn.pattern.children[0];
+      const RtlExpr& p_md_expr = in_insn.pattern.children[1];
+      if (r_gpr_expr.op != RtlOp::kReg || !p_md_expr.IsPseudoReg() ||
+          r_gpr_expr.IsArgPointerReg() || r_gpr_expr.flags.Any() || p_md_expr.flags.Any() ||
+          r_gpr_expr.mode != RtlMachineMode::kSI || p_md_expr.mode != RtlMachineMode::kSI ||
+          !InsnHasOnlyOptionalDeadNoteOn(in_insn, p_md_expr.RegNo())) {
+        continue;
+      }
+      const int r_gpr = r_gpr_expr.RegNo();
+      const int p_md = p_md_expr.RegNo();
+      const int gpr_hr = EffectiveHardReg(r_gpr, reg_renumber);
+      const int md_hr = EffectiveHardReg(p_md, reg_renumber);
+      if (gpr_hr < 2 || gpr_hr >= 32 || (md_hr != 64 && md_hr != 65)) {
+        continue;
+      }
+      if (r_gpr >= kFirstPseudoRegister) {
+        auto sum_it = summaries.find(r_gpr);
+        if (sum_it == summaries.end() || sum_it->second.multi_block ||
+            sum_it->second.def_count != 1 || sum_it->second.use_count != 1) {
+          continue;
+        }
+      }
+
+      for (size_t op_idx = i + 1; op_idx < insns.size(); ++op_idx) {
+        if (drop_md_in[op_idx]) {
+          continue;
+        }
+        RtlPatternAndNotes& op_insn = insns[op_idx];
+        const RtlOp rhs_op =
+            (op_insn.pattern.op == RtlOp::kSet && op_insn.pattern.children.size() == 2)
+                ? op_insn.pattern.children[1].op
+                : RtlOp::kUnknown;
+        const bool is_opt_mem_store =
+            opt_level > 0 && rhs_op == RtlOp::kReg && op_insn.pattern.op == RtlOp::kSet &&
+            !op_insn.pattern.children.empty() && op_insn.pattern.children[0].op == RtlOp::kMem;
+        const bool unsupported_rhs_op = (!is_opt_mem_store && rhs_op == RtlOp::kReg) ||
+                                        rhs_op == RtlOp::kMem || rhs_op == RtlOp::kDiv ||
+                                        rhs_op == RtlOp::kUdiv || rhs_op == RtlOp::kMod ||
+                                        rhs_op == RtlOp::kUmod || rhs_op == RtlOp::kMult;
+        if (op_insn.pattern.op == RtlOp::kSet && op_insn.pattern.children.size() == 2 &&
+            !IsCallPattern(op_insn.pattern) && !IsControlFlowBoundaryPattern(op_insn.pattern) &&
+            !unsupported_rhs_op && !op_insn.pattern.children[0].ContainsReg(r_gpr) &&
+            CountRegOccurrencesInExpr(op_insn.pattern.children[1], r_gpr) == 1 &&
+            !ExprContainsRegInsideMem(op_insn.pattern.children[1], r_gpr, false)) {
+          const bool overwritten_by_op =
+              op_insn.pattern.children[0].op == RtlOp::kReg &&
+              !op_insn.pattern.children[0].IsArgPointerReg() &&
+              EffectiveHardReg(op_insn.pattern.children[0].RegNo(), reg_renumber) == gpr_hr &&
+              op_insn.pattern.children[0].mode == r_gpr_expr.mode;
+          if (r_gpr < kFirstPseudoRegister && !overwritten_by_op &&
+              !IsHardRegRangeDeadAfterInsn(*all_parsed_blocks, rpo_blocks, b, insns, op_idx,
+                                           &drop_md_in, gpr_hr, 1, reg_renumber, gp64, fp64)) {
+            break;
+          }
+          if (!ReplaceRegInExpr(&op_insn.pattern.children[1], r_gpr, r_gpr_expr.mode, p_md_expr)) {
+            break;
+          }
+          if (!overwritten_by_op) {
+            RemoveDeadOrUnusedNotesForReg(&op_insn.reg_notes, r_gpr);
+          }
+          if (p_md >= kFirstPseudoRegister) {
+            for (RtlRegNote& ex : op_insn.reg_notes) {
+              if (ex.kind == RtlMachineMode::kRegDead && ex.datum.IsHardReg() &&
+                  !ex.datum.IsArgPointerReg() && ex.datum.RegNo() == md_hr) {
+                ex.datum.SetRegNo(p_md);
+              }
+            }
+            RemoveDeadOrUnusedNotesForReg(&op_insn.reg_notes, md_hr);
+          }
+          for (const RtlRegNote& n : in_insn.reg_notes) {
+            if (n.kind == RtlMachineMode::kRegDead && n.datum.op == RtlOp::kReg &&
+                !n.datum.IsArgPointerReg()) {
+              const int dead_reg = n.datum.RegNo();
+              const bool already_has_dead = std::any_of(
+                  op_insn.reg_notes.begin(), op_insn.reg_notes.end(), [&](const RtlRegNote& ex) {
+                    return ex.kind == RtlMachineMode::kRegDead && ex.datum.op == RtlOp::kReg &&
+                           !ex.datum.IsArgPointerReg() && ex.datum.RegNo() == dead_reg;
+                  });
+              if (!already_has_dead) {
+                const int my_ord = FirstRegPreorderIndex(op_insn.pattern.children[1], dead_reg);
+                auto ins_it = std::find_if(
+                    op_insn.reg_notes.begin(), op_insn.reg_notes.end(), [&](const RtlRegNote& ex) {
+                      if (ex.kind != RtlMachineMode::kRegDead || ex.datum.op != RtlOp::kReg ||
+                          ex.datum.IsArgPointerReg()) {
+                        return true;
+                      }
+                      return FirstRegPreorderIndex(op_insn.pattern.children[1], ex.datum.RegNo()) >
+                             my_ord;
+                    });
+                op_insn.reg_notes.insert(ins_it, n);
+              }
+              if (target_note_pseudos != nullptr && n.datum.IsPseudoReg() &&
+                  r_gpr >= kFirstPseudoRegister) {
+                target_note_pseudos->insert(dead_reg);
+              }
+            }
+          }
+          drop_md_in[i] = true;
+          any_folded = true;
+          if (reversed_reload_regs != nullptr) {
+            reversed_reload_regs->insert(gpr_hr);
+          }
+          if (proven_spill_regs != nullptr && !overwritten_by_op) {
+            proven_spill_regs->insert(gpr_hr);
+          }
+          if (folded_scratch_pseudos != nullptr && r_gpr >= kFirstPseudoRegister) {
+            folded_scratch_pseudos->insert(r_gpr);
+          }
+          break;
+        }
+
+        const bool inter_conflict =
+            (r_gpr < kFirstPseudoRegister) || opt_level < 2 || op_insn.pattern.op == RtlOp::kNote ||
+            IsCallPattern(op_insn.pattern) || IsControlFlowBoundaryPattern(op_insn.pattern) ||
+            op_insn.pattern.ContainsReg(r_gpr) ||
+            InsnWritesOrClobbersRegOrEffHr(op_insn.pattern, reg_renumber, gp64, fp64, p_md,
+                                           md_hr) ||
+            InsnWritesOrClobbersRegOrEffHr(op_insn.pattern, reg_renumber, gp64, fp64, r_gpr,
+                                           gpr_hr);
+        if (inter_conflict) {
+          break;
+        }
+      }
+    }
+    std::vector<RtlPatternAndNotes> compact;
+    compact.reserve(insns.size());
+    for (size_t i = 0; i < insns.size(); ++i) {
+      if (!drop_md_in[i]) {
+        compact.push_back(std::move(insns[i]));
+      }
+    }
+    insns = std::move(compact);
+  }
+  return any_folded;
+}
+
+bool IsSingleUseMdScratchHardGprBeforeCall(const std::vector<RtlPatternAndNotes>& insns,
+                                           size_t mv_idx, const std::vector<bool>& drop_hi,
+                                           int dst_hr,
+                                           const absl::flat_hash_map<int, int>& reg_renumber,
+                                           bool gp64, bool fp64) {
+  if (dst_hr < 2 || dst_hr >= 32) {
+    return false;
+  }
+  size_t op_idx = insns.size();
+  for (size_t k = mv_idx + 1; k < insns.size(); ++k) {
+    if (drop_hi[k]) {
+      continue;
+    }
+    const RtlPatternAndNotes& op_insn = insns[k];
+    if (op_insn.pattern.op == RtlOp::kSet && op_insn.pattern.children.size() == 2 &&
+        !IsCallPattern(op_insn.pattern) && !IsControlFlowBoundaryPattern(op_insn.pattern) &&
+        !op_insn.pattern.children[0].ContainsReg(dst_hr) &&
+        CountRegOccurrencesInExpr(op_insn.pattern.children[1], dst_hr) == 1 &&
+        !ExprContainsRegInsideMem(op_insn.pattern.children[1], dst_hr, false)) {
+      const RtlOp rhs_op = op_insn.pattern.children[1].op;
+      if (rhs_op != RtlOp::kReg && rhs_op != RtlOp::kMem && rhs_op != RtlOp::kDiv &&
+          rhs_op != RtlOp::kUdiv && rhs_op != RtlOp::kMod && rhs_op != RtlOp::kUmod &&
+          rhs_op != RtlOp::kMult) {
+        op_idx = k;
+      }
+      break;
+    }
+    if (op_insn.pattern.ContainsReg(dst_hr) || IsCallPattern(op_insn.pattern) ||
+        IsControlFlowBoundaryPattern(op_insn.pattern) ||
+        InsnWritesOrClobbersRegOrEffHr(op_insn.pattern, reg_renumber, gp64, fp64, dst_hr, dst_hr)) {
+      return false;
+    }
+  }
+  if (op_idx >= insns.size()) {
+    return false;
+  }
+  bool saw_arg0_setup = false;
+  for (size_t k = op_idx + 1; k < insns.size(); ++k) {
+    if (drop_hi[k]) {
+      continue;
+    }
+    const RtlPatternAndNotes& cur = insns[k];
+    if (IsCallPattern(cur.pattern)) {
+      return saw_arg0_setup;
+    }
+    if (cur.pattern.ContainsReg(dst_hr) || IsControlFlowBoundaryPattern(cur.pattern) ||
+        InsnWritesOrClobbersRegOrEffHr(cur.pattern, reg_renumber, gp64, fp64, dst_hr, dst_hr)) {
+      return false;
+    }
+    if (cur.pattern.op == RtlOp::kSet && cur.pattern.children.size() == 2 &&
+        cur.pattern.children[0].IsHardReg() && cur.pattern.children[0].RegNo() == 4) {
+      saw_arg0_setup = true;
+    }
+  }
+  return false;
+}
+
+bool FoldMdOutputReloads(const std::vector<RtlBasicBlock>& rpo_blocks, int opt_level, bool gp64,
+                         bool fp64, const absl::flat_hash_map<int, int>& reg_renumber,
+                         const absl::flat_hash_map<int, PseudoUseSummary>& summaries,
+                         std::vector<std::vector<RtlPatternAndNotes>>* all_parsed_blocks,
+                         absl::flat_hash_set<int>* reversed_reload_regs,
+                         absl::flat_hash_set<int>* proven_spill_regs,
+                         absl::flat_hash_set<int>* folded_scratch_pseudos) {
+  const auto saved_blocks_before_md = *all_parsed_blocks;
+  absl::flat_hash_set<int> md_folded_scratches;
+  absl::flat_hash_set<int> md_proven_scratches;
+  bool folded_md_64 = false;
+  bool folded_md_65 = false;
+
+  for (size_t b = 0; b < all_parsed_blocks->size(); ++b) {
+    std::vector<RtlPatternAndNotes>& insns = (*all_parsed_blocks)[b];
+    if (insns.size() < 2) {
+      continue;
+    }
+    std::vector<bool> drop_hi(insns.size(), false);
+    for (size_t i = 0; i + 1 < insns.size(); ++i) {
+      if (drop_hi[i]) {
+        continue;
+      }
+      RtlPatternAndNotes& mul_insn = insns[i];
+      if (mul_insn.pattern.op != RtlOp::kParallel || mul_insn.pattern.children.size() < 2) {
+        continue;
+      }
+      RtlExpr& elem0 = mul_insn.pattern.children[0];
+      if (elem0.op != RtlOp::kSet || elem0.children.size() != 2 ||
+          elem0.children[0].op != RtlOp::kReg || elem0.children[0].IsArgPointerReg() ||
+          elem0.children[0].flags.Any()) {
+        continue;
+      }
+      const int md_regno = elem0.children[0].RegNo();
+      const int md_hr = EffectiveHardReg(md_regno, reg_renumber);
+      const RtlMachineMode md_mode = elem0.children[0].mode;
+      const RtlOp rhs_op = elem0.children[1].op;
+      const bool valid_md_pattern =
+          (md_hr == 64 && md_mode == RtlMachineMode::kDI && rhs_op == RtlOp::kMult) ||
+          (md_hr == 65 && md_mode == RtlMachineMode::kSI && rhs_op == RtlOp::kMult) ||
+          (md_hr == 64 && md_mode == RtlMachineMode::kSI && rhs_op == RtlOp::kTruncate);
+      if (!valid_md_pattern) {
+        continue;
+      }
+      const int md_nw = std::max(1, MipsHardRegNregs(md_hr, md_mode, gp64, fp64));
+      if (md_regno >= kFirstPseudoRegister) {
+        auto sum_it = summaries.find(md_regno);
+        if (sum_it == summaries.end() || sum_it->second.multi_block ||
+            sum_it->second.def_count != 1 || sum_it->second.use_count != 1) {
+          continue;
+        }
+      }
+
+      const size_t max_md_mv_idx =
+          (opt_level == 0 || opt_level >= 2) ? (insns.size() - 1) : (i + 1);
+      for (size_t mv_idx = i + 1; mv_idx <= max_md_mv_idx; ++mv_idx) {
+        if (drop_hi[mv_idx]) {
+          continue;
+        }
+        const RtlPatternAndNotes& mv_insn = insns[mv_idx];
+        if (mv_insn.pattern.op == RtlOp::kSet && mv_insn.pattern.children.size() == 2) {
+          const RtlExpr& mv_dst = mv_insn.pattern.children[0];
+          const RtlExpr& mv_src = mv_insn.pattern.children[1];
+          const bool valid_mv_dst =
+              mv_dst.IsPseudoReg() || (mv_dst.IsHardReg() && mv_dst.RegNo() < 32);
+          const bool matches_primary = mv_src.op == RtlOp::kReg && !mv_src.IsArgPointerReg() &&
+                                       mv_src.mode == md_mode && mv_src.RegNo() == md_regno &&
+                                       InsnHasOnlyOptionalDeadNoteOn(mv_insn, md_regno);
+          const bool pseudo_md_dies_at_mv =
+              md_regno < kFirstPseudoRegister ||
+              std::any_of(
+                  mv_insn.reg_notes.begin(), mv_insn.reg_notes.end(), [&](const RtlRegNote& n) {
+                    return n.kind == RtlMachineMode::kRegDead && n.datum.op == RtlOp::kReg &&
+                           !n.datum.IsArgPointerReg() && n.datum.RegNo() == md_regno;
+                  });
+          bool allowed_non_adjacent_input_reload = true;
+          if (mv_idx > i + 1 && (md_regno < kFirstPseudoRegister || opt_level < 2)) {
+            allowed_non_adjacent_input_reload = false;
+            if (mv_dst.IsPseudoReg()) {
+              auto dst_sum = summaries.find(mv_dst.RegNo());
+              if (dst_sum != summaries.end() && !dst_sum->second.multi_block &&
+                  dst_sum->second.def_count == 1 && dst_sum->second.use_count == 1) {
+                allowed_non_adjacent_input_reload = true;
+              }
+            } else if (mv_dst.IsHardReg() && mv_dst.RegNo() >= 2 && mv_dst.RegNo() < 32) {
+              allowed_non_adjacent_input_reload = IsSingleUseMdScratchHardGprBeforeCall(
+                  insns, mv_idx, drop_hi, mv_dst.RegNo(), reg_renumber, gp64, fp64);
+            }
+          }
+          if (valid_mv_dst && mv_dst.mode == md_mode && matches_primary && pseudo_md_dies_at_mv &&
+              allowed_non_adjacent_input_reload) {
+            const int dst_hr = EffectiveHardReg(mv_dst.RegNo(), reg_renumber);
+            if (dst_hr < 32) {
+              const int dst_nw =
+                  (dst_hr >= 0) ? std::max(1, MipsHardRegNregs(dst_hr, mv_dst.mode, gp64, fp64))
+                                : 1;
+              bool intervening_conflict = false;
+              for (size_t k = i + 1; k < mv_idx; ++k) {
+                if (drop_hi[k]) {
+                  continue;
+                }
+                if (insns[k].pattern.ContainsReg(mv_dst.RegNo())) {
+                  intervening_conflict = true;
+                  break;
+                }
+                if (dst_hr >= 0) {
+                  for (int h = dst_hr; h < dst_hr + dst_nw; ++h) {
+                    if (InsnWritesOrClobbersRegOrEffHr(insns[k].pattern, reg_renumber, gp64, fp64,
+                                                       mv_dst.RegNo(), h)) {
+                      intervening_conflict = true;
+                      break;
+                    }
+                  }
+                  if (!intervening_conflict) {
+                    insns[k].pattern.Visit([&](const RtlExpr& n) {
+                      if (n.op == RtlOp::kReg && !n.IsArgPointerReg()) {
+                        const int nhr = EffectiveHardReg(n.RegNo(), reg_renumber);
+                        if (nhr >= 0) {
+                          const int nnw = std::max(1, MipsHardRegNregs(nhr, n.mode, gp64, fp64));
+                          if (nhr < dst_hr + dst_nw && dst_hr < nhr + nnw) {
+                            intervening_conflict = true;
+                          }
+                        }
+                      }
+                    });
+                  }
+                  if (intervening_conflict) {
+                    break;
+                  }
+                }
+              }
+              if (!intervening_conflict &&
+                  (md_regno >= kFirstPseudoRegister ||
+                   IsHardRegRangeDeadAfterInsn(*all_parsed_blocks, rpo_blocks, b, insns, mv_idx,
+                                               &drop_hi, md_hr, md_nw, reg_renumber, gp64, fp64))) {
+                if (md_regno < kFirstPseudoRegister && mv_dst.IsHardReg() && !mv_dst.flags.Any() &&
+                    mv_dst.mode == RtlMachineMode::kSI &&
+                    IsSingleUseMdScratchHardGprBeforeCall(insns, mv_idx, drop_hi, dst_hr,
+                                                          reg_renumber, gp64, fp64)) {
+                  md_proven_scratches.insert(dst_hr);
+                }
+                elem0.children[0] = mv_dst;
+                RemoveDeadOrUnusedNotesForReg(&mul_insn.reg_notes, md_regno);
+                drop_hi[mv_idx] = true;
+                if (md_mode == RtlMachineMode::kDI) {
+                  folded_md_64 = true;
+                  folded_md_65 = true;
+                } else if (md_hr == 64) {
+                  folded_md_64 = true;
+                } else if (md_hr == 65) {
+                  folded_md_65 = true;
+                }
+                if (md_regno >= kFirstPseudoRegister) {
+                  md_folded_scratches.insert(md_regno);
+                }
+              }
+            }
+            break;
+          }
+        }
+        if (IsControlFlowBoundaryPattern(mv_insn.pattern) ||
+            mv_insn.pattern.ContainsReg(md_regno) ||
+            InsnWritesOrClobbersRegOrEffHr(mv_insn.pattern, reg_renumber, gp64, fp64, md_regno,
+                                           64) ||
+            InsnWritesOrClobbersRegOrEffHr(mv_insn.pattern, reg_renumber, gp64, fp64, md_regno,
+                                           65) ||
+            InsnWritesOrClobbersRegOrEffHr(mv_insn.pattern, reg_renumber, gp64, fp64, md_regno,
+                                           66)) {
+          break;
+        }
+      }
+    }
+    std::vector<RtlPatternAndNotes> compact;
+    compact.reserve(insns.size());
+    for (size_t i = 0; i < insns.size(); ++i) {
+      if (!drop_hi[i]) {
+        compact.push_back(std::move(insns[i]));
+      }
+    }
+    insns = std::move(compact);
+  }
+
+  bool explicit_md_survives = false;
+  if (folded_md_64 || folded_md_65) {
+    auto check_non_clobber_md = [&](const auto& self, const RtlExpr& expr) -> void {
+      if (expr.op == RtlOp::kClobber) {
+        return;
+      }
+      if (expr.IsHardReg()) {
+        const int hr = expr.RegNo();
+        const int nw = std::max(1, MipsHardRegNregs(hr, expr.mode, gp64, fp64));
+        if (folded_md_64 && hr <= 64 && 64 < hr + nw) {
+          explicit_md_survives = true;
+        }
+        if (folded_md_65 && hr <= 65 && 65 < hr + nw) {
+          explicit_md_survives = true;
+        }
+        return;
+      }
+      for (const RtlExpr& ch : expr.children) {
+        self(self, ch);
+      }
+    };
+    for (const auto& blk_insns : *all_parsed_blocks) {
+      for (const RtlPatternAndNotes& insn : blk_insns) {
+        check_non_clobber_md(check_non_clobber_md, insn.pattern);
+      }
+    }
+  }
+  if (explicit_md_survives) {
+    *all_parsed_blocks = saved_blocks_before_md;
+    return false;
+  }
+  if (folded_scratch_pseudos != nullptr) {
+    folded_scratch_pseudos->insert(md_folded_scratches.begin(), md_folded_scratches.end());
+  }
+  if (reversed_reload_regs != nullptr) {
+    reversed_reload_regs->insert(md_proven_scratches.begin(), md_proven_scratches.end());
+  }
+  if (proven_spill_regs != nullptr) {
+    proven_spill_regs->insert(md_proven_scratches.begin(), md_proven_scratches.end());
+  }
+  return folded_md_64 || folded_md_65;
+}
+
+bool RestoreO0MdScratchClobbers(bool gp64, bool fp64,
+                                const absl::flat_hash_map<int, int>& reg_renumber,
+                                const absl::flat_hash_map<int, PseudoUseSummary>& summaries,
+                                std::vector<std::vector<RtlPatternAndNotes>>* all_parsed_blocks,
+                                absl::flat_hash_set<int>* folded_scratch_pseudos) {
+  bool non_clobber_md_used[3] = {false, false, false};
+  auto mark_non_clobber_md = [&](const auto& self, const RtlExpr& expr) -> void {
+    if (expr.op == RtlOp::kClobber) {
+      return;
+    }
+    if (expr.IsHardReg()) {
+      const int hr = expr.RegNo();
+      const int nw = std::max(1, MipsHardRegNregs(hr, expr.mode, gp64, fp64));
+      for (int h = std::max(64, hr); h <= std::min(66, hr + nw - 1); ++h) {
+        non_clobber_md_used[h - 64] = true;
+      }
+      return;
+    }
+    for (const RtlExpr& ch : expr.children) {
+      self(self, ch);
+    }
+  };
+  for (const auto& blk_insns : *all_parsed_blocks) {
+    for (const RtlPatternAndNotes& insn : blk_insns) {
+      mark_non_clobber_md(mark_non_clobber_md, insn.pattern);
+    }
+  }
+
+  auto contains_asm = [](const RtlExpr& root) {
+    bool found = false;
+    root.Visit([&](const RtlExpr& n) {
+      if (n.op == RtlOp::kAsmOperands || n.op == RtlOp::kAsmInput) {
+        found = true;
+      }
+    });
+    return found;
+  };
+  bool any_restored = false;
+  for (auto& blk_insns : *all_parsed_blocks) {
+    for (RtlPatternAndNotes& insn : blk_insns) {
+      if (insn.pattern.op != RtlOp::kParallel || insn.pattern.children.size() < 2 ||
+          contains_asm(insn.pattern)) {
+        continue;
+      }
+      for (size_t c_idx = 1; c_idx < insn.pattern.children.size(); ++c_idx) {
+        RtlExpr& clob = insn.pattern.children[c_idx];
+        if (clob.op != RtlOp::kClobber || clob.children.size() != 1 ||
+            clob.children[0].op != RtlOp::kReg || clob.children[0].IsArgPointerReg()) {
+          continue;
+        }
+        const int c_reg = clob.children[0].RegNo();
+        const int c_hr = EffectiveHardReg(c_reg, reg_renumber);
+        if (c_hr < 64 || c_hr > 66) {
+          continue;
+        }
+        const int c_nw = std::max(1, MipsHardRegNregs(c_hr, clob.children[0].mode, gp64, fp64));
+        bool md_busy = false;
+        for (int h = c_hr; h < c_hr + c_nw && h <= 66; ++h) {
+          if (non_clobber_md_used[h - 64]) {
+            md_busy = true;
+            break;
+          }
+        }
+        if (md_busy) {
+          continue;
+        }
+        if (c_reg >= kFirstPseudoRegister) {
+          auto sum_it = summaries.find(c_reg);
+          if (sum_it == summaries.end() || sum_it->second.use_count != 0) {
+            continue;
+          }
+          if (folded_scratch_pseudos != nullptr) {
+            folded_scratch_pseudos->insert(c_reg);
+          }
+        }
+        RemoveDeadOrUnusedNotesForReg(&insn.reg_notes, c_reg);
+        clob.children[0] = RtlExpr::MakeScratch(clob.children[0].mode);
+        any_restored = true;
+      }
+    }
+  }
+  return any_restored;
+}
+
+void ReverseMdAndDiZeroConstraintReloads(
     const std::vector<RtlBasicBlock>& rpo_blocks, int opt_level, bool gp64, bool fp64,
     const absl::flat_hash_map<int, int>& reg_renumber,
     std::vector<std::vector<RtlPatternAndNotes>>* all_parsed_blocks,
+    absl::flat_hash_map<int, PseudoUseSummary>* summaries_ptr,
     absl::flat_hash_set<int>* reversed_reload_regs, absl::flat_hash_set<int>* proven_spill_regs,
-    absl::flat_hash_set<int>* folded_scratch_pseudos, absl::flat_hash_set<int>* target_note_pseudos,
-    absl::flat_hash_set<int>* combine_priority_dead_regs) {
-  const absl::flat_hash_map<int, PseudoUseSummary> summaries =
-      BuildPseudoUseSummaries(*all_parsed_blocks);
+    absl::flat_hash_set<int>* folded_scratch_pseudos,
+    absl::flat_hash_set<int>* target_note_pseudos) {
+  absl::flat_hash_map<int, PseudoUseSummary>& summaries = *summaries_ptr;
 
-  // Pass A: Fold `MD_REGS` (`64 hi` / `65 lo`) output reloads on `mulsidi3`,
-  // `umulsidi3`, `mulsi3_internal` (`=l`), and `*mulsi3_highpart` (`=h`) at
-  // `-O1+`:
-  //   `(parallel [(set (reg:DI/SI md_reg) <mult/truncate>) (clobber ...)])`
-  //   ... (optional non-interfering scheduled instructions) ...
-  //   `(set (reg:DI/SI mv_dst) (reg:DI/SI md_reg))`
-  if (opt_level > 0) {
-    const auto saved_blocks_before_md = *all_parsed_blocks;
-    absl::flat_hash_set<int> md_folded_scratches;
-    bool folded_md_64 = false;
-    bool folded_md_65 = false;
-
+  // Pass A.0: Fold `DImode` `(const_int 0)` store reloads on 32-bit GPR MIPS.
+  if (!gp64) {
+    bool folded_di_zero = false;
     for (size_t b = 0; b < all_parsed_blocks->size(); ++b) {
       std::vector<RtlPatternAndNotes>& insns = (*all_parsed_blocks)[b];
       if (insns.size() < 2) {
         continue;
       }
-      std::vector<bool> drop_hi(insns.size(), false);
+      std::vector<bool> drop_zero(insns.size(), false);
       for (size_t i = 0; i + 1 < insns.size(); ++i) {
-        if (drop_hi[i]) {
+        if (drop_zero[i]) {
           continue;
         }
-        RtlPatternAndNotes& mul_insn = insns[i];
-        if (mul_insn.pattern.op != RtlOp::kParallel || mul_insn.pattern.children.size() < 2) {
+        const RtlPatternAndNotes& ld_zero = insns[i];
+        RtlPatternAndNotes& st_mem = insns[i + 1];
+        if (ld_zero.pattern.op != RtlOp::kSet || ld_zero.pattern.children.size() != 2 ||
+            !ld_zero.reg_notes.empty() || st_mem.pattern.op != RtlOp::kSet ||
+            st_mem.pattern.children.size() != 2) {
           continue;
         }
-        RtlExpr& elem0 = mul_insn.pattern.children[0];
-        if (elem0.op != RtlOp::kSet || elem0.children.size() != 2 ||
-            elem0.children[0].op != RtlOp::kReg || elem0.children[0].IsArgPointerReg() ||
-            elem0.children[0].flags.Any()) {
+        const RtlExpr& r_tmp = ld_zero.pattern.children[0];
+        const RtlExpr& zero_rhs = ld_zero.pattern.children[1];
+        const RtlExpr& mem_dst = st_mem.pattern.children[0];
+        const RtlExpr& st_src = st_mem.pattern.children[1];
+        if (!r_tmp.IsPseudoReg() || r_tmp.flags.Any() || r_tmp.mode != RtlMachineMode::kDI ||
+            zero_rhs.op != RtlOp::kConstInt || zero_rhs.int_val != 0 || mem_dst.op != RtlOp::kMem ||
+            mem_dst.mode != RtlMachineMode::kDI || !st_src.IsPseudoReg() || st_src.flags.Any() ||
+            st_src.mode != RtlMachineMode::kDI || st_src.RegNo() != r_tmp.RegNo()) {
           continue;
         }
-        const int md_regno = elem0.children[0].RegNo();
-        const int md_hr = EffectiveHardReg(md_regno, reg_renumber);
-        const RtlMachineMode md_mode = elem0.children[0].mode;
-        const RtlOp rhs_op = elem0.children[1].op;
-        const bool valid_md_pattern =
-            (md_hr == 64 && md_mode == RtlMachineMode::kDI && rhs_op == RtlOp::kMult) ||
-            (md_hr == 65 && md_mode == RtlMachineMode::kSI && rhs_op == RtlOp::kMult) ||
-            (md_hr == 64 && md_mode == RtlMachineMode::kSI && rhs_op == RtlOp::kTruncate);
-        if (!valid_md_pattern) {
+        const int p_tmp = r_tmp.RegNo();
+        const int tmp_hr = EffectiveHardReg(p_tmp, reg_renumber);
+        if (tmp_hr < 2 || tmp_hr >= 31) {
           continue;
         }
-        // Check for `-mips1` `mulsi3_internal` (`mips.md:848-858`) disassembled by
-        // `Pass00` as `*mulsi3_highpart` (`set (reg:SI 64 hi) (truncate ...)` +
-        // `clobber (reg:SI 65 lo)`) where `64 hi` is dead and the subsequent
-        // `mflo` move reads `65 lo`.
-        int alt_lo_regno = -1;
-        RtlExpr alt_mul_lhs;
-        RtlExpr alt_mul_rhs;
-        if (md_regno == 64 && md_mode == RtlMachineMode::kSI && rhs_op == RtlOp::kTruncate &&
-            mul_insn.pattern.children.size() == 3 &&
-            mul_insn.pattern.children[1].op == RtlOp::kClobber &&
-            mul_insn.pattern.children[1].children.size() == 1 &&
-            mul_insn.pattern.children[1].children[0].op == RtlOp::kReg &&
-            !mul_insn.pattern.children[1].children[0].IsArgPointerReg() &&
-            EffectiveHardReg(mul_insn.pattern.children[1].children[0].RegNo(), reg_renumber) ==
-                65 &&
-            elem0.children[1].children.size() == 1 &&
-            elem0.children[1].children[0].op == RtlOp::kLshiftrt &&
-            elem0.children[1].children[0].children.size() == 2 &&
-            elem0.children[1].children[0].children[1].op == RtlOp::kConstInt &&
-            elem0.children[1].children[0].children[1].int_val == 32 &&
-            elem0.children[1].children[0].children[0].op == RtlOp::kMult &&
-            elem0.children[1].children[0].children[0].children.size() == 2) {
-          const RtlExpr& ext0 = elem0.children[1].children[0].children[0].children[0];
-          const RtlExpr& ext1 = elem0.children[1].children[0].children[0].children[1];
-          if ((ext0.op == RtlOp::kSignExtend || ext0.op == RtlOp::kZeroExtend) &&
-              (ext1.op == RtlOp::kSignExtend || ext1.op == RtlOp::kZeroExtend) &&
-              ext0.children.size() == 1 && ext1.children.size() == 1 &&
-              ext0.children[0].mode == RtlMachineMode::kSI &&
-              ext1.children[0].mode == RtlMachineMode::kSI &&
-              IsHardRegRangeDeadAfterInsn(*all_parsed_blocks, rpo_blocks, b, insns, i, &drop_hi, 64,
-                                          1, reg_renumber, gp64, fp64)) {
-            const int cand_lo = mul_insn.pattern.children[1].children[0].RegNo();
-            bool cand_ok = true;
-            if (cand_lo >= kFirstPseudoRegister) {
-              auto lo_it = summaries.find(cand_lo);
-              if (lo_it == summaries.end() || lo_it->second.multi_block ||
-                  lo_it->second.use_count != 1) {
-                cand_ok = false;
-              }
-            }
-            if (cand_ok) {
-              alt_lo_regno = cand_lo;
-              alt_mul_lhs = ext0.children[0];
-              alt_mul_rhs = ext1.children[0];
+        auto sum_it = summaries.find(p_tmp);
+        if (sum_it == summaries.end() || sum_it->second.multi_block ||
+            sum_it->second.def_count != 1 || sum_it->second.use_count != 1) {
+          continue;
+        }
+        bool addr_conflicts = false;
+        mem_dst.Visit([&](const RtlExpr& n) {
+          if (n.op == RtlOp::kReg && !n.IsArgPointerReg()) {
+            const int nhr = EffectiveHardReg(n.RegNo(), reg_renumber);
+            if (n.RegNo() == p_tmp || nhr == tmp_hr || nhr == tmp_hr + 1) {
+              addr_conflicts = true;
             }
           }
+        });
+        if (addr_conflicts) {
+          continue;
         }
-
-        const int md_nw = std::max(1, MipsHardRegNregs(md_hr, md_mode, gp64, fp64));
-        if (md_regno >= kFirstPseudoRegister) {
-          auto sum_it = summaries.find(md_regno);
-          if (sum_it == summaries.end() || sum_it->second.multi_block ||
-              sum_it->second.def_count != 1 || sum_it->second.use_count != 1) {
-            continue;
-          }
-        }
-
-        const size_t max_md_mv_idx =
-            (md_regno < kFirstPseudoRegister || opt_level < 2) ? (i + 1) : (insns.size() - 1);
-        for (size_t mv_idx = i + 1; mv_idx <= max_md_mv_idx; ++mv_idx) {
-          if (drop_hi[mv_idx]) {
-            continue;
-          }
-          const RtlPatternAndNotes& mv_insn = insns[mv_idx];
-          if (mv_insn.pattern.op == RtlOp::kSet && mv_insn.pattern.children.size() == 2) {
-            const RtlExpr& mv_dst = mv_insn.pattern.children[0];
-            const RtlExpr& mv_src = mv_insn.pattern.children[1];
-            const bool valid_mv_dst =
-                mv_dst.IsPseudoReg() || (mv_dst.IsHardReg() && mv_dst.RegNo() < 32);
-            const bool matches_primary = mv_src.op == RtlOp::kReg && !mv_src.IsArgPointerReg() &&
-                                         mv_src.mode == md_mode && mv_src.RegNo() == md_regno &&
-                                         InsnHasOnlyOptionalDeadNoteOn(mv_insn, md_regno);
-            const bool matches_alt_lo =
-                alt_lo_regno >= 0 && mv_src.op == RtlOp::kReg && !mv_src.IsArgPointerReg() &&
-                mv_src.mode == RtlMachineMode::kSI && mv_src.RegNo() == alt_lo_regno &&
-                InsnHasOnlyOptionalDeadNoteOn(mv_insn, alt_lo_regno);
-            // If `active_md_reg` is a pseudo (`>= kFirstPseudoRegister`), it is an
-            // `InvertAlterReg`-lifted post-reload scratch only when `mv_insn`
-            // itself carries `REG_DEAD (active_md_reg)` (whereas a pre-reload
-            // `MD_REGS`-allocated pseudo whose consumer needed a `"d"` input reload
-            // `(set r_gpr active_md_reg)` has no `REG_DEAD` on `mv_insn`; its
-            // `REG_DEAD` remains on the consumer instruction after `mv_insn`).
-            const int cand_md_reg = matches_alt_lo ? alt_lo_regno : md_regno;
-            const bool pseudo_md_dies_at_mv =
-                cand_md_reg < kFirstPseudoRegister ||
-                std::any_of(
-                    mv_insn.reg_notes.begin(), mv_insn.reg_notes.end(), [&](const RtlRegNote& n) {
-                      return n.kind == RtlMachineMode::kRegDead && n.datum.op == RtlOp::kReg &&
-                             !n.datum.IsArgPointerReg() && n.datum.RegNo() == cand_md_reg;
-                    });
-            if (valid_mv_dst && mv_dst.mode == md_mode && (matches_primary || matches_alt_lo) &&
-                pseudo_md_dies_at_mv) {
-              const int active_md_reg = matches_alt_lo ? alt_lo_regno : md_regno;
-              const int active_md_hr = matches_alt_lo ? 65 : md_hr;
-              const int active_md_nw = matches_alt_lo ? 1 : md_nw;
-              const int dst_hr = EffectiveHardReg(mv_dst.RegNo(), reg_renumber);
-              if (dst_hr < 32) {
-                const int dst_nw =
-                    (dst_hr >= 0) ? std::max(1, MipsHardRegNregs(dst_hr, mv_dst.mode, gp64, fp64))
-                                  : 1;
-                bool intervening_conflict = false;
-                for (size_t k = i + 1; k < mv_idx; ++k) {
-                  if (drop_hi[k]) {
-                    continue;
-                  }
-                  if (insns[k].pattern.ContainsReg(mv_dst.RegNo())) {
-                    intervening_conflict = true;
-                    break;
-                  }
-                  if (dst_hr >= 0) {
-                    for (int h = dst_hr; h < dst_hr + dst_nw; ++h) {
-                      if (InsnWritesOrClobbersRegOrEffHr(insns[k].pattern, reg_renumber, gp64, fp64,
-                                                         mv_dst.RegNo(), h)) {
-                        intervening_conflict = true;
-                        break;
-                      }
-                    }
-                    if (!intervening_conflict) {
-                      insns[k].pattern.Visit([&](const RtlExpr& n) {
-                        if (n.op == RtlOp::kReg && !n.IsArgPointerReg()) {
-                          const int nhr = EffectiveHardReg(n.RegNo(), reg_renumber);
-                          if (nhr >= 0) {
-                            const int nnw = std::max(1, MipsHardRegNregs(nhr, n.mode, gp64, fp64));
-                            if (nhr < dst_hr + dst_nw && dst_hr < nhr + nnw) {
-                              intervening_conflict = true;
-                            }
-                          }
-                        }
-                      });
-                    }
-                    if (intervening_conflict) {
-                      break;
-                    }
-                  }
-                }
-                if (!intervening_conflict &&
-                    (active_md_reg >= kFirstPseudoRegister ||
-                     IsHardRegRangeDeadAfterInsn(*all_parsed_blocks, rpo_blocks, b, insns, mv_idx,
-                                                 &drop_hi, active_md_hr, active_md_nw, reg_renumber,
-                                                 gp64, fp64))) {
-                  if (matches_alt_lo) {
-                    elem0 = RtlExpr::MakeSet(
-                        mv_dst, RtlExpr::MakeBinary(RtlOp::kMult, RtlMachineMode::kSI, alt_mul_lhs,
-                                                    alt_mul_rhs));
-                    mul_insn.pattern.children[1] =
-                        RtlExpr::MakeClobber(RtlExpr::MakeReg(RtlMachineMode::kSI, 64));
-                    RemoveDeadOrUnusedNotesForReg(&mul_insn.reg_notes, active_md_reg);
-                  } else {
-                    elem0.children[0] = mv_dst;
-                    RemoveDeadOrUnusedNotesForReg(&mul_insn.reg_notes, md_regno);
-                  }
-                  drop_hi[mv_idx] = true;
-                  if (md_mode == RtlMachineMode::kDI) {
-                    folded_md_64 = true;
-                    folded_md_65 = true;
-                  } else if (active_md_hr == 64) {
-                    folded_md_64 = true;
-                  } else if (active_md_hr == 65) {
-                    folded_md_65 = true;
-                  }
-                  if (active_md_reg >= kFirstPseudoRegister) {
-                    md_folded_scratches.insert(active_md_reg);
-                  }
-                }
-              }
-              break;
-            }
-          }
-          if (IsControlFlowBoundaryPattern(mv_insn.pattern) ||
-              mv_insn.pattern.ContainsReg(md_regno) ||
-              (alt_lo_regno >= 0 && mv_insn.pattern.ContainsReg(alt_lo_regno)) ||
-              InsnWritesOrClobbersRegOrEffHr(mv_insn.pattern, reg_renumber, gp64, fp64, md_regno,
-                                             64) ||
-              InsnWritesOrClobbersRegOrEffHr(mv_insn.pattern, reg_renumber, gp64, fp64, md_regno,
-                                             65) ||
-              InsnWritesOrClobbersRegOrEffHr(mv_insn.pattern, reg_renumber, gp64, fp64, md_regno,
-                                             66)) {
-            break;
-          }
+        st_mem.pattern.children[1] = RtlExpr::MakeConstInt(0);
+        RemoveDeadOrUnusedNotesForReg(&st_mem.reg_notes, p_tmp);
+        drop_zero[i] = true;
+        folded_di_zero = true;
+        if (folded_scratch_pseudos != nullptr) {
+          folded_scratch_pseudos->insert(p_tmp);
         }
       }
       std::vector<RtlPatternAndNotes> compact;
       compact.reserve(insns.size());
       for (size_t i = 0; i < insns.size(); ++i) {
-        if (!drop_hi[i]) {
+        if (!drop_zero[i]) {
           compact.push_back(std::move(insns[i]));
         }
       }
       insns = std::move(compact);
     }
-
-    // In `reload1.c:order_regs_for_reload` (`!SMALL_REGISTER_CLASSES`), any
-    // non-clobber explicit reference to `64` (`hi`) or `65` (`lo`) marks that
-    // hard register in `bad_spill_regs`, preventing `HI_REG` (`=h`), `LO_REG`
-    // (`=l`), or `MD_REGS` (`=x`) reloads. Roll back Pass A if any folded MD
-    // hard register still has a surviving non-clobber explicit reference.
-    bool explicit_md_survives = false;
-    if (folded_md_64 || folded_md_65) {
-      auto check_non_clobber_md = [&](const auto& self, const RtlExpr& expr) -> void {
-        if (expr.op == RtlOp::kClobber) {
-          return;
-        }
-        if (expr.IsHardReg()) {
-          const int hr = expr.RegNo();
-          const int nw = std::max(1, MipsHardRegNregs(hr, expr.mode, gp64, fp64));
-          if (folded_md_64 && hr <= 64 && 64 < hr + nw) {
-            explicit_md_survives = true;
-          }
-          if (folded_md_65 && hr <= 65 && 65 < hr + nw) {
-            explicit_md_survives = true;
-          }
-          return;
-        }
-        for (const RtlExpr& ch : expr.children) {
-          self(self, ch);
-        }
-      };
-      for (const auto& blk_insns : *all_parsed_blocks) {
-        for (const RtlPatternAndNotes& insn : blk_insns) {
-          check_non_clobber_md(check_non_clobber_md, insn.pattern);
-        }
-      }
-    }
-    if (explicit_md_survives) {
-      *all_parsed_blocks = saved_blocks_before_md;
-    } else if (folded_scratch_pseudos != nullptr) {
-      folded_scratch_pseudos->insert(md_folded_scratches.begin(), md_folded_scratches.end());
+    if (folded_di_zero) {
+      summaries = BuildPseudoUseSummaries(*all_parsed_blocks);
     }
   }
 
+  // Pass A.1: Fold `"d"` GPR input reloads from `MD_REGS`-allocated pseudos
+  // (`64 hi` / `65 lo`) before `Pass A` folds multi-use / address / copy output
+  // reloads into `GR_REGS`.
+  if (FoldMdGprInputReloads(rpo_blocks, opt_level, gp64, fp64, reg_renumber, summaries,
+                            all_parsed_blocks, reversed_reload_regs, proven_spill_regs,
+                            folded_scratch_pseudos, target_note_pseudos)) {
+    summaries = BuildPseudoUseSummaries(*all_parsed_blocks);
+  }
+
+  // Pass A: Fold remaining `MD_REGS` (`64 hi` / `65 lo`) output reloads into
+  // `GR_REGS`.
+  if (FoldMdOutputReloads(rpo_blocks, opt_level, gp64, fp64, reg_renumber, summaries,
+                          all_parsed_blocks, reversed_reload_regs, proven_spill_regs,
+                          folded_scratch_pseudos)) {
+    summaries = BuildPseudoUseSummaries(*all_parsed_blocks);
+  }
+
+  // Pass A.3: At `-O0`, restore `(clobber (scratch:...))` on `match_scratch`
+  // `MD_REGS` clobbers so `stupid_mark_refs` does not mark `MD_REGS` live.
+  if (opt_level == 0 && RestoreO0MdScratchClobbers(gp64, fp64, reg_renumber, summaries,
+                                                   all_parsed_blocks, folded_scratch_pseudos)) {
+    summaries = BuildPseudoUseSummaries(*all_parsed_blocks);
+  }
+}
+
+void ReverseFprConstraintReloads(const std::vector<RtlBasicBlock>& rpo_blocks, int opt_level,
+                                 bool gp64, bool fp64,
+                                 const absl::flat_hash_map<int, int>& reg_renumber,
+                                 const absl::flat_hash_map<int, PseudoUseSummary>& summaries,
+                                 std::vector<std::vector<RtlPatternAndNotes>>* all_parsed_blocks,
+                                 absl::flat_hash_set<int>* reversed_reload_regs,
+                                 absl::flat_hash_set<int>* proven_spill_regs,
+                                 absl::flat_hash_set<int>* folded_scratch_pseudos,
+                                 absl::flat_hash_set<int>* target_note_pseudos,
+                                 absl::flat_hash_set<int>* combine_priority_dead_regs) {
   for (size_t b = 0; b < all_parsed_blocks->size(); ++b) {
     std::vector<RtlPatternAndNotes>& insns = (*all_parsed_blocks)[b];
     if (insns.size() < 2) {
@@ -3547,27 +4311,21 @@ void ReverseRegisterConstraintReloadsAcrossCfg(
           }
         }
         const int r_fpr = r_fpr_expr.RegNo();
-        if (opt_level == 0 && r_fpr >= kFirstPseudoRegister) {
-          continue;
-        }
         const int fpr_hr = EffectiveHardReg(r_fpr, reg_renumber);
         const int src_hr = EffectiveHardReg(r_src_expr.RegNo(), reg_renumber);
-        if (fpr_hr < 32 || fpr_hr >= 64 || src_hr >= 32 ||
-            (r_fpr >= kFirstPseudoRegister && src_hr >= 0 && r_src_expr.IsPseudoReg())) {
+        if (fpr_hr < 32 || fpr_hr >= 64 || src_hr >= 32) {
           continue;
         }
-        if (r_fpr >= kFirstPseudoRegister) {
-          auto sum_it = summaries.find(r_fpr);
-          if (sum_it == summaries.end() || sum_it->second.multi_block ||
-              sum_it->second.def_count != 1 || sum_it->second.use_count != 1) {
-            continue;
-          }
+        if (!r_fpr_expr.IsHardReg()) {
+          continue;
         }
         const int nw = std::max(1, MipsHardRegNregs(fpr_hr, r_fpr_expr.mode, gp64, fp64));
         const int src_nw =
             (src_hr >= 0) ? std::max(1, MipsHardRegNregs(src_hr, r_src_expr.mode, gp64, fp64)) : 1;
 
-        for (size_t op_idx = i + 1; op_idx < insns.size(); ++op_idx) {
+        const size_t max_op_idx =
+            (opt_level == 0) ? std::min(i + 2, insns.size() - 1) : (insns.size() - 1);
+        for (size_t op_idx = i + 1; op_idx <= max_op_idx; ++op_idx) {
           if (drop_fp_in[op_idx]) {
             continue;
           }
@@ -3691,7 +4449,7 @@ void ReverseRegisterConstraintReloadsAcrossCfg(
           continue;
         }
         const int r_fpr = r_fpr_expr.RegNo();
-        if (opt_level == 0 && r_fpr >= kFirstPseudoRegister) {
+        if (!r_fpr_expr.IsHardReg()) {
           continue;
         }
         const int fpr_hr = EffectiveHardReg(r_fpr, reg_renumber);
@@ -3712,8 +4470,7 @@ void ReverseRegisterConstraintReloadsAcrossCfg(
           }
         });
 
-        const size_t max_mv_idx =
-            (r_fpr < kFirstPseudoRegister || opt_level < 2) ? (i + 1) : (insns.size() - 1);
+        const size_t max_mv_idx = (opt_level < 2) ? (i + 1) : (insns.size() - 1);
         for (size_t mv_idx = i + 1; mv_idx <= max_mv_idx; ++mv_idx) {
           if (drop_fp_out[mv_idx]) {
             continue;
@@ -3725,6 +4482,10 @@ void ReverseRegisterConstraintReloadsAcrossCfg(
             const int dst_hr = (mv_dst.op == RtlOp::kReg && !mv_dst.IsArgPointerReg())
                                    ? EffectiveHardReg(mv_dst.RegNo(), reg_renumber)
                                    : 64;
+            if (opt_level == 0 && r_fpr >= kFirstPseudoRegister &&
+                !(mv_dst.IsPseudoReg() && dst_hr >= 2 && dst_hr < 32)) {
+              break;
+            }
             // `dst_hr` in `[0, 32)` (GPR or GPR-allocated pseudo) or `-1`
             // (unallocated pseudo) requires an `"=f"` FPR output reload.
             if (mv_dst.op == RtlOp::kReg && !mv_dst.IsArgPointerReg() && mv_src.op == RtlOp::kReg &&
@@ -3789,7 +4550,7 @@ void ReverseRegisterConstraintReloadsAcrossCfg(
               bool sink_op_to_mv = false;
               bool pre_mv_conflict = fpr_or_cfg_conflict;
               if (!pre_mv_conflict && dst_interferes_before_mv) {
-                bool can_sink = (r_fpr >= kFirstPseudoRegister) && opt_level >= 2;
+                bool can_sink = (opt_level >= 2);
                 bool rhs_has_mem = false;
                 std::vector<std::pair<int, RtlMachineMode>> rhs_regs;
                 if (can_sink) {
@@ -4150,6 +4911,24 @@ void ReverseRegisterConstraintReloadsAcrossCfg(
   }
 }
 
+void ReverseRegisterConstraintReloadsAcrossCfg(
+    const std::vector<RtlBasicBlock>& rpo_blocks, int opt_level, bool gp64, bool fp64,
+    const absl::flat_hash_map<int, int>& reg_renumber,
+    std::vector<std::vector<RtlPatternAndNotes>>* all_parsed_blocks,
+    absl::flat_hash_set<int>* reversed_reload_regs, absl::flat_hash_set<int>* proven_spill_regs,
+    absl::flat_hash_set<int>* folded_scratch_pseudos, absl::flat_hash_set<int>* target_note_pseudos,
+    absl::flat_hash_set<int>* combine_priority_dead_regs) {
+  absl::flat_hash_map<int, PseudoUseSummary> summaries =
+      BuildPseudoUseSummaries(*all_parsed_blocks);
+  ReverseMdAndDiZeroConstraintReloads(
+      rpo_blocks, opt_level, gp64, fp64, reg_renumber, all_parsed_blocks, &summaries,
+      reversed_reload_regs, proven_spill_regs, folded_scratch_pseudos, target_note_pseudos);
+  ReverseFprConstraintReloads(rpo_blocks, opt_level, gp64, fp64, reg_renumber, summaries,
+                              all_parsed_blocks, reversed_reload_regs, proven_spill_regs,
+                              folded_scratch_pseudos, target_note_pseudos,
+                              combine_priority_dead_regs);
+}
+
 // On MIPS (`#ifndef SMALL_REGISTER_CLASSES`), `reload1.c:486, 709, 2221, 3660`
 // places every hard register in `regs_explicitly_used` (including
 // `CALL_INSN_FUNCTION_USAGE`) into `bad_spill_regs` / `forbidden_regs`,
@@ -4168,35 +4947,8 @@ void CleanupReversedReloadRegsExplicitUses(
     return;
   }
 
-  for (auto& blk_insns : *all_parsed_blocks) {
-    for (RtlPatternAndNotes& insn : blk_insns) {
-      if (insn.call_fusage.empty()) {
-        continue;
-      }
-      insn.call_fusage.erase(
-          std::remove_if(insn.call_fusage.begin(), insn.call_fusage.end(),
-                         [&](const RtlExpr& elem) {
-                           if (elem.op != RtlOp::kUse || elem.children.size() != 1 ||
-                               !elem.children[0].IsHardReg()) {
-                             return false;
-                           }
-                           const int hr = elem.children[0].RegNo();
-                           const int nw = std::max(1, MipsHardRegNregs(hr, elem.children[0].mode,
-                                                                       layout.gp64, layout.fp64));
-                           for (int w = 0; w < nw; ++w) {
-                             if (proven_spill_regs.contains(hr + w)) {
-                               return true;
-                             }
-                           }
-                           return false;
-                         }),
-          insn.call_fusage.end());
-    }
-  }
-
   // Lift any surviving explicit hard-register def/use web for `hr` in
-  // `proven_spill_regs` (that `InvertAlterReg` only kept hard because of the
-  // bogus `call_fusage` entry) to an allocated pseudo `p` with `reg_renumber[p] = hr`.
+  // `proven_spill_regs` to an allocated pseudo `p` with `reg_renumber[p] = hr`.
   int max_reg = std::max(kFirstPseudoRegister - 1, out->sideband.max_regno - 1);
   for (const auto& [r, _] : out->sideband.reg_renumber) {
     max_reg = std::max(max_reg, r);
@@ -4418,6 +5170,499 @@ void CleanupReversedReloadRegsExplicitUses(
           });
         }
       }
+    }
+  }
+}
+
+void FinalizePreReloadLivenessAndSideband(
+    const CompilationProfile& profile, int input_max_regno, bool restored_any_fp,
+    const absl::flat_hash_set<int>& target_note_pseudos,
+    const absl::flat_hash_set<int>& combine_priority_dead_regs,
+    const std::vector<int>& phantom_pseudos,
+    std::vector<std::vector<RtlPatternAndNotes>>* all_parsed_blocks_ptr, RtlControlFlowGraph* out) {
+  std::vector<std::vector<RtlPatternAndNotes>>& all_parsed_blocks = *all_parsed_blocks_ptr;
+  const bool run_note_updates = !target_note_pseudos.empty();
+
+  RtlControlFlowGraph liveness_cfg = *out;
+  ReconstructRtlLiveness(&liveness_cfg, profile,
+                         RtlLivenessOptions{
+                             .reload_completed = false,
+                             .update_reg_notes = run_note_updates,
+                         });
+
+  auto same_reg_note = [](const RtlRegNote& a, const RtlRegNote& b) {
+    return a.kind == b.kind && a.datum.op == RtlOp::kReg && b.datum.op == RtlOp::kReg &&
+           !a.datum.IsArgPointerReg() && !b.datum.IsArgPointerReg() &&
+           a.datum.RegNo() == b.datum.RegNo();
+  };
+  auto format_cfg_insn = [](const RtlPatternAndNotes& pn) {
+    const bool is_top_call = pn.pattern.op != RtlOp::kSequence && IsCallPattern(pn.pattern);
+    return FormatGccPrintRtlPatternAndNotes(
+        pn.pattern, is_top_call ? absl::Span<const RtlRegNote>{} : pn.reg_notes, pn.bracketed_notes,
+        /*call_fusage=*/{});
+  };
+
+  if (run_note_updates) {
+    for (size_t b = 0; b < out->rpo_blocks.size(); ++b) {
+      RtlBasicBlock& blk = out->rpo_blocks[b];
+      const RtlBasicBlock& live_blk = liveness_cfg.rpo_blocks[b];
+      bool block_notes_changed = false;
+      for (size_t i = 0; i < all_parsed_blocks[b].size() && i < live_blk.instructions.size(); ++i) {
+        absl::StatusOr<RtlPatternAndNotes> live_pn = ParsePatternAndNotes(live_blk.instructions[i]);
+        if (!live_pn.ok()) {
+          continue;
+        }
+        RtlPatternAndNotes& dst_pn = all_parsed_blocks[b][i];
+        if (IsCallPattern(dst_pn.pattern)) {
+          continue;
+        }
+        if (dst_pn.pattern.op == RtlOp::kUse && dst_pn.pattern.children.size() == 1 &&
+            dst_pn.pattern.children[0].IsPseudoReg()) {
+          const int up = dst_pn.pattern.children[0].RegNo();
+          const auto sets_it = liveness_cfg.sideband.reg_n_sets.find(up);
+          if (sets_it == liveness_cfg.sideband.reg_n_sets.end() || sets_it->second == 0) {
+            continue;
+          }
+        }
+        const bool is_unallocated_pseudo_def =
+            dst_pn.pattern.op == RtlOp::kSet && dst_pn.pattern.children.size() == 2 &&
+            dst_pn.pattern.children[0].IsPseudoReg() &&
+            !out->sideband.reg_renumber.contains(dst_pn.pattern.children[0].RegNo());
+        auto is_erasable_managed_note = [&](const RtlRegNote& note) {
+          if (note.kind != RtlMachineMode::kRegDead && note.kind != RtlMachineMode::kRegUnused) {
+            return false;
+          }
+          if (note.datum.IsPseudoReg()) {
+            return target_note_pseudos.contains(note.datum.RegNo());
+          }
+          if (note.kind == RtlMachineMode::kRegDead && note.datum.IsHardReg()) {
+            return is_unallocated_pseudo_def && target_note_pseudos.contains(note.datum.RegNo());
+          }
+          return false;
+        };
+
+        std::vector<size_t> wanted_live_indices;
+        for (size_t ni = 0; ni < live_pn->reg_notes.size(); ++ni) {
+          const RtlRegNote& note = live_pn->reg_notes[ni];
+          if (is_erasable_managed_note(note)) {
+            wanted_live_indices.push_back(ni);
+          }
+        }
+        const size_t before_sz = dst_pn.reg_notes.size();
+        absl::flat_hash_set<size_t> matched_wanted;
+        std::vector<RtlRegNote> kept_notes;
+        kept_notes.reserve(dst_pn.reg_notes.size());
+        dst_pn.reg_notes.erase(
+            std::remove_if(dst_pn.reg_notes.begin(), dst_pn.reg_notes.end(),
+                           [&](const RtlRegNote& existing) {
+                             const bool is_dup = std::any_of(
+                                 kept_notes.begin(), kept_notes.end(),
+                                 [&](const RtlRegNote& k) { return same_reg_note(k, existing); });
+                             if (is_dup && is_erasable_managed_note(existing)) {
+                               return true;
+                             }
+                             for (size_t wi : wanted_live_indices) {
+                               if (!matched_wanted.contains(wi) &&
+                                   same_reg_note(existing, live_pn->reg_notes[wi])) {
+                                 matched_wanted.insert(wi);
+                                 kept_notes.push_back(existing);
+                                 return false;
+                               }
+                             }
+                             if (is_erasable_managed_note(existing)) {
+                               return true;
+                             }
+                             kept_notes.push_back(existing);
+                             return false;
+                           }),
+            dst_pn.reg_notes.end());
+        if (dst_pn.reg_notes.size() != before_sz) {
+          block_notes_changed = true;
+        }
+        for (size_t wi : wanted_live_indices) {
+          if (matched_wanted.contains(wi)) {
+            continue;
+          }
+          const RtlRegNote& wanted = live_pn->reg_notes[wi];
+          auto insert_pos = dst_pn.reg_notes.end();
+          for (size_t succ_i = wi + 1; succ_i < live_pn->reg_notes.size(); ++succ_i) {
+            const RtlRegNote& succ = live_pn->reg_notes[succ_i];
+            if (succ.kind == RtlMachineMode::kRegDead && succ.datum.op == RtlOp::kReg &&
+                !succ.datum.IsArgPointerReg() &&
+                combine_priority_dead_regs.contains(succ.datum.RegNo())) {
+              continue;
+            }
+            auto found_it = std::find_if(
+                dst_pn.reg_notes.begin(), dst_pn.reg_notes.end(),
+                [&](const RtlRegNote& existing) { return same_reg_note(existing, succ); });
+            if (found_it != dst_pn.reg_notes.end()) {
+              insert_pos = found_it;
+              break;
+            }
+          }
+          dst_pn.reg_notes.insert(insert_pos, wanted);
+          block_notes_changed = true;
+        }
+        if (block_notes_changed) {
+          blk.instructions[i] = format_cfg_insn(dst_pn);
+        }
+      }
+      if (block_notes_changed) {
+        blk.SyncRtlInsnsFromInstructions();
+        for (size_t i = 0; i < blk.rtl_insns.size() && i < all_parsed_blocks[b].size(); ++i) {
+          if (all_parsed_blocks[b][i].has_explicit_call_fusage &&
+              !blk.rtl_insns[i].has_explicit_call_fusage) {
+            blk.rtl_insns[i].has_explicit_call_fusage = true;
+            blk.rtl_insns[i].call_fusage = all_parsed_blocks[b][i].call_fusage;
+          }
+        }
+      }
+    }
+  }
+
+  out->sideband.basic_block_live_at_start =
+      std::move(liveness_cfg.sideband.basic_block_live_at_start);
+  out->sideband.reg_n_refs = std::move(liveness_cfg.sideband.reg_n_refs);
+  out->sideband.reg_n_sets = std::move(liveness_cfg.sideband.reg_n_sets);
+  out->sideband.reg_n_deaths = std::move(liveness_cfg.sideband.reg_n_deaths);
+  out->sideband.reg_live_length = std::move(liveness_cfg.sideband.reg_live_length);
+  out->sideband.reg_n_calls_crossed = std::move(liveness_cfg.sideband.reg_n_calls_crossed);
+  out->sideband.max_regno = std::max(input_max_regno, liveness_cfg.sideband.max_regno);
+  std::vector<int> unalloc_reg_entries;
+  for (const auto& [reg_p, hr] : out->sideband.reg_renumber) {
+    out->sideband.max_regno = std::max(out->sideband.max_regno, reg_p + 1);
+    if (hr < 0) {
+      unalloc_reg_entries.push_back(reg_p);
+    }
+  }
+  for (int reg_p : unalloc_reg_entries) {
+    out->sideband.reg_renumber.erase(reg_p);
+  }
+  for (int phantom_p : phantom_pseudos) {
+    out->sideband.reg_renumber.erase(phantom_p);
+    out->sideband.reg_n_sets.erase(phantom_p);
+    out->sideband.reg_n_calls_crossed.erase(phantom_p);
+    out->sideband.reg_n_refs[phantom_p] = 2;
+    out->sideband.reg_n_deaths[phantom_p] = 1;
+    out->sideband.reg_live_length[phantom_p] = 2;
+    out->sideband.max_regno = std::max(out->sideband.max_regno, phantom_p + 1);
+  }
+  {
+    bool any_pseudo_live_len = false;
+    for (const auto& [r, len] : out->sideband.reg_live_length) {
+      if (r >= kFirstPseudoRegister && len != 0) {
+        any_pseudo_live_len = true;
+        break;
+      }
+    }
+    if (!any_pseudo_live_len) {
+      out->sideband.reg_live_length.try_emplace(kFirstPseudoRegister, -1);
+      out->sideband.basic_block_live_at_start.try_emplace(0);
+    }
+  }
+
+  if (restored_any_fp && !out->sideband.basic_block_live_at_start.empty()) {
+    out->sideband.basic_block_live_at_start[0].insert(kFramePointerRegnum);
+  }
+}
+
+void RestoreO0ParallelScratchClobbers(const MipsReloadFrameLayout& layout,
+                                      std::vector<std::vector<RtlPatternAndNotes>>* all_blocks,
+                                      RtlControlFlowGraph* out,
+                                      absl::flat_hash_set<int>* reversed_reload_regs,
+                                      absl::flat_hash_set<int>* folded_scratch_pseudos) {
+  const auto post_cleanup_summaries = BuildPseudoUseSummaries(*all_blocks);
+  bool non_clobber_md_used[3] = {false, false, false};
+  auto mark_non_clobber_md = [&](const auto& self, const RtlExpr& expr) -> void {
+    if (expr.op == RtlOp::kClobber) {
+      return;
+    }
+    if (expr.op == RtlOp::kReg && !expr.IsArgPointerReg()) {
+      const int hr = EffectiveHardReg(expr.RegNo(), out->sideband.reg_renumber);
+      if (hr >= 0) {
+        const int nw = std::max(1, MipsHardRegNregs(hr, expr.mode, layout.gp64, layout.fp64));
+        for (int h = std::max(64, hr); h <= std::min(66, hr + nw - 1); ++h) {
+          non_clobber_md_used[h - 64] = true;
+        }
+      }
+      return;
+    }
+    for (const RtlExpr& ch : expr.children) {
+      self(self, ch);
+    }
+  };
+  for (const auto& blk_insns : *all_blocks) {
+    for (const RtlPatternAndNotes& insn : blk_insns) {
+      mark_non_clobber_md(mark_non_clobber_md, insn.pattern);
+    }
+  }
+  auto contains_asm = [](const RtlExpr& root) {
+    bool found = false;
+    root.Visit([&](const RtlExpr& n) {
+      if (n.op == RtlOp::kAsmOperands || n.op == RtlOp::kAsmInput) {
+        found = true;
+      }
+    });
+    return found;
+  };
+  for (auto& blk_insns : *all_blocks) {
+    for (RtlPatternAndNotes& insn : blk_insns) {
+      RtlExpr& pat = insn.pattern;
+      if (pat.op != RtlOp::kParallel || pat.children.size() < 2 || !pat.children[0].IsSet() ||
+          contains_asm(pat)) {
+        continue;
+      }
+      const RtlExpr& dst = pat.children[0].SetDest();
+      const RtlExpr& src = pat.children[0].SetSrc();
+      const bool is_blk_move = pat.children.size() >= 5 && dst.IsMem() &&
+                               dst.mode == RtlMachineMode::kBlk && src.IsMem() &&
+                               src.mode == RtlMachineMode::kBlk;
+      const bool is_fix_or_ffs = (src.op == RtlOp::kFix || src.op == RtlOp::kFfs);
+      for (size_t k = 1; k < pat.children.size(); ++k) {
+        RtlExpr& elem = pat.children[k];
+        if (elem.op != RtlOp::kClobber || elem.children.size() != 1) {
+          continue;
+        }
+        if (is_blk_move && elem.children[0].IsHardReg() && elem.children[0].RegNo() < 32) {
+          reversed_reload_regs->insert(elem.children[0].RegNo());
+          elem = RtlExpr::MakeClobber(RtlExpr::MakeScratch(elem.children[0].mode));
+          continue;
+        }
+        if (elem.children[0].op != RtlOp::kReg || elem.children[0].IsArgPointerReg()) {
+          continue;
+        }
+        const int c_reg = elem.children[0].RegNo();
+        const int c_hr = EffectiveHardReg(c_reg, out->sideband.reg_renumber);
+        if (is_fix_or_ffs) {
+          if (c_reg >= kFirstPseudoRegister) {
+            auto sum_it = post_cleanup_summaries.find(c_reg);
+            if (sum_it == post_cleanup_summaries.end() || sum_it->second.use_count != 0) {
+              continue;
+            }
+            folded_scratch_pseudos->insert(c_reg);
+            out->sideband.reg_renumber.erase(c_reg);
+          }
+          if (c_hr >= 0 && c_hr < kFirstPseudoRegister) {
+            reversed_reload_regs->insert(c_hr);
+          }
+          RemoveDeadOrUnusedNotesForReg(&insn.reg_notes, c_reg);
+          elem = RtlExpr::MakeClobber(RtlExpr::MakeScratch(elem.children[0].mode));
+          continue;
+        }
+        if (c_hr >= 64 && c_hr <= 66) {
+          const int c_nw =
+              std::max(1, MipsHardRegNregs(c_hr, elem.children[0].mode, layout.gp64, layout.fp64));
+          bool md_busy = false;
+          for (int h = c_hr; h < c_hr + c_nw && h <= 66; ++h) {
+            if (non_clobber_md_used[h - 64]) {
+              md_busy = true;
+              break;
+            }
+          }
+          if (md_busy) {
+            continue;
+          }
+          if (c_reg >= kFirstPseudoRegister) {
+            auto sum_it = post_cleanup_summaries.find(c_reg);
+            if (sum_it == post_cleanup_summaries.end() || sum_it->second.use_count != 0) {
+              continue;
+            }
+            folded_scratch_pseudos->insert(c_reg);
+            out->sideband.reg_renumber.erase(c_reg);
+          }
+          RemoveDeadOrUnusedNotesForReg(&insn.reg_notes, c_reg);
+          elem = RtlExpr::MakeClobber(RtlExpr::MakeScratch(elem.children[0].mode));
+        }
+      }
+    }
+  }
+}
+
+void FoldO0Mulsidi3TopStackSpills(const MipsReloadFrameLayout& /*layout*/, int* max_existing_regno,
+                                  std::vector<std::vector<RtlPatternAndNotes>>* all_blocks,
+                                  RtlControlFlowGraph* out,
+                                  absl::flat_hash_set<int>* reversed_reload_regs,
+                                  absl::flat_hash_set<int>* folded_scratch_pseudos) {
+  auto record_folded_reg = [&](int r) {
+    const int hr = EffectiveHardReg(r, out->sideband.reg_renumber);
+    if (hr >= 0 && hr < kFirstPseudoRegister) {
+      reversed_reload_regs->insert(hr);
+      if (hr < 64) {
+        reversed_reload_regs->insert(hr + 1);
+      }
+    }
+    if (r >= kFirstPseudoRegister) {
+      folded_scratch_pseudos->insert(r);
+    }
+  };
+
+  auto match_top_fp_di_mem = [&](const RtlExpr& expr) -> bool {
+    if (out->sideband.frame_size_bytes < 8 || expr.op != RtlOp::kMem || expr.flags.volatil ||
+        expr.mode != RtlMachineMode::kDi || expr.children.size() != 1) {
+      return false;
+    }
+    const int64_t expected_off = out->sideband.frame_size_bytes - 8;
+    const RtlExpr& addr = expr.children[0];
+    if (expected_off == 0) {
+      return addr.op == RtlOp::kReg && addr.RegNo() == kFramePointerRegnum;
+    }
+    return addr.op == RtlOp::kPlus && addr.children.size() == 2 &&
+           addr.children[0].op == RtlOp::kReg && addr.children[0].RegNo() == kFramePointerRegnum &&
+           addr.children[1].op == RtlOp::kConstInt && addr.children[1].int_val == expected_off;
+  };
+
+  for (auto& blk : *all_blocks) {
+    for (size_t i = 0; i + 2 < blk.size(); ++i) {
+      const RtlExpr& mpat = blk[i].pattern;
+      if (mpat.op != RtlOp::kParallel || mpat.children.empty() || !mpat.children[0].IsSet() ||
+          mpat.children[0].SetDest().mode != RtlMachineMode::kDi ||
+          !mpat.children[0].SetDest().IsReg() || mpat.children[0].SetSrc().op != RtlOp::kMult) {
+        continue;
+      }
+      const int mul_r = mpat.children[0].SetDest().RegNo();
+      int sec_r = -1;
+      int spill_p = -1;
+      bool from_fp_mem = false;
+      size_t store_end = 0;
+      const RtlExpr& s1 = blk[i + 1].pattern;
+      if (s1.IsSet() && s1.SetSrc().IsReg() && s1.SetSrc().RegNo() == mul_r) {
+        if (s1.SetDest().IsPseudoReg() && s1.SetDest().mode == RtlMachineMode::kDi) {
+          const int cand_p = s1.SetDest().RegNo();
+          auto ren_it = out->sideband.reg_renumber.find(cand_p);
+          if (ren_it != out->sideband.reg_renumber.end() && ren_it->second < 0) {
+            spill_p = cand_p;
+            store_end = i + 1;
+          }
+        } else if (match_top_fp_di_mem(s1.SetDest())) {
+          from_fp_mem = true;
+          store_end = i + 1;
+        }
+      }
+      if (spill_p < 0 && !from_fp_mem && i + 3 < blk.size() &&
+          EffectiveHardReg(mul_r, out->sideband.reg_renumber) == 64 && s1.IsSet() &&
+          s1.SetDest().IsReg() && s1.SetDest().mode == RtlMachineMode::kDi && s1.SetSrc().IsReg() &&
+          s1.SetSrc().RegNo() == mul_r) {
+        const int cand_sec = s1.SetDest().RegNo();
+        const RtlExpr& s2 = blk[i + 2].pattern;
+        if (s2.IsSet() && s2.SetSrc().IsReg() && s2.SetSrc().RegNo() == cand_sec) {
+          if (s2.SetDest().IsPseudoReg() && s2.SetDest().mode == RtlMachineMode::kDi) {
+            const int cand_p = s2.SetDest().RegNo();
+            auto ren_it = out->sideband.reg_renumber.find(cand_p);
+            if (ren_it != out->sideband.reg_renumber.end() && ren_it->second < 0) {
+              sec_r = cand_sec;
+              spill_p = cand_p;
+              store_end = i + 2;
+            }
+          } else if (match_top_fp_di_mem(s2.SetDest())) {
+            sec_r = cand_sec;
+            from_fp_mem = true;
+            store_end = i + 2;
+          }
+        }
+      }
+      if (spill_p < 0 && !from_fp_mem) {
+        continue;
+      }
+      size_t load_idx = blk.size();
+      for (size_t k = store_end + 1; k + 1 < blk.size(); ++k) {
+        if (blk[k].pattern.IsSet() && blk[k].pattern.SetDest().IsReg() &&
+            !blk[k].pattern.SetDest().IsArgPointerReg() &&
+            blk[k].pattern.SetDest().mode == RtlMachineMode::kDi) {
+          if (!from_fp_mem && blk[k].pattern.SetSrc().IsPseudoReg() &&
+              blk[k].pattern.SetSrc().RegNo() == spill_p) {
+            load_idx = k;
+            break;
+          }
+          if (from_fp_mem && match_top_fp_di_mem(blk[k].pattern.SetSrc())) {
+            load_idx = k;
+            break;
+          }
+        }
+      }
+      if (load_idx >= blk.size()) {
+        continue;
+      }
+      if (from_fp_mem) {
+        const int64_t top_off = out->sideband.frame_size_bytes - 8;
+        bool other_fp_ref = false;
+        for (size_t b2 = 0; b2 < all_blocks->size() && !other_fp_ref; ++b2) {
+          for (size_t j2 = 0; j2 < (*all_blocks)[b2].size(); ++j2) {
+            if (&(*all_blocks)[b2] == &blk && (j2 == store_end || j2 == load_idx)) {
+              continue;
+            }
+            (*all_blocks)[b2][j2].pattern.Visit([&](const RtlExpr& n) {
+              if (n.op == RtlOp::kMem && n.children.size() == 1) {
+                const RtlExpr& a = n.children[0];
+                if ((top_off == 0 && a.op == RtlOp::kReg && a.RegNo() == kFramePointerRegnum) ||
+                    (a.op == RtlOp::kPlus && a.children.size() == 2 &&
+                     a.children[0].op == RtlOp::kReg &&
+                     a.children[0].RegNo() == kFramePointerRegnum &&
+                     a.children[1].op == RtlOp::kConstInt && a.children[1].int_val >= top_off)) {
+                  other_fp_ref = true;
+                }
+              }
+            });
+          }
+        }
+        if (other_fp_ref) {
+          continue;
+        }
+      }
+      const int load_r = blk[load_idx].pattern.SetDest().RegNo();
+      RtlExpr& upat = blk[load_idx + 1].pattern;
+      RtlExpr* u_set =
+          upat.IsSet() ? &upat
+          : (upat.op == RtlOp::kParallel && !upat.children.empty() && upat.children[0].IsSet())
+              ? &upat.children[0]
+              : nullptr;
+      if (u_set == nullptr || !u_set->SetSrc().ContainsReg(load_r)) {
+        continue;
+      }
+      bool md_busy_between = false;
+      for (size_t k = store_end + 1; k < load_idx && !md_busy_between; ++k) {
+        if (IsCallPattern(blk[k].pattern)) {
+          md_busy_between = true;
+          break;
+        }
+        blk[k].pattern.Visit([&](const RtlExpr& n) {
+          if (n.op == RtlOp::kReg && !n.IsArgPointerReg()) {
+            const int nhr = EffectiveHardReg(n.RegNo(), out->sideband.reg_renumber);
+            if (nhr == 64 || nhr == 65) {
+              md_busy_between = true;
+            }
+          }
+        });
+      }
+      if (from_fp_mem) {
+        spill_p = ++(*max_existing_regno);
+        out->sideband.frame_size_bytes -= 8;
+      }
+      out->sideband.reg_renumber[spill_p] = md_busy_between ? -1 : 64;
+      blk[i].pattern.children[0].children[0] = RtlExpr::MakeReg(RtlMachineMode::kDi, spill_p);
+      u_set->children[1].Mutate([&](RtlExpr& n) {
+        if (n.IsReg() && !n.IsArgPointerReg() && n.RegNo() == load_r &&
+            n.mode == RtlMachineMode::kDi) {
+          n = RtlExpr::MakeReg(RtlMachineMode::kDi, spill_p);
+        }
+      });
+      record_folded_reg(mul_r);
+      if (sec_r >= 0) {
+        record_folded_reg(sec_r);
+      }
+      if (!(u_set->SetDest().IsPseudoReg() && u_set->SetDest().RegNo() == load_r)) {
+        record_folded_reg(load_r);
+      } else {
+        const int hr = EffectiveHardReg(load_r, out->sideband.reg_renumber);
+        if (hr >= 0 && hr < kFirstPseudoRegister) {
+          reversed_reload_regs->insert(hr);
+          if (hr < 64) {
+            reversed_reload_regs->insert(hr + 1);
+          }
+        }
+      }
+      blk.erase(blk.begin() + static_cast<ptrdiff_t>(load_idx));
+      blk.erase(blk.begin() + static_cast<ptrdiff_t>(i + 1),
+                blk.begin() + static_cast<ptrdiff_t>(store_end + 1));
     }
   }
 }
@@ -4647,7 +5892,8 @@ absl::StatusOr<RtlControlFlowGraph> InvertReload(const RtlControlFlowGraph& relo
 
   const CallerSaveReversalOutcome cs_outcome = ReverseCallerSaveAcrossCfg(
       parsed_flags, layout, out.sideband.frame_pointer_needed, out.sideband.frame_size_bytes,
-      rtl_cross_call_hrs, &all_parsed_blocks, &out.sideband.reg_renumber);
+      rtl_cross_call_hrs, &max_existing_regno, &pseudo_widest_mode, &all_parsed_blocks,
+      &out.sideband.reg_renumber);
   target_note_pseudos.insert(cs_outcome.unified_pseudos.begin(), cs_outcome.unified_pseudos.end());
   for (int u_p : cs_outcome.unified_pseudos) {
     max_existing_regno = std::max(max_existing_regno, u_p);
@@ -4684,7 +5930,8 @@ absl::StatusOr<RtlControlFlowGraph> InvertReload(const RtlControlFlowGraph& relo
     absl::flat_hash_map<int, int> par_unify_map;
     for (size_t b = 0; b < all_parsed_blocks.size(); ++b) {
       ReverseParallelClobberOutputReloads(
-          &all_parsed_blocks[b], out.sideband.reg_renumber, par_summaries, &reversed_reload_regs,
+          all_parsed_blocks, out.rpo_blocks, b, &all_parsed_blocks[b], parsed_flags.opt_level,
+          layout.gp64, layout.fp64, out.sideband.reg_renumber, par_summaries, &reversed_reload_regs,
           &proven_spill_regs, &folded_scratch_pseudos, &par_unify_map, &target_note_pseudos);
     }
     if (!par_unify_map.empty()) {
@@ -4713,32 +5960,14 @@ absl::StatusOr<RtlControlFlowGraph> InvertReload(const RtlControlFlowGraph& relo
   CleanupReversedReloadRegsExplicitUses(layout, proven_spill_regs, &out, &all_parsed_blocks,
                                         &pseudo_widest_mode, &target_note_pseudos);
 
-  // At `-O0` (`local-alloc` skipped, `toplev.c:3293`), `movstrsi_internal`
-  // (`mips.md:3587`) enters `reload` with `(clobber (scratch:SI))` operands that
+  // At `-O0` (`local-alloc` skipped, `toplev.c:3293`), `movstrsi_internal*`,
+  // `fix_trunc*`, `ffs*`, and `mul*`/`div*`/`mod*` `PARALLEL` patterns in
+  // `mips.md` enter `reload` with `(clobber (scratch:...))` operands that
   // `subst_reloads` (`reload1.c:6257`) replaces in-place with allocated hard
-  // registers. Restore `(clobber (scratch:SI))` at `-O0`.
+  // registers. Restore `(clobber (scratch:...))` at `-O0`.
   if (parsed_flags.opt_level == 0) {
-    for (auto& blk_insns : all_parsed_blocks) {
-      for (RtlPatternAndNotes& insn : blk_insns) {
-        RtlExpr& pat = insn.pattern;
-        if (pat.op != RtlOp::kParallel || pat.children.size() < 5 || !pat.children[0].IsSet()) {
-          continue;
-        }
-        const RtlExpr& dst = pat.children[0].SetDest();
-        const RtlExpr& src = pat.children[0].SetSrc();
-        if (!dst.IsMem() || dst.mode != RtlMachineMode::kBlk || !src.IsMem() ||
-            src.mode != RtlMachineMode::kBlk) {
-          continue;
-        }
-        for (size_t k = 1; k < pat.children.size(); ++k) {
-          RtlExpr& elem = pat.children[k];
-          if (elem.op == RtlOp::kClobber && elem.children.size() == 1 &&
-              elem.children[0].IsHardReg() && elem.children[0].RegNo() < 32) {
-            elem = RtlExpr::MakeClobber(RtlExpr::MakeScratch(elem.children[0].mode));
-          }
-        }
-      }
-    }
+    RestoreO0ParallelScratchClobbers(layout, &all_parsed_blocks, &out, &reversed_reload_regs,
+                                     &folded_scratch_pseudos);
   }
 
   // Step 5: Reverse 3-region stack address elimination (`$sp` outgoing args,
@@ -4748,7 +5977,6 @@ absl::StatusOr<RtlControlFlowGraph> InvertReload(const RtlControlFlowGraph& relo
   absl::flat_hash_set<int> remaining_pseudos;
 
   for (size_t b = 0; b < out.rpo_blocks.size(); ++b) {
-    RtlBasicBlock& blk = out.rpo_blocks[b];
     std::vector<RtlPatternAndNotes>& parsed_insns = all_parsed_blocks[b];
 
     for (RtlPatternAndNotes& insn : parsed_insns) {
@@ -4771,6 +5999,109 @@ absl::StatusOr<RtlControlFlowGraph> InvertReload(const RtlControlFlowGraph& relo
         }
       }
     }
+  }
+
+  if (parsed_flags.opt_level == 0) {
+    FoldO0Mulsidi3TopStackSpills(layout, &max_existing_regno, &all_parsed_blocks, &out,
+                                 &reversed_reload_regs, &folded_scratch_pseudos);
+    if (!layout.gp64) {
+      const absl::flat_hash_map<int, PseudoUseSummary> di_zero_summaries =
+          BuildPseudoUseSummaries(all_parsed_blocks);
+      absl::flat_hash_set<int> use_insn_pseudos;
+      for (const auto& blk : all_parsed_blocks) {
+        for (const RtlPatternAndNotes& pn : blk) {
+          if (pn.pattern.op == RtlOp::kUse && !pn.pattern.children.empty() &&
+              pn.pattern.children[0].IsPseudoReg()) {
+            use_insn_pseudos.insert(pn.pattern.children[0].RegNo());
+          }
+        }
+      }
+      for (auto& blk : all_parsed_blocks) {
+        for (size_t i = 0; i + 1 < blk.size(); ++i) {
+          if (!blk[i].pattern.IsSet() || !blk[i].pattern.SetDest().IsReg() ||
+              blk[i].pattern.SetDest().IsArgPointerReg() ||
+              blk[i].pattern.SetDest().flags.volatil || blk[i].pattern.SetDest().flags.integrated ||
+              blk[i].pattern.SetDest().mode != RtlMachineMode::kDi ||
+              !blk[i].pattern.SetSrc().IsConstInt() || blk[i].pattern.SetSrc().int_val != 0 ||
+              !blk[i + 1].pattern.IsSet() || !blk[i + 1].pattern.SetDest().IsMem() ||
+              blk[i + 1].pattern.SetDest().mode != RtlMachineMode::kDi ||
+              !blk[i + 1].pattern.SetSrc().IsReg() ||
+              blk[i + 1].pattern.SetSrc().mode != RtlMachineMode::kDi ||
+              blk[i + 1].pattern.SetSrc().RegNo() != blk[i].pattern.SetDest().RegNo() ||
+              blk[i + 1].pattern.SetDest().ContainsReg(blk[i].pattern.SetDest().RegNo())) {
+            continue;
+          }
+          const int zr = blk[i].pattern.SetDest().RegNo();
+          const int zhr = EffectiveHardReg(zr, out.sideband.reg_renumber);
+          bool single_pair = false;
+          if (zr >= kFirstPseudoRegister) {
+            auto sit = di_zero_summaries.find(zr);
+            single_pair = sit != di_zero_summaries.end() && sit->second.def_count == 1 &&
+                          sit->second.use_count == 1 && !sit->second.multi_block &&
+                          !use_insn_pseudos.contains(zr);
+          } else if (zr >= 2 && zr <= 24 && (zr % 2) == 0 && blk[i].reg_notes.empty()) {
+            bool has_dead_note = false;
+            for (const RtlRegNote& n : blk[i + 1].reg_notes) {
+              if (n.kind == RtlMachineMode::kRegDead && n.datum.IsHardReg() &&
+                  (n.datum.RegNo() == zr || n.datum.RegNo() == zr + 1)) {
+                has_dead_note = true;
+                break;
+              }
+            }
+            bool pair_referenced_elsewhere = has_dead_note;
+            auto expr_mentions_pair = [&](const RtlExpr& e) {
+              bool hit = false;
+              e.Visit([&](const RtlExpr& n) {
+                if (hit || !n.IsHardReg() || n.IsArgPointerReg()) {
+                  return;
+                }
+                const int r = n.RegNo();
+                const int nw = std::max(1, MipsHardRegNregs(r, n.mode, layout.gp64, layout.fp64));
+                if (r < zr + 2 && zr < r + nw) {
+                  hit = true;
+                }
+              });
+              return hit;
+            };
+            for (size_t k = i + 2; !pair_referenced_elsewhere && k < blk.size(); ++k) {
+              if (expr_mentions_pair(blk[k].pattern)) {
+                pair_referenced_elsewhere = true;
+              }
+            }
+            for (const auto& other_blk : all_parsed_blocks) {
+              if (&other_blk == &blk || pair_referenced_elsewhere) {
+                continue;
+              }
+              for (const RtlPatternAndNotes& opn : other_blk) {
+                if (expr_mentions_pair(opn.pattern)) {
+                  pair_referenced_elsewhere = true;
+                  break;
+                }
+              }
+            }
+            single_pair = !pair_referenced_elsewhere;
+          }
+          if (single_pair && zhr >= 2 && zhr <= 24) {
+            blk[i + 1].pattern.children[1] = RtlExpr::MakeConstInt(0);
+            RemoveDeadOrUnusedNotesForReg(&blk[i + 1].reg_notes, zr);
+            reversed_reload_regs.insert(zhr);
+            reversed_reload_regs.insert(zhr + 1);
+            if (zr >= kFirstPseudoRegister) {
+              folded_scratch_pseudos.insert(zr);
+            }
+            blk.erase(blk.begin() + static_cast<ptrdiff_t>(i));
+            if (i > 0) {
+              --i;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  for (size_t b = 0; b < out.rpo_blocks.size(); ++b) {
+    RtlBasicBlock& blk = out.rpo_blocks[b];
+    const std::vector<RtlPatternAndNotes>& parsed_insns = all_parsed_blocks[b];
 
     blk.instructions.clear();
     blk.instructions.reserve(parsed_insns.size());
@@ -4790,7 +6121,10 @@ absl::StatusOr<RtlControlFlowGraph> InvertReload(const RtlControlFlowGraph& relo
       for (const RtlRegNote& note : insn.reg_notes) {
         note.datum.Visit(collect_remaining);
       }
-      blk.instructions.push_back(insn.ToSexprString());
+      const bool is_top_call = insn.pattern.op != RtlOp::kSequence && IsCallPattern(insn.pattern);
+      blk.instructions.push_back(FormatGccPrintRtlPatternAndNotes(
+          insn.pattern, is_top_call ? absl::Span<const RtlRegNote>{} : insn.reg_notes,
+          insn.bracketed_notes, /*call_fusage=*/{}));
     }
     blk.SyncRtlInsnsFromInstructions();
     for (size_t i = 0; i < blk.rtl_insns.size() && i < parsed_insns.size(); ++i) {
@@ -4844,167 +6178,13 @@ absl::StatusOr<RtlControlFlowGraph> InvertReload(const RtlControlFlowGraph& relo
                      saved_fprs.end());
   }
 
-  // Step 6: Recompute pre-reload RTL liveness and sideband statistics on a
-  // working copy so existing untouched `REG_NOTES` and `has_explicit_call_fusage`
-  // flags are preserved while newly reconstructed/unified pseudos receive exact
-  // `flow_analysis` `REG_DEAD`/`REG_UNUSED` notes.
-  {
-    const bool run_note_updates = !target_note_pseudos.empty();
-
-    RtlControlFlowGraph liveness_cfg = out;
-    ReconstructRtlLiveness(&liveness_cfg, profile,
-                           RtlLivenessOptions{
-                               .reload_completed = false,
-                               .update_reg_notes = run_note_updates,
-                           });
-
-    if (run_note_updates) {
-      for (size_t b = 0; b < out.rpo_blocks.size(); ++b) {
-        RtlBasicBlock& blk = out.rpo_blocks[b];
-        const RtlBasicBlock& live_blk = liveness_cfg.rpo_blocks[b];
-        bool block_notes_changed = false;
-        for (size_t i = 0; i < all_parsed_blocks[b].size() && i < live_blk.instructions.size();
-             ++i) {
-          absl::StatusOr<RtlPatternAndNotes> live_pn =
-              ParsePatternAndNotes(live_blk.instructions[i]);
-          if (!live_pn.ok()) {
-            continue;
-          }
-          RtlPatternAndNotes& dst_pn = all_parsed_blocks[b][i];
-          if (IsCallPattern(dst_pn.pattern)) {
-            continue;
-          }
-          // `combine` can delete the sole defining insn of a loop-hoisted pseudo
-          // after `flow_analysis`, leaving `(use (reg p))` with its pre-deletion
-          // `REG_DEAD (reg p)` note (which `reload` spills in-place to
-          // `REG_DEAD (mem ...)` and Pass 3 already un-spilled). Preserve that
-          // note instead of letting a fresh `flow` fixed-point pass propagate
-          // the 0-set pseudo around the loop back-edge.
-          if (dst_pn.pattern.op == RtlOp::kUse && dst_pn.pattern.children.size() == 1 &&
-              dst_pn.pattern.children[0].IsPseudoReg()) {
-            const int up = dst_pn.pattern.children[0].RegNo();
-            const auto sets_it = liveness_cfg.sideband.reg_n_sets.find(up);
-            if (sets_it == liveness_cfg.sideband.reg_n_sets.end() || sets_it->second == 0) {
-              continue;
-            }
-          }
-          auto same_reg_note = [](const RtlRegNote& a, const RtlRegNote& b) {
-            return a.kind == b.kind && a.datum.op == RtlOp::kReg && b.datum.op == RtlOp::kReg &&
-                   !a.datum.IsArgPointerReg() && !b.datum.IsArgPointerReg() &&
-                   a.datum.RegNo() == b.datum.RegNo();
-          };
-          const bool is_unallocated_pseudo_def =
-              dst_pn.pattern.op == RtlOp::kSet && dst_pn.pattern.children.size() == 2 &&
-              dst_pn.pattern.children[0].IsPseudoReg() &&
-              !out.sideband.reg_renumber.contains(dst_pn.pattern.children[0].RegNo());
-          auto is_managed_note = [&](const RtlRegNote& note) {
-            if (note.kind != RtlMachineMode::kRegDead && note.kind != RtlMachineMode::kRegUnused) {
-              return false;
-            }
-            if (note.datum.IsPseudoReg()) {
-              return target_note_pseudos.contains(note.datum.RegNo());
-            }
-            return is_unallocated_pseudo_def && note.kind == RtlMachineMode::kRegDead &&
-                   note.datum.IsHardReg() && target_note_pseudos.contains(note.datum.RegNo());
-          };
-
-          std::vector<size_t> wanted_live_indices;
-          for (size_t ni = 0; ni < live_pn->reg_notes.size(); ++ni) {
-            const RtlRegNote& note = live_pn->reg_notes[ni];
-            if (is_managed_note(note)) {
-              wanted_live_indices.push_back(ni);
-            }
-          }
-          const size_t before_sz = dst_pn.reg_notes.size();
-          absl::flat_hash_set<size_t> matched_wanted;
-          dst_pn.reg_notes.erase(
-              std::remove_if(dst_pn.reg_notes.begin(), dst_pn.reg_notes.end(),
-                             [&](const RtlRegNote& existing) {
-                               if (!is_managed_note(existing)) {
-                                 return false;
-                               }
-                               for (size_t wi : wanted_live_indices) {
-                                 if (!matched_wanted.contains(wi) &&
-                                     same_reg_note(existing, live_pn->reg_notes[wi])) {
-                                   matched_wanted.insert(wi);
-                                   return false;
-                                 }
-                               }
-                               return true;
-                             }),
-              dst_pn.reg_notes.end());
-          if (dst_pn.reg_notes.size() != before_sz) {
-            block_notes_changed = true;
-          }
-          for (size_t wi : wanted_live_indices) {
-            if (matched_wanted.contains(wi)) {
-              continue;
-            }
-            const RtlRegNote& wanted = live_pn->reg_notes[wi];
-            auto insert_pos = dst_pn.reg_notes.end();
-            for (size_t succ_i = wi + 1; succ_i < live_pn->reg_notes.size(); ++succ_i) {
-              const RtlRegNote& succ = live_pn->reg_notes[succ_i];
-              if (succ.kind == RtlMachineMode::kRegDead && succ.datum.op == RtlOp::kReg &&
-                  !succ.datum.IsArgPointerReg() &&
-                  combine_priority_dead_regs.contains(succ.datum.RegNo())) {
-                continue;
-              }
-              auto found_it = std::find_if(
-                  dst_pn.reg_notes.begin(), dst_pn.reg_notes.end(),
-                  [&](const RtlRegNote& existing) { return same_reg_note(existing, succ); });
-              if (found_it != dst_pn.reg_notes.end()) {
-                insert_pos = found_it;
-                break;
-              }
-            }
-            dst_pn.reg_notes.insert(insert_pos, wanted);
-            block_notes_changed = true;
-          }
-          if (block_notes_changed) {
-            blk.instructions[i] = dst_pn.ToSexprString();
-          }
-        }
-        if (block_notes_changed) {
-          blk.SyncRtlInsnsFromInstructions();
-          for (size_t i = 0; i < blk.rtl_insns.size() && i < all_parsed_blocks[b].size(); ++i) {
-            if (all_parsed_blocks[b][i].has_explicit_call_fusage &&
-                !blk.rtl_insns[i].has_explicit_call_fusage) {
-              blk.rtl_insns[i].has_explicit_call_fusage = true;
-              blk.rtl_insns[i].call_fusage = all_parsed_blocks[b][i].call_fusage;
-            }
-          }
-        }
-      }
-    }
-
-    out.sideband.basic_block_live_at_start =
-        std::move(liveness_cfg.sideband.basic_block_live_at_start);
-    out.sideband.reg_n_refs = std::move(liveness_cfg.sideband.reg_n_refs);
-    out.sideband.reg_n_sets = std::move(liveness_cfg.sideband.reg_n_sets);
-    out.sideband.reg_n_deaths = std::move(liveness_cfg.sideband.reg_n_deaths);
-    out.sideband.reg_live_length = std::move(liveness_cfg.sideband.reg_live_length);
-    out.sideband.reg_n_calls_crossed = std::move(liveness_cfg.sideband.reg_n_calls_crossed);
-    out.sideband.max_regno =
-        std::max(reload_cfg.sideband.max_regno, liveness_cfg.sideband.max_regno);
-    for (int phantom_p : spill_outcome.phantom_pseudos) {
-      // Match GCC 2.7.2's post-`combine` sideband (`combine.c:56`) for an
-      // unallocated temporary whose RTL references were eliminated after
-      // `flow_analysis`: `reg_renumber` and `reg_n_sets` are absent (`-1` and
-      // `0`), while `reg_n_refs = 2`, `reg_n_deaths = 1`, and
-      // `reg_live_length = 2` remain from `.05.flow`.
-      out.sideband.reg_renumber.erase(phantom_p);
-      out.sideband.reg_n_sets.erase(phantom_p);
-      out.sideband.reg_n_calls_crossed.erase(phantom_p);
-      out.sideband.reg_n_refs[phantom_p] = 2;
-      out.sideband.reg_n_deaths[phantom_p] = 1;
-      out.sideband.reg_live_length[phantom_p] = 2;
-      out.sideband.max_regno = std::max(out.sideband.max_regno, phantom_p + 1);
-    }
-  }
-
-  if (restored_any_fp && !out.sideband.basic_block_live_at_start.empty()) {
-    out.sideband.basic_block_live_at_start[0].insert(kFramePointerRegnum);
-  }
+  // Step 6: Recompute pre-reload RTL liveness, refresh managed `REG_NOTES`,
+  // and finalize sideband statistics.
+  const int min_final_max_regno =
+      (parsed_flags.opt_level == 0) ? kFirstPseudoRegister : reload_cfg.sideband.max_regno;
+  FinalizePreReloadLivenessAndSideband(profile, min_final_max_regno, restored_any_fp,
+                                       target_note_pseudos, combine_priority_dead_regs,
+                                       spill_outcome.phantom_pseudos, &all_parsed_blocks, &out);
 
   return out;
 }

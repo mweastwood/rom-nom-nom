@@ -107,7 +107,8 @@ void CollectHardRegReads(const RtlExpr& expr, bool gp64, bool fp64, MipsHardRegS
   }
 }
 
-void ApplyCallClobbersAndConservativeArgUses(MipsHardRegSet* defs, MipsHardRegSet* uses) {
+void ApplyCallClobbersAndUses(const RtlPatternAndNotes& call_pn, bool gp64, bool fp64,
+                              MipsHardRegSet* defs, MipsHardRegSet* uses) {
   static constexpr int kCallClobbered[] = {
       1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 24, 25, 31, 32, 33, 34,
       35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 64, 65, 66, 67,
@@ -115,8 +116,15 @@ void ApplyCallClobbersAndConservativeArgUses(MipsHardRegSet* defs, MipsHardRegSe
   for (int r : kCallClobbered) {
     defs->Set(r);
   }
-  // Conservatively keep incoming ABI argument registers live into the call so
-  // scratch selection prior to a call never clobbers an active argument.
+  if (call_pn.has_explicit_call_fusage) {
+    for (const RtlExpr& fu : call_pn.call_fusage) {
+      CollectHardRegReads(fu, gp64, fp64, uses);
+    }
+    return;
+  }
+  // Conservatively keep incoming ABI argument registers live into the call when
+  // explicit `CALL_INSN_FUNCTION_USAGE` is unavailable so scratch selection
+  // prior to a call never clobbers an active argument.
   for (int r : {4, 5, 6, 7, 44, 45, 46, 47}) {
     uses->Set(r);
   }
@@ -125,7 +133,8 @@ void ApplyCallClobbersAndConservativeArgUses(MipsHardRegSet* defs, MipsHardRegSe
 std::vector<MipsHardRegSet> ComputeBlockHardRegLiveAfter(
     const RtlControlFlowGraph& cfg, size_t b, const std::vector<RtlPatternAndNotes>& insns,
     bool gp64, bool fp64,
-    const std::optional<RtlPatternAndNotes>* epilogue_delay_override = nullptr) {
+    const std::optional<RtlPatternAndNotes>* epilogue_delay_override = nullptr,
+    bool compute_live_in_when_sideband_empty = false) {
   MipsHardRegSet cur_live;
   const auto& blk = cfg.rpo_blocks[b];
   if (blk.successors.empty()) {
@@ -152,11 +161,20 @@ std::vector<MipsHardRegSet> ComputeBlockHardRegLiveAfter(
         cur_live.Or(ep_uses);
       }
     }
-  } else {
+  } else if (!cfg.sideband.basic_block_live_at_start.empty()) {
     for (size_t succ : blk.successors) {
       auto it = cfg.sideband.basic_block_live_at_start.find(static_cast<int>(succ));
       if (it != cfg.sideband.basic_block_live_at_start.end()) {
         for (int r : it->second) {
+          cur_live.Set(r);
+        }
+      }
+    }
+  } else if (compute_live_in_when_sideband_empty) {
+    const std::vector<std::vector<int>> computed_live_in = ComputePostReloadHardRegLiveIn(cfg);
+    for (size_t succ : blk.successors) {
+      if (succ < computed_live_in.size()) {
+        for (int r : computed_live_in[succ]) {
           cur_live.Set(r);
         }
       }
@@ -179,7 +197,12 @@ std::vector<MipsHardRegSet> ComputeBlockHardRegLiveAfter(
       const bool is_call_seq =
           pat.children[0].op == RtlOp::kCallInsn || ExprContainsCall(pat.children[0].children[0]);
       if (is_call_seq) {
-        ApplyCallClobbersAndConservativeArgUses(&head_defs, &head_uses);
+        auto sub0 = RtlPatternAndNotes::FromSequenceSubInsn(pat.children[0]);
+        if (sub0.ok() && sub0->has_explicit_call_fusage) {
+          ApplyCallClobbersAndUses(*sub0, gp64, fp64, &head_defs, &head_uses);
+        } else {
+          ApplyCallClobbersAndUses(insns[i], gp64, fp64, &head_defs, &head_uses);
+        }
       }
       MipsHardRegSet slot_defs;
       MipsHardRegSet slot_uses;
@@ -202,7 +225,7 @@ std::vector<MipsHardRegSet> ComputeBlockHardRegLiveAfter(
     MipsHardRegSet uses;
     CollectHardRegDefsAndUses(pat, gp64, fp64, &defs, &uses);
     if (ExprContainsCall(pat)) {
-      ApplyCallClobbersAndConservativeArgUses(&defs, &uses);
+      ApplyCallClobbersAndUses(insns[i], gp64, fp64, &defs, &uses);
     }
     cur_live.AndNot(defs);
     cur_live.Or(uses);
@@ -865,10 +888,15 @@ bool TryRecombineAdjacentSplitMovstrsiInBlock(std::vector<RtlPatternAndNotes>* i
 
 bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t b,
                                          bool mark_newly_folded_sentinel,
-                                         std::vector<RtlPatternAndNotes>* insns) {
+                                         std::vector<RtlPatternAndNotes>* insns,
+                                         bool compute_live_in_when_sideband_empty) {
   bool changed = false;
-  std::vector<MipsHardRegSet> live_after =
-      ComputeBlockHardRegLiveAfter(cfg, b, *insns, /*gp64=*/false, /*fp64=*/false);
+  auto recompute_live_after = [&]() {
+    return ComputeBlockHardRegLiveAfter(cfg, b, *insns, /*gp64=*/false, /*fp64=*/false,
+                                        /*epilogue_delay_override=*/nullptr,
+                                        compute_live_in_when_sideband_empty);
+  };
+  std::vector<MipsHardRegSet> live_after = recompute_live_after();
 
   for (size_t i = 0; i < insns->size(); ++i) {
     // 1. Widening 32x32->64 multiply (`mulsidi3_internal` / `umulsidi3_internal`),
@@ -922,8 +950,7 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
                                  RtlExpr::MakeReg(RtlMachineMode::kDi, 64)),
                 mark_newly_folded_sentinel);
             insns->erase(insns->begin() + static_cast<ptrdiff_t>(j + 1));
-            live_after =
-                ComputeBlockHardRegLiveAfter(cfg, b, *insns, /*gp64=*/false, /*fp64=*/false);
+            live_after = recompute_live_after();
             changed = true;
             break;
           }
@@ -984,7 +1011,7 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
               mark_newly_folded_sentinel);
           insns->erase(insns->begin() + static_cast<ptrdiff_t>(i + 1),
                        insns->begin() + static_cast<ptrdiff_t>(i + 4));
-          live_after = ComputeBlockHardRegLiveAfter(cfg, b, *insns, /*gp64=*/false, /*fp64=*/false);
+          live_after = recompute_live_after();
           changed = true;
           continue;
         }
@@ -1019,7 +1046,7 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
             mark_newly_folded_sentinel);
         insns->erase(insns->begin() + static_cast<ptrdiff_t>(i + 1),
                      insns->begin() + static_cast<ptrdiff_t>(i + 4));
-        live_after = ComputeBlockHardRegLiveAfter(cfg, b, *insns, /*gp64=*/false, /*fp64=*/false);
+        live_after = recompute_live_after();
         changed = true;
         continue;
       }
@@ -1054,7 +1081,7 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
             mark_newly_folded_sentinel);
         insns->erase(insns->begin() + static_cast<ptrdiff_t>(i + 1),
                      insns->begin() + static_cast<ptrdiff_t>(i + 4));
-        live_after = ComputeBlockHardRegLiveAfter(cfg, b, *insns, /*gp64=*/false, /*fp64=*/false);
+        live_after = recompute_live_after();
         changed = true;
         continue;
       }
@@ -1091,7 +1118,7 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
               mark_newly_folded_sentinel);
           insns->erase(insns->begin() + static_cast<ptrdiff_t>(i + 1),
                        insns->begin() + static_cast<ptrdiff_t>(i + 4));
-          live_after = ComputeBlockHardRegLiveAfter(cfg, b, *insns, /*gp64=*/false, /*fp64=*/false);
+          live_after = recompute_live_after();
           changed = true;
           continue;
         }
@@ -1131,7 +1158,7 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
               mark_newly_folded_sentinel);
           insns->erase(insns->begin() + static_cast<ptrdiff_t>(i + 1),
                        insns->begin() + static_cast<ptrdiff_t>(i + 4));
-          live_after = ComputeBlockHardRegLiveAfter(cfg, b, *insns, /*gp64=*/false, /*fp64=*/false);
+          live_after = recompute_live_after();
           changed = true;
           continue;
         }
@@ -1170,7 +1197,7 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
               mark_newly_folded_sentinel);
           insns->erase(insns->begin() + static_cast<ptrdiff_t>(i + 1),
                        insns->begin() + static_cast<ptrdiff_t>(i + 3));
-          live_after = ComputeBlockHardRegLiveAfter(cfg, b, *insns, /*gp64=*/false, /*fp64=*/false);
+          live_after = recompute_live_after();
           changed = true;
           continue;
         }
@@ -1213,8 +1240,7 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
                   }),
                   mark_newly_folded_sentinel);
               insns->erase(insns->begin() + static_cast<ptrdiff_t>(i + 1));
-              live_after =
-                  ComputeBlockHardRegLiveAfter(cfg, b, *insns, /*gp64=*/false, /*fp64=*/false);
+              live_after = recompute_live_after();
               changed = true;
               continue;
             }
@@ -1245,8 +1271,7 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
                   }),
                   mark_newly_folded_sentinel);
               insns->erase(insns->begin() + static_cast<ptrdiff_t>(i + 1));
-              live_after =
-                  ComputeBlockHardRegLiveAfter(cfg, b, *insns, /*gp64=*/false, /*fp64=*/false);
+              live_after = recompute_live_after();
               changed = true;
               continue;
             }
@@ -1280,8 +1305,7 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
                   }),
                   mark_newly_folded_sentinel);
               insns->erase(insns->begin() + static_cast<ptrdiff_t>(i + 1));
-              live_after =
-                  ComputeBlockHardRegLiveAfter(cfg, b, *insns, /*gp64=*/false, /*fp64=*/false);
+              live_after = recompute_live_after();
               changed = true;
               continue;
             }
@@ -1374,7 +1398,8 @@ bool TryFoldGp32DiWitnessedIdioms(const RtlControlFlowGraph& cfg, int frame_size
             const bool is_epilogue_callee_restore = is_exit_blk && base_reg == 29 &&
                                                     IsSavedGprOrRaRegno(fold_d_hi) && off0 >= 0 &&
                                                     off0 + 4 < frame_size;
-            if (fold_d_hi != -1 && !is_epilogue_callee_restore) {
+            const bool aligned_frame_off = (base_reg != 29 && base_reg != 30) || (off0 % 8) == 0;
+            if (fold_d_hi != -1 && !is_epilogue_callee_restore && aligned_frame_off) {
               insns[i] = MakeFoldedInsn(
                   RtlExpr::MakeSet(RtlExpr::MakeReg(RtlMachineMode::kDi, fold_d_hi, dst_flags),
                                    RtlExpr::MakeMem(RtlMachineMode::kDi, std::move(fold_addr0))),
@@ -1407,7 +1432,94 @@ bool TryFoldGp32DiWitnessedIdioms(const RtlControlFlowGraph& cfg, int frame_size
                   b == 0 && frame_size > 0 && base_reg == 29 && !defined_so_far.Test(29) &&
                   (s0 == 4 || s0 == 6) && off0 == (s0 - 4) * 4 && !defined_so_far.Test(s0) &&
                   !defined_so_far.Test(s1);
-              if (!is_prologue_callee_save && !is_prologue_variadic_save) {
+              const bool aligned_frame_off = (base_reg != 29 && base_reg != 30) || (off0 % 8) == 0;
+              bool separate_si_frame_slots = false;
+              if (aligned_frame_off && (base_reg == 29 || base_reg == 30)) {
+                bool saw_di_slot = false;
+                bool saw_si_read_lo = false;
+                bool saw_si_read_hi = false;
+                auto extract_base_disp = [&](const RtlExpr& addr, int64_t* out_disp) -> bool {
+                  if (addr.op == RtlOp::kReg && addr.RegNo() == base_reg) {
+                    *out_disp = 0;
+                    return true;
+                  }
+                  if (addr.op == RtlOp::kPlus && addr.children.size() == 2 &&
+                      addr.children[0].op == RtlOp::kReg && addr.children[0].RegNo() == base_reg &&
+                      addr.children[1].IsConstInt()) {
+                    *out_disp = addr.children[1].int_val;
+                    return true;
+                  }
+                  return false;
+                };
+                for (size_t qb = 0; qb < blocks->size() && !saw_di_slot; ++qb) {
+                  const bool q_is_exit_blk = cfg.rpo_blocks[qb].successors.empty();
+                  for (size_t qi = 0; qi < (*blocks)[qb].size(); ++qi) {
+                    if (qb == b && (qi == i || qi == i + 1)) {
+                      continue;
+                    }
+                    const RtlExpr& qpat = (*blocks)[qb][qi].pattern;
+                    if (qi + 1 < (*blocks)[qb].size() && !(qb == b && qi + 1 == i)) {
+                      const RtlExpr& qnext = (*blocks)[qb][qi + 1].pattern;
+                      int qr0 = -1, qr1 = -1, qbase = -1;
+                      int64_t qload_off = 0;
+                      if (qpat.IsSet() && qnext.IsSet() && IsPlainSiGpr(qpat.SetDest(), &qr0) &&
+                          IsPlainSiGpr(qnext.SetDest(), &qr1) && qpat.SetSrc().IsMem() &&
+                          qpat.SetSrc().mode == RtlMachineMode::kSi &&
+                          !qpat.SetSrc().flags.volatil && !qpat.SetSrc().flags.in_struct &&
+                          qpat.SetSrc().children.size() == 1 && qnext.SetSrc().IsMem() &&
+                          qnext.SetSrc().mode == RtlMachineMode::kSi &&
+                          !qnext.SetSrc().flags.volatil && !qnext.SetSrc().flags.in_struct &&
+                          qnext.SetSrc().children.size() == 1) {
+                        int fold_qr = -1;
+                        if (IsValidGp32DiPair(qr0) && qr1 == qr0 + 1 &&
+                            TryMatchAddrPlusFour(qpat.SetSrc().children[0],
+                                                 qnext.SetSrc().children[0], &qbase, &qload_off) &&
+                            qr0 != qbase) {
+                          fold_qr = qr0;
+                        } else if (IsValidGp32DiPair(qr1) && qr0 == qr1 + 1 &&
+                                   TryMatchAddrPlusFour(qnext.SetSrc().children[0],
+                                                        qpat.SetSrc().children[0], &qbase,
+                                                        &qload_off) &&
+                                   qr1 == qbase) {
+                          fold_qr = qr1;
+                        }
+                        const bool is_epilogue_restore =
+                            q_is_exit_blk && qbase == 29 && IsSavedGprOrRaRegno(fold_qr) &&
+                            qload_off >= 0 && qload_off + 4 < frame_size;
+                        if (fold_qr != -1 && !is_epilogue_restore && qbase == base_reg &&
+                            qload_off == off0) {
+                          saw_di_slot = true;
+                          break;
+                        }
+                      }
+                    }
+                    qpat.Visit([&](const RtlExpr& n) {
+                      if (n.op != RtlOp::kMem || n.children.empty()) {
+                        return;
+                      }
+                      int64_t qoff = 0;
+                      if (!extract_base_disp(n.children[0], &qoff)) {
+                        return;
+                      }
+                      if (n.mode == RtlMachineMode::kDi && qoff == off0) {
+                        saw_di_slot = true;
+                        return;
+                      }
+                      const bool is_lhs = qpat.IsSet() && &qpat.SetDest() == &n;
+                      if (!is_lhs && n.mode == RtlMachineMode::kSi) {
+                        if (qoff == off0) {
+                          saw_si_read_lo = true;
+                        } else if (qoff == off0 + 4) {
+                          saw_si_read_hi = true;
+                        }
+                      }
+                    });
+                  }
+                }
+                separate_si_frame_slots = !saw_di_slot && saw_si_read_lo && saw_si_read_hi;
+              }
+              if (!is_prologue_callee_save && !is_prologue_variadic_save && aligned_frame_off &&
+                  !separate_si_frame_slots) {
                 insns[i] = MakeFoldedInsn(
                     RtlExpr::MakeSet(
                         RtlExpr::MakeMem(RtlMachineMode::kDi, p0.SetDest().children[0]),
@@ -1614,8 +1726,12 @@ bool TryFoldMovstrsiBlockMovesInBlock(const RtlControlFlowGraph& cfg, size_t b,
                                       std::vector<RtlPatternAndNotes>* insns,
                                       std::optional<RtlPatternAndNotes>* epilogue_delay_pn) {
   bool changed = false;
-  std::vector<MipsHardRegSet> live_after =
-      ComputeBlockHardRegLiveAfter(cfg, b, *insns, options.gp64, options.fp64, epilogue_delay_pn);
+  auto recompute_live_after = [&]() {
+    return ComputeBlockHardRegLiveAfter(cfg, b, *insns, options.gp64, options.fp64,
+                                        epilogue_delay_pn,
+                                        options.compute_live_in_when_sideband_empty);
+  };
+  std::vector<MipsHardRegSet> live_after = recompute_live_after();
 
   for (size_t pos = 0; pos < insns->size(); ++pos) {
     bool folded_here = false;
@@ -1741,8 +1857,7 @@ bool TryFoldMovstrsiBlockMovesInBlock(const RtlControlFlowGraph& cfg, size_t b,
                                  options.mark_newly_folded_sentinel);
               insns->erase(insns->begin() + static_cast<ptrdiff_t>(pos + 1),
                            insns->begin() + static_cast<ptrdiff_t>(pos + 2 * n));
-              live_after = ComputeBlockHardRegLiveAfter(cfg, b, *insns, options.gp64, options.fp64,
-                                                        epilogue_delay_pn);
+              live_after = recompute_live_after();
               changed = true;
               folded_here = true;
               break;
@@ -1862,7 +1977,15 @@ bool TryFoldMovstrsiBlockMovesInBlock(const RtlControlFlowGraph& cfg, size_t b,
                                           options.gp64, options.fp64, &head_defs, &head_uses);
                 if ((*insns)[tail_idx].pattern.children[0].op == RtlOp::kCallInsn ||
                     ExprContainsCall((*insns)[tail_idx].pattern.children[0].children[0])) {
-                  ApplyCallClobbersAndConservativeArgUses(&head_defs, &head_uses);
+                  auto sub0 = RtlPatternAndNotes::FromSequenceSubInsn(
+                      (*insns)[tail_idx].pattern.children[0]);
+                  if (sub0.ok() && sub0->has_explicit_call_fusage) {
+                    ApplyCallClobbersAndUses(*sub0, options.gp64, options.fp64, &head_defs,
+                                             &head_uses);
+                  } else {
+                    ApplyCallClobbersAndUses((*insns)[tail_idx], options.gp64, options.fp64,
+                                             &head_defs, &head_uses);
+                  }
                 }
                 live_constraint.Or(head_uses);
                 for (size_t u = pos + 2 * n - 1; u < tail_idx; ++u) {
@@ -1906,8 +2029,7 @@ bool TryFoldMovstrsiBlockMovesInBlock(const RtlControlFlowGraph& cfg, size_t b,
                     MakeFoldedInsn(std::move(part1), options.mark_newly_folded_sentinel);
                 insns->erase(insns->begin() + static_cast<ptrdiff_t>(pos + 1),
                              insns->begin() + static_cast<ptrdiff_t>(pos + 2 * n - 1));
-                live_after = ComputeBlockHardRegLiveAfter(cfg, b, *insns, options.gp64,
-                                                          options.fp64, epilogue_delay_pn);
+                live_after = recompute_live_after();
                 changed = true;
                 folded_here = true;
                 break;
@@ -1921,8 +2043,7 @@ bool TryFoldMovstrsiBlockMovesInBlock(const RtlControlFlowGraph& cfg, size_t b,
 
   if (TryCoalesceMultiBatchMovstrsiInBlock(insns, options.gp64,
                                            options.mark_newly_folded_sentinel)) {
-    live_after =
-        ComputeBlockHardRegLiveAfter(cfg, b, *insns, options.gp64, options.fp64, epilogue_delay_pn);
+    live_after = recompute_live_after();
     changed = true;
   }
 
@@ -1965,13 +2086,698 @@ bool TryFoldMovstrsiBlockMovesInBlock(const RtlControlFlowGraph& cfg, size_t b,
     }
     if (all_fixed) {
       (*insns)[pos] = MakeFoldedInsn(std::move(updated), options.mark_newly_folded_sentinel);
-      live_after = ComputeBlockHardRegLiveAfter(cfg, b, *insns, options.gp64, options.fp64,
-                                                epilogue_delay_pn);
+      live_after = recompute_live_after();
       changed = true;
     }
   }
 
   return changed;
+}
+
+bool TryFoldGp32DfInGprPairMoves(const RtlControlFlowGraph& cfg, int frame_size,
+                                 const absl::flat_hash_set<int>& compare_di_pairs,
+                                 const absl::flat_hash_set<int>& existing_di_regs,
+                                 bool mark_newly_folded_sentinel,
+                                 std::vector<std::vector<RtlPatternAndNotes>>* blocks) {
+  absl::flat_hash_set<int> df_gpr_pairs;
+  for (const auto& blk : *blocks) {
+    for (const RtlPatternAndNotes& pn : blk) {
+      pn.pattern.Visit([&](const RtlExpr& n) {
+        if (n.op == RtlOp::kReg && n.mode == RtlMachineMode::kDf) {
+          const int r = n.RegNo();
+          if (IsValidGp32DiPair(r) && !existing_di_regs.contains(r) &&
+              !compare_di_pairs.contains(r)) {
+            df_gpr_pairs.insert(r);
+          }
+        }
+      });
+    }
+  }
+  if (df_gpr_pairs.empty()) {
+    return false;
+  }
+
+  bool changed = false;
+  for (size_t b = 0; b < blocks->size(); ++b) {
+    auto& insns = (*blocks)[b];
+    const bool is_exit_blk = cfg.rpo_blocks[b].successors.empty();
+    MipsHardRegSet defined_so_far;
+    for (size_t i = 0; i < insns.size(); ++i) {
+      if (i + 1 < insns.size() && insns[i].pattern.IsSet() && insns[i + 1].pattern.IsSet()) {
+        const RtlExpr& p0 = insns[i].pattern;
+        const RtlExpr& p1 = insns[i + 1].pattern;
+        int r0 = -1;
+        int r1 = -1;
+        if (IsPlainSiGpr(p0.SetDest(), &r0) && IsPlainSiGpr(p1.SetDest(), &r1) &&
+            p0.SetSrc().IsMem() && p0.SetSrc().mode == RtlMachineMode::kSi &&
+            !p0.SetSrc().flags.volatil && !p0.SetSrc().flags.in_struct &&
+            p0.SetSrc().children.size() == 1 && p1.SetSrc().IsMem() &&
+            p1.SetSrc().mode == RtlMachineMode::kSi && !p1.SetSrc().flags.volatil &&
+            !p1.SetSrc().flags.in_struct && p1.SetSrc().children.size() == 1) {
+          int base_reg = -1;
+          int64_t off0 = 0;
+          int fold_d_hi = -1;
+          RtlExpr fold_addr0;
+          RtlFlags dst_flags;
+          if (df_gpr_pairs.contains(r0) && r1 == r0 + 1 &&
+              TryMatchAddrPlusFour(p0.SetSrc().children[0], p1.SetSrc().children[0], &base_reg,
+                                   &off0) &&
+              r0 != base_reg) {
+            fold_d_hi = r0;
+            fold_addr0 = p0.SetSrc().children[0];
+            dst_flags = p0.SetDest().flags;
+          } else if (df_gpr_pairs.contains(r1) && r0 == r1 + 1 &&
+                     TryMatchAddrPlusFour(p1.SetSrc().children[0], p0.SetSrc().children[0],
+                                          &base_reg, &off0) &&
+                     r1 == base_reg) {
+            fold_d_hi = r1;
+            fold_addr0 = p1.SetSrc().children[0];
+            dst_flags = p1.SetDest().flags;
+          }
+          const bool is_epilogue_callee_restore = is_exit_blk && base_reg == 29 &&
+                                                  IsSavedGprOrRaRegno(fold_d_hi) && off0 >= 0 &&
+                                                  off0 + 4 < frame_size;
+          if (fold_d_hi != -1 && !is_epilogue_callee_restore) {
+            insns[i] = MakeFoldedInsn(
+                RtlExpr::MakeSet(RtlExpr::MakeReg(RtlMachineMode::kDf, fold_d_hi, dst_flags),
+                                 RtlExpr::MakeMem(RtlMachineMode::kDf, std::move(fold_addr0))),
+                mark_newly_folded_sentinel);
+            insns.erase(insns.begin() + static_cast<ptrdiff_t>(i + 1));
+            defined_so_far.Set(fold_d_hi);
+            defined_so_far.Set(fold_d_hi + 1);
+            changed = true;
+            continue;
+          }
+        }
+        int s0 = -1;
+        int s1 = -1;
+        if (p0.SetDest().IsMem() && p0.SetDest().mode == RtlMachineMode::kSi &&
+            !p0.SetDest().flags.volatil && !p0.SetDest().flags.in_struct &&
+            p0.SetDest().children.size() == 1 && p1.SetDest().IsMem() &&
+            p1.SetDest().mode == RtlMachineMode::kSi && !p1.SetDest().flags.volatil &&
+            !p1.SetDest().flags.in_struct && p1.SetDest().children.size() == 1 &&
+            IsPlainSiGpr(p0.SetSrc(), &s0) && IsPlainSiGpr(p1.SetSrc(), &s1) &&
+            df_gpr_pairs.contains(s0) && s1 == s0 + 1) {
+          int base_reg = -1;
+          int64_t off0 = 0;
+          if (TryMatchAddrPlusFour(p0.SetDest().children[0], p1.SetDest().children[0], &base_reg,
+                                   &off0)) {
+            const bool is_prologue_callee_save =
+                b == 0 && base_reg == 29 && IsSavedGprOrRaRegno(s0) && off0 >= 0 &&
+                off0 + 4 < frame_size && !defined_so_far.Test(s0) && !defined_so_far.Test(s1);
+            if (!is_prologue_callee_save) {
+              insns[i] = MakeFoldedInsn(
+                  RtlExpr::MakeSet(RtlExpr::MakeMem(RtlMachineMode::kDf, p0.SetDest().children[0]),
+                                   RtlExpr::MakeReg(RtlMachineMode::kDf, s0)),
+                  mark_newly_folded_sentinel);
+              insns.erase(insns.begin() + static_cast<ptrdiff_t>(i + 1));
+              changed = true;
+              continue;
+            }
+          }
+        }
+      }
+      MipsHardRegSet defs;
+      MipsHardRegSet uses;
+      CollectHardRegDefsAndUses(insns[i].pattern, /*gp64=*/false, /*fp64=*/false, &defs, &uses);
+      defined_so_far.Or(defs);
+    }
+  }
+  return changed;
+}
+
+namespace {
+
+bool MatchGp32WordDest(const RtlExpr& dst, int expected_regno) {
+  if (dst.op == RtlOp::kReg && dst.mode == RtlMachineMode::kSi && dst.RegNo() == expected_regno) {
+    return true;
+  }
+  if (dst.op == RtlOp::kSubreg && dst.mode == RtlMachineMode::kSi && dst.children.size() == 1 &&
+      dst.children[0].op == RtlOp::kReg && dst.children[0].mode == RtlMachineMode::kDi) {
+    return dst.children[0].RegNo() + static_cast<int>(dst.int_val) == expected_regno;
+  }
+  return false;
+}
+
+bool ExprReadsExplicitDiReg(const RtlExpr& expr, int di_regno, bool in_dest = false) {
+  if (expr.op == RtlOp::kSequence && expr.children.size() >= 2) {
+    for (size_t sub = 0; sub < 2; ++sub) {
+      if (!expr.children[sub].children.empty() &&
+          ExprReadsExplicitDiReg(expr.children[sub].children[0], di_regno, false)) {
+        return true;
+      }
+    }
+    return false;
+  }
+  if (expr.op == RtlOp::kSet && expr.children.size() == 2) {
+    const bool dst_mem = (expr.children[0].op == RtlOp::kMem);
+    if (dst_mem && ExprReadsExplicitDiReg(expr.children[0], di_regno, false)) {
+      return true;
+    }
+    return ExprReadsExplicitDiReg(expr.children[1], di_regno, false);
+  }
+  if (expr.op == RtlOp::kParallel) {
+    for (const RtlExpr& elem : expr.children) {
+      if (ExprReadsExplicitDiReg(elem, di_regno, false)) {
+        return true;
+      }
+    }
+    return false;
+  }
+  if (expr.op == RtlOp::kClobber || expr.op == RtlOp::kSubreg) {
+    return false;
+  }
+  if (!in_dest && expr.op == RtlOp::kReg && expr.mode == RtlMachineMode::kDi &&
+      expr.RegNo() == di_regno) {
+    return true;
+  }
+  for (const RtlExpr& ch : expr.children) {
+    if (ExprReadsExplicitDiReg(ch, di_regno, in_dest)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+struct NoConflictBlockInsn {
+  RtlPatternAndNotes parsed;
+  MipsHardRegSet read_regs;
+  MipsHardRegSet write_regs;
+  bool is_call = false;
+  bool is_jump_or_ret = false;
+};
+
+NoConflictBlockInsn BuildNoConflictBlockInsn(RtlPatternAndNotes parsed, bool gp64, bool fp64,
+                                             const std::optional<RtlInsn>& orig_rinsn) {
+  if (orig_rinsn.has_value() && orig_rinsn->has_explicit_call_fusage &&
+      !parsed.has_explicit_call_fusage) {
+    parsed.has_explicit_call_fusage = true;
+    parsed.call_fusage = orig_rinsn->call_fusage;
+  }
+  NoConflictBlockInsn out{.parsed = std::move(parsed)};
+  const RtlExpr& pat = out.parsed.pattern;
+  out.is_jump_or_ret = IsAnyJumpOrReturnTopExpr(pat);
+  if (pat.op == RtlOp::kSequence && pat.children.size() >= 2 && !pat.children[0].children.empty() &&
+      !pat.children[1].children.empty()) {
+    CollectHardRegDefsAndUses(pat.children[0].children[0], gp64, fp64, &out.write_regs,
+                              &out.read_regs);
+    out.is_call =
+        pat.children[0].op == RtlOp::kCallInsn || ExprContainsCall(pat.children[0].children[0]);
+    if (out.is_call) {
+      auto sub0 = RtlPatternAndNotes::FromSequenceSubInsn(pat.children[0]);
+      if (sub0.ok() && sub0->has_explicit_call_fusage) {
+        ApplyCallClobbersAndUses(*sub0, gp64, fp64, &out.write_regs, &out.read_regs);
+      } else {
+        ApplyCallClobbersAndUses(out.parsed, gp64, fp64, &out.write_regs, &out.read_regs);
+      }
+    }
+    CollectHardRegDefsAndUses(pat.children[1].children[0], gp64, fp64, &out.write_regs,
+                              &out.read_regs);
+    return out;
+  }
+  CollectHardRegDefsAndUses(pat, gp64, fp64, &out.write_regs, &out.read_regs);
+  out.is_call = ExprContainsCall(pat);
+  if (out.is_call) {
+    ApplyCallClobbersAndUses(out.parsed, gp64, fp64, &out.write_regs, &out.read_regs);
+  }
+  return out;
+}
+
+bool IsNoConflictPrologueSaveStore(const RtlExpr& pat) {
+  if (pat.op != RtlOp::kSet || pat.children.size() != 2) {
+    return false;
+  }
+  const RtlExpr& dst = pat.children[0];
+  const RtlExpr& src = pat.children[1];
+  if (dst.op != RtlOp::kMem || dst.children.size() != 1 || dst.flags.volatil ||
+      dst.flags.in_struct || src.op != RtlOp::kReg || src.flags.volatil || src.flags.in_struct) {
+    return false;
+  }
+  const int regno = src.RegNo();
+  const bool is_saved =
+      (regno >= 16 && regno <= 23) || regno == 30 || regno == 31 || (regno >= 52 && regno <= 63);
+  if (!is_saved) {
+    return false;
+  }
+  const RtlExpr& addr = dst.children[0];
+  if (addr.op == RtlOp::kReg) {
+    return addr.RegNo() == 29 || addr.RegNo() == 13;
+  }
+  return addr.op == RtlOp::kPlus && addr.children.size() == 2 &&
+         addr.children[0].op == RtlOp::kReg &&
+         (addr.children[0].RegNo() == 29 || addr.children[0].RegNo() == 13) &&
+         addr.children[1].op == RtlOp::kConstInt && addr.children[1].int_val >= 0;
+}
+
+bool IsDiRegConsumedAfterRecombiningTailDelaySlot(const RtlControlFlowGraph& cfg, size_t b,
+                                                  const std::vector<NoConflictBlockInsn>& insns,
+                                                  size_t after_pos, int dh, bool gp64, bool fp64) {
+  const RtlBasicBlock& blk = cfg.rpo_blocks[b];
+  const bool has_epilogue_delay = blk.successors.empty() &&
+                                  cfg.sideband.epilogue_delay_pattern.has_value() &&
+                                  !cfg.sideband.epilogue_delay_pattern->empty();
+  bool has_seq = false;
+  for (size_t k = after_pos; k < insns.size(); ++k) {
+    if (insns[k].parsed.pattern.op == RtlOp::kSequence) {
+      has_seq = true;
+      break;
+    }
+  }
+  if (!has_seq && !has_epilogue_delay) {
+    return false;
+  }
+  RtlControlFlowGraph scratch;
+  scratch.rpo_blocks.resize(1);
+  std::vector<std::vector<RtlPatternAndNotes>> scratch_blocks(1);
+  std::vector<RtlPatternAndNotes>& sinsns = scratch_blocks[0];
+  auto insert_before_trailing_uses = [&sinsns](RtlPatternAndNotes pn) {
+    size_t ins_pos = sinsns.size();
+    while (ins_pos > 0 && (sinsns[ins_pos - 1].pattern.op == RtlOp::kUse ||
+                           sinsns[ins_pos - 1].pattern.op == RtlOp::kClobber)) {
+      --ins_pos;
+    }
+    sinsns.insert(sinsns.begin() + static_cast<ptrdiff_t>(ins_pos), std::move(pn));
+  };
+  bool pushed_epilogue_delay = false;
+  for (size_t k = after_pos; k < insns.size(); ++k) {
+    const RtlExpr& pat = insns[k].parsed.pattern;
+    if (pat.op == RtlOp::kSequence && pat.children.size() >= 2) {
+      auto head_pn = RtlPatternAndNotes::FromSequenceSubInsn(pat.children[0]);
+      auto slot_pn = RtlPatternAndNotes::FromSequenceSubInsn(pat.children[1]);
+      if (!head_pn.ok() || !slot_pn.ok()) {
+        return false;
+      }
+      const bool is_call =
+          pat.children[0].op == RtlOp::kCallInsn || ExprContainsCall(head_pn->pattern);
+      if (is_call) {
+        sinsns.push_back(std::move(*slot_pn));
+        sinsns.push_back(std::move(*head_pn));
+      } else {
+        insert_before_trailing_uses(std::move(*slot_pn));
+        sinsns.push_back(std::move(*head_pn));
+      }
+      continue;
+    }
+    if (has_epilogue_delay && !pushed_epilogue_delay &&
+        (pat.op == RtlOp::kReturn || IsReturnParallelTop(pat) ||
+         (k + 1 == insns.size() && pat.op == RtlOp::kUse))) {
+      auto ep_pn = ParsePatternAndNotes(*cfg.sideband.epilogue_delay_pattern);
+      if (ep_pn.ok()) {
+        insert_before_trailing_uses(std::move(*ep_pn));
+        pushed_epilogue_delay = true;
+      }
+    }
+    sinsns.push_back(insns[k].parsed);
+  }
+  if (has_epilogue_delay && !pushed_epilogue_delay) {
+    auto ep_pn = ParsePatternAndNotes(*cfg.sideband.epilogue_delay_pattern);
+    if (ep_pn.ok()) {
+      insert_before_trailing_uses(std::move(*ep_pn));
+    }
+  }
+  auto sync_scratch_block = [&]() {
+    scratch.rpo_blocks[0].instructions.clear();
+    scratch.rpo_blocks[0].instructions.reserve(sinsns.size());
+    for (const RtlPatternAndNotes& pn : sinsns) {
+      scratch.rpo_blocks[0].instructions.push_back(pn.ToGccPrintRtlString());
+    }
+    scratch.rpo_blocks[0].SyncRtlInsnsFromInstructions();
+  };
+  sync_scratch_block();
+
+  const int frame_size = DetectStackFrameSize(cfg);
+  absl::flat_hash_set<int> compare_di_pairs;
+  absl::flat_hash_set<int> existing_di_regs = {dh};
+  bool dummy_has_di = true;
+  CollectExistingDiEvenRegs(scratch_blocks, &existing_di_regs, &dummy_has_di);
+  for (int iter = 0; iter < 4; ++iter) {
+    bool changed = TryFoldGp32DiMultiInsnIdiomsInBlock(
+        scratch, /*b=*/0, /*mark_newly_folded_sentinel=*/false, &sinsns,
+        /*compute_live_in_when_sideband_empty=*/false);
+    if (changed) {
+      sync_scratch_block();
+      CollectExistingDiEvenRegs(scratch_blocks, &existing_di_regs, &dummy_has_di);
+    }
+    MipsWitnessedDiFoldOptions wit_opts;
+    wit_opts.allow_noncontiguous_reg_move = true;
+    wit_opts.mark_newly_folded_sentinel = false;
+    if (TryFoldGp32DiWitnessedIdioms(scratch, frame_size, compare_di_pairs, existing_di_regs,
+                                     wit_opts, &scratch_blocks)) {
+      changed = true;
+      sync_scratch_block();
+    }
+    if (!changed) {
+      break;
+    }
+    CollectExistingDiEvenRegs(scratch_blocks, &existing_di_regs, &dummy_has_di);
+  }
+
+  const int dl = dh + 1;
+  for (const RtlPatternAndNotes& pn : sinsns) {
+    if (ExprReadsExplicitDiReg(pn.pattern, dh)) {
+      return true;
+    }
+    MipsHardRegSet defs;
+    MipsHardRegSet uses;
+    CollectHardRegDefsAndUses(pn.pattern, gp64, fp64, &defs, &uses);
+    if (defs.Test(dh) || defs.Test(dl) || ExprContainsCall(pn.pattern)) {
+      break;
+    }
+  }
+  return false;
+}
+
+bool TryMatchExtendHighWordFill(const std::vector<NoConflictBlockInsn>& insns, size_t i,
+                                int src_reg, std::optional<size_t> narrow_sll_idx, int dh,
+                                const absl::flat_hash_set<size_t>& used_indices, size_t* out_j,
+                                std::optional<size_t>* out_hilo_sra_idx) {
+  const int dl = dh + 1;
+  for (size_t j = 0; j < insns.size(); ++j) {
+    if (j == i || (narrow_sll_idx.has_value() && j <= *narrow_sll_idx) ||
+        used_indices.contains(j)) {
+      continue;
+    }
+    const RtlExpr& pj = insns[j].parsed.pattern;
+    if (pj.op != RtlOp::kSet || pj.children.size() != 2 || !MatchGp32WordDest(pj.children[0], dh)) {
+      continue;
+    }
+    const RtlExpr& hi_src = pj.children[1];
+    const bool is_zero_hi =
+        !narrow_sll_idx.has_value() && (hi_src.op == RtlOp::kConstInt && hi_src.int_val == 0);
+    bool is_sign_hi =
+        (hi_src.op == RtlOp::kAshiftrt && hi_src.mode == RtlMachineMode::kSi &&
+         hi_src.children.size() == 2 && hi_src.children[0].op == RtlOp::kReg &&
+         hi_src.children[0].mode == RtlMachineMode::kSi &&
+         (hi_src.children[0].RegNo() == src_reg ||
+          (!narrow_sll_idx.has_value() && i < j && hi_src.children[0].RegNo() == dl)) &&
+         hi_src.children[1].op == RtlOp::kConstInt && hi_src.children[1].int_val == 31);
+    std::optional<size_t> hilo_sra_idx;
+    if (!is_zero_hi && !is_sign_hi && dh == 64 && hi_src.op == RtlOp::kReg &&
+        hi_src.mode == RtlMachineMode::kSi) {
+      const int tmp_reg = hi_src.RegNo();
+      for (size_t rev = j; rev > 0; --rev) {
+        const size_t cand_sra = rev - 1;
+        if (cand_sra == i || (narrow_sll_idx.has_value() && cand_sra <= *narrow_sll_idx)) {
+          continue;
+        }
+        const RtlExpr& ps = insns[cand_sra].parsed.pattern;
+        if (ps.op == RtlOp::kSet && ps.children.size() == 2 && ps.children[0].op == RtlOp::kReg &&
+            ps.children[0].mode == RtlMachineMode::kSi && ps.children[0].RegNo() == tmp_reg &&
+            ps.children[1].op == RtlOp::kAshiftrt && ps.children[1].mode == RtlMachineMode::kSi &&
+            ps.children[1].children.size() == 2 && ps.children[1].children[0].op == RtlOp::kReg &&
+            ps.children[1].children[0].mode == RtlMachineMode::kSi &&
+            ps.children[1].children[0].RegNo() == src_reg &&
+            ps.children[1].children[1].op == RtlOp::kConstInt &&
+            ps.children[1].children[1].int_val == 31 && !(tmp_reg == src_reg && cand_sra < i)) {
+          hilo_sra_idx = cand_sra;
+          is_sign_hi = true;
+          break;
+        }
+        if (insns[cand_sra].write_regs.Test(tmp_reg) || insns[cand_sra].is_call ||
+            insns[cand_sra].is_jump_or_ret) {
+          break;
+        }
+      }
+    }
+    if (!is_zero_hi && !is_sign_hi) {
+      continue;
+    }
+    size_t lo_pos = std::min(i, j);
+    if (hilo_sra_idx.has_value()) {
+      lo_pos = std::min(lo_pos, *hilo_sra_idx);
+    }
+    if (narrow_sll_idx.has_value()) {
+      lo_pos = std::min(lo_pos, *narrow_sll_idx);
+    }
+    const size_t hi_pos = std::max(i, j);
+    bool span_clean = true;
+    for (size_t k = lo_pos; k < hi_pos; ++k) {
+      if (k == i || k == j || (hilo_sra_idx.has_value() && k == *hilo_sra_idx) ||
+          (narrow_sll_idx.has_value() && k == *narrow_sll_idx)) {
+        continue;
+      }
+      const size_t src_live_end = hilo_sra_idx.has_value() ? std::max(i, *hilo_sra_idx) : hi_pos;
+      if (insns[k].is_call || insns[k].is_jump_or_ret || insns[k].write_regs.Test(dh) ||
+          insns[k].write_regs.Test(dl) || (k < src_live_end && insns[k].write_regs.Test(src_reg)) ||
+          insns[k].read_regs.Test(dh) || insns[k].read_regs.Test(dl)) {
+        span_clean = false;
+        break;
+      }
+    }
+    if (!span_clean) {
+      continue;
+    }
+    *out_j = j;
+    *out_hilo_sra_idx = hilo_sra_idx;
+    return true;
+  }
+  return false;
+}
+
+void RestoreNoConflictExtendClobbersInBlock(const RtlControlFlowGraph& cfg, size_t b, bool gp64,
+                                            bool fp64, bool runs_sched2, RtlBasicBlock* blk) {
+  if (blk->instructions.size() < 2) {
+    return;
+  }
+  std::vector<NoConflictBlockInsn> insns;
+  insns.reserve(blk->instructions.size());
+  for (size_t i = 0; i < blk->instructions.size(); ++i) {
+    auto parsed = ParsePatternAndNotes(blk->instructions[i]);
+    if (!parsed.ok()) {
+      return;
+    }
+    std::optional<RtlInsn> orig;
+    if (blk->rtl_insns.size() == blk->instructions.size()) {
+      orig = blk->rtl_insns[i];
+    }
+    insns.push_back(BuildNoConflictBlockInsn(std::move(*parsed), gp64, fp64, orig));
+  }
+
+  std::vector<std::pair<size_t, int>> insertions;
+  absl::flat_hash_set<size_t> used_indices;
+  static constexpr int kCandidateDiRegs[] = {2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 64};
+
+  for (size_t i = 0; i < insns.size(); ++i) {
+    if (used_indices.contains(i)) {
+      continue;
+    }
+    const RtlExpr& pi = insns[i].parsed.pattern;
+    if (pi.op != RtlOp::kSet || pi.children.size() != 2) {
+      continue;
+    }
+    int src_reg = -1;
+    std::optional<size_t> narrow_sll_idx;
+    if (pi.children[1].op == RtlOp::kReg && pi.children[1].mode == RtlMachineMode::kSi) {
+      src_reg = pi.children[1].RegNo();
+    } else if (pi.children[1].op == RtlOp::kAshiftrt &&
+               pi.children[1].mode == RtlMachineMode::kSi && pi.children[1].children.size() == 2 &&
+               pi.children[1].children[0].op == RtlOp::kReg &&
+               pi.children[1].children[0].mode == RtlMachineMode::kSi &&
+               pi.children[1].children[1].op == RtlOp::kConstInt &&
+               (pi.children[1].children[1].int_val == 16 ||
+                pi.children[1].children[1].int_val == 24)) {
+      const int cand_src = pi.children[1].children[0].RegNo();
+      const int64_t sh = pi.children[1].children[1].int_val;
+      for (size_t rev = i; rev > 0; --rev) {
+        const size_t k = rev - 1;
+        if (used_indices.contains(k) || insns[k].is_call || insns[k].is_jump_or_ret) {
+          break;
+        }
+        if (insns[k].write_regs.Test(cand_src)) {
+          const RtlExpr& pk = insns[k].parsed.pattern;
+          if (pk.op == RtlOp::kSet && pk.children.size() == 2 && pk.children[0].op == RtlOp::kReg &&
+              pk.children[0].mode == RtlMachineMode::kSi && pk.children[0].RegNo() == cand_src &&
+              pk.children[1].op == RtlOp::kAshift && pk.children[1].mode == RtlMachineMode::kSi &&
+              pk.children[1].children.size() == 2 && pk.children[1].children[0].op == RtlOp::kReg &&
+              pk.children[1].children[0].mode == RtlMachineMode::kSi &&
+              pk.children[1].children[1].op == RtlOp::kConstInt &&
+              pk.children[1].children[1].int_val == sh) {
+            src_reg = cand_src;
+            narrow_sll_idx = k;
+          }
+          break;
+        }
+      }
+    }
+    if (src_reg < 1 || src_reg > 25) {
+      continue;
+    }
+
+    int matched_dh = -1;
+    size_t matched_hi_idx = 0;
+    size_t matched_insert_pos = 0;
+    for (int dh : kCandidateDiRegs) {
+      const int dl = dh + 1;
+      if (src_reg == dl || !MatchGp32WordDest(pi.children[0], dl)) {
+        continue;
+      }
+      size_t j = 0;
+      std::optional<size_t> hilo_sra_idx;
+      if (!TryMatchExtendHighWordFill(insns, i, src_reg, narrow_sll_idx, dh, used_indices, &j,
+                                      &hilo_sra_idx)) {
+        continue;
+      }
+      size_t lo_pos = std::min(i, j);
+      if (hilo_sra_idx.has_value()) {
+        lo_pos = std::min(lo_pos, *hilo_sra_idx);
+      }
+      if (narrow_sll_idx.has_value()) {
+        lo_pos = std::min(lo_pos, *narrow_sll_idx);
+      }
+      const size_t hi_pos = std::max(i, j);
+
+      bool di_consumed = false;
+      std::optional<size_t> di_consumer_idx;
+      for (size_t k = hi_pos + 1; k < insns.size(); ++k) {
+        if (ExprReadsExplicitDiReg(insns[k].parsed.pattern, dh)) {
+          di_consumed = true;
+          di_consumer_idx = k;
+          break;
+        }
+        if (insns[k].write_regs.Test(dh) || insns[k].write_regs.Test(dl) || insns[k].is_call) {
+          break;
+        }
+      }
+      if (!di_consumed &&
+          IsDiRegConsumedAfterRecombiningTailDelaySlot(cfg, b, insns, hi_pos + 1, dh, gp64, fp64)) {
+        di_consumed = true;
+        di_consumer_idx = insns.size() - 1;
+      }
+      if (!di_consumed) {
+        continue;
+      }
+
+      bool already_has_clobber = false;
+      for (size_t rev = lo_pos; rev > 0; --rev) {
+        const RtlExpr& prev_pat = insns[rev - 1].parsed.pattern;
+        if (prev_pat.op == RtlOp::kClobber && prev_pat.children.size() == 1 &&
+            prev_pat.children[0].op == RtlOp::kReg &&
+            prev_pat.children[0].mode == RtlMachineMode::kDi &&
+            prev_pat.children[0].RegNo() == dh) {
+          already_has_clobber = true;
+          break;
+        }
+        if (insns[rev - 1].write_regs.Test(dh) || insns[rev - 1].write_regs.Test(dl) ||
+            insns[rev - 1].is_call) {
+          break;
+        }
+      }
+      if (!already_has_clobber) {
+        size_t insert_pos = lo_pos;
+        for (size_t rev = lo_pos; rev > 0; --rev) {
+          const size_t cand = rev - 1;
+          const RtlExpr& cpat = insns[cand].parsed.pattern;
+          if (insns[cand].is_call || insns[cand].is_jump_or_ret || insns[cand].read_regs.Test(dh) ||
+              insns[cand].read_regs.Test(dl) || insns[cand].write_regs.Test(dh) ||
+              insns[cand].write_regs.Test(dl) || insns[cand].write_regs.Test(src_reg)) {
+            break;
+          }
+          if (IsNoConflictPrologueSaveStore(cpat)) {
+            if (runs_sched2) {
+              insert_pos = cand;
+            }
+            continue;
+          }
+          if (di_consumer_idx.has_value() && cpat.op == RtlOp::kSet && cpat.children.size() == 2 &&
+              cpat.children[0].op == RtlOp::kReg && cpat.children[1].op == RtlOp::kMem &&
+              !cpat.children[1].flags.volatil) {
+            const int load_reg = cpat.children[0].RegNo();
+            const bool load_is_pair = (cpat.children[0].mode == RtlMachineMode::kDi ||
+                                       cpat.children[0].mode == RtlMachineMode::kDf);
+            bool fed_to_di_consumer = insns[*di_consumer_idx].read_regs.Test(load_reg);
+            if (fed_to_di_consumer) {
+              for (size_t m = cand + 1; m < *di_consumer_idx; ++m) {
+                if (insns[m].read_regs.Test(load_reg) || insns[m].write_regs.Test(load_reg) ||
+                    (load_is_pair && (insns[m].read_regs.Test(load_reg + 1) ||
+                                      insns[m].write_regs.Test(load_reg + 1)))) {
+                  fed_to_di_consumer = false;
+                  break;
+                }
+              }
+            }
+            if (fed_to_di_consumer) {
+              insert_pos = cand;
+              continue;
+            }
+          }
+          break;
+        }
+        matched_dh = dh;
+        matched_hi_idx = j;
+        matched_insert_pos = insert_pos;
+      }
+      break;
+    }
+    if (matched_dh != -1) {
+      if (matched_dh == 64 && insns[i].parsed.pattern.children[0].op == RtlOp::kReg) {
+        insns[i].parsed.pattern.children[0] =
+            RtlExpr::MakeSubreg(RtlMachineMode::kSi, RtlExpr::MakeReg(RtlMachineMode::kDi, 64), 1);
+        std::string updated = insns[i].parsed.ToGccPrintRtlString();
+        if (blk->rtl_insns.size() == blk->instructions.size()) {
+          blk->rtl_insns[i].canonical_pattern = updated;
+        }
+        blk->instructions[i] = std::move(updated);
+      }
+      used_indices.insert(i);
+      used_indices.insert(matched_hi_idx);
+      insertions.push_back({matched_insert_pos, matched_dh});
+    }
+  }
+
+  if (insertions.empty()) {
+    return;
+  }
+  std::sort(insertions.begin(), insertions.end());
+  const bool had_synced_rtl = (blk->rtl_insns.size() == blk->instructions.size());
+  std::vector<std::string> new_instructions;
+  std::vector<RtlInsn> new_rtl_insns;
+  new_instructions.reserve(blk->instructions.size() + insertions.size());
+  if (had_synced_rtl) {
+    new_rtl_insns.reserve(blk->rtl_insns.size() + insertions.size());
+  }
+  size_t ins_cursor = 0;
+  for (size_t idx = 0; idx < blk->instructions.size(); ++idx) {
+    while (ins_cursor < insertions.size() && insertions[ins_cursor].first == idx) {
+      RtlPatternAndNotes clob_pn;
+      clob_pn.pattern = RtlExpr::MakeClobber(
+          RtlExpr::MakeReg(RtlMachineMode::kDi, insertions[ins_cursor].second));
+      clob_pn.reg_notes.push_back(RtlRegNote{
+          .kind = RtlMachineMode::kRegLibcall,
+          .list_op = RtlOp::kInsnList,
+          .datum = RtlExpr::MakeNil(),
+      });
+      std::string clob_str = clob_pn.ToGccPrintRtlString();
+      if (had_synced_rtl) {
+        RtlInsn clob_rinsn;
+        clob_rinsn.canonical_pattern = clob_str;
+        new_rtl_insns.push_back(std::move(clob_rinsn));
+      }
+      new_instructions.push_back(std::move(clob_str));
+      ++ins_cursor;
+    }
+    new_instructions.push_back(std::move(blk->instructions[idx]));
+    if (had_synced_rtl) {
+      new_rtl_insns.push_back(std::move(blk->rtl_insns[idx]));
+    }
+  }
+  blk->instructions = std::move(new_instructions);
+  if (had_synced_rtl) {
+    blk->rtl_insns = std::move(new_rtl_insns);
+  } else {
+    blk->SyncRtlInsnsFromInstructions();
+  }
+}
+
+}  // namespace
+
+void RestoreNoConflictExtendClobbers(RtlControlFlowGraph* cfg, bool gp64, bool fp64,
+                                     bool runs_sched2) {
+  if (cfg == nullptr || gp64) {
+    return;
+  }
+  for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
+    RestoreNoConflictExtendClobbersInBlock(*cfg, b, gp64, fp64, runs_sched2, &cfg->rpo_blocks[b]);
+  }
 }
 
 }  // namespace rom_nom_nom::lifter

@@ -733,6 +733,14 @@ TEST_P(Pass03Sched2PostReloadRoundTripTest, RoundTrip4172Cases) {
         InvertPass01DbrSchedule(lifted_y0, trace.stage0_input.profile);
     const RtlControlFlowGraph lifted_y2 =
         InvertPass02Jump2CrossJump(lifted_y1, trace.stage0_input.profile);
+    hooks->ApplyCompilationProfile(trace.stage0_input.profile);
+    const RightInverseResult fresh_sched2_res = verifier->VerifySched2StageRightInverse(lifted_y2);
+    EXPECT_TRUE(fresh_sched2_res.matches)
+        << "Fresh Stage 0->2 (.10.sched2) VerifySched2StageRightInverse mismatch for "
+        << tc.test_name << ":\n"
+        << fresh_sched2_res.diff_detail << "\nexpected (fresh lifted_y2):\n"
+        << fresh_sched2_res.expected_summary << "\nactual:\n"
+        << fresh_sched2_res.actual_summary;
     const RtlControlFlowGraph lifted_y3 =
         InvertPass03Sched2PostReload(lifted_y2, trace.stage0_input.profile);
     ASSERT_FALSE(lifted_y3.rpo_blocks.empty())

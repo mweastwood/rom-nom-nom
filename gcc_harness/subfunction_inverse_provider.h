@@ -289,6 +289,10 @@ class SubfunctionInverseProvider {
   virtual RtlControlFlowGraph InvertGlobalAlloc(const RtlControlFlowGraph& /*x*/) const {
     return {};
   }
+  virtual RtlControlFlowGraph InvertGlobalAlloc(const RtlControlFlowGraph& x,
+                                                const CompilationProfile& /*profile*/) const {
+    return InvertGlobalAlloc(x);
+  }
 
   // 14. Inverse of `local-alloc.c:block_alloc`.
   virtual RtlControlFlowGraph InvertBlockAlloc(const RtlControlFlowGraph& /*x*/) const {

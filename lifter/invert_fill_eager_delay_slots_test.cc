@@ -829,5 +829,58 @@ TEST(InvertFillEagerDelaySlotsUnitTest,
       InvertFillEagerDelaySlots(eager_snap.post_state).CompareAgainst(lifted).MatchesExactly());
 }
 
+TEST(InvertFillEagerDelaySlotsUnitTest,
+     OppositeArithTargetStealWhenBranchReadsSlotRegisterRightInverse) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  const std::vector<std::string> flags = {"-O2", "-mips1"};
+  hooks.ApplyCompilationProfile(CompilationProfile{.optimize_level = 2, .c_flags = flags});
+  ProductionFillEagerDelaySlotsProvider provider;
+  RightInverseVerifier verifier(&ctx, &hooks, &provider);
+
+  // Backward branch in `B1` both reads `(reg:SI 4 a0)` (`jump_reads_slot_def == true`) and steals
+  // `(set (reg:SI 4 a0) (plus:SI (reg:SI 4 a0) (const_int -1)))` from `L0` with opposite `+1`
+  // compensation in fallthrough exit `B2` (`reorg.c:3528-3586`).
+  RtlControlFlowGraph loop_cfg;
+  loop_cfg.pass = RtlPassKind::kDbr;
+  loop_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 2 v0) (const_int 0))",
+                    "(set (reg:SI 4 a0) (plus:SI (reg:SI 4 a0) (const_int -1)))",
+                },
+                {1}),
+      MakeBlock(
+          1, true,
+          {
+              "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 4 a0)))",
+              "(sequence [(jump_insn (set (pc) (if_then_else (gt:SI (reg:SI 4 a0) (const_int 0)) "
+              "(label_ref L0) (pc)))) "
+              "(insn/s (set (reg:SI 4 a0) (plus:SI (reg:SI 4 a0) (const_int -1))))])",
+          },
+          {1, 2}),
+      MakeBlock(2, false,
+                {
+                    "(set (reg:SI 4 a0) (plus:SI (reg:SI 4 a0) (const_int 1)))",
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 4 a0)))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+
+  const RtlControlFlowGraph lifted = InvertFillEagerDelaySlots(loop_cfg);
+  ASSERT_EQ(lifted.rpo_blocks.size(), 3u) << lifted.FormatSummary();
+  EXPECT_EQ(lifted.rpo_blocks[1].instructions.front(),
+            "(set (reg:SI 4 a0) (plus:SI (reg:SI 4 a0) (const_int -1)))");
+
+  const auto eager_snap = hooks.ExecuteSubfunctionBoundary(
+      rom_nom_nom::gcc_harness::SubfunctionId::kFillEagerDelaySlots, lifted, {}, 2, flags);
+  const RightInverseResult res = verifier.VerifySubfunctionBoundaryRightInverse(eager_snap);
+  EXPECT_TRUE(res.matches) << res.diff_detail << "\nlifted:\n"
+                           << lifted.FormatSummary() << "\nactual:\n"
+                           << res.actual_summary;
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::lifter

@@ -524,6 +524,17 @@ TEST(RtlLivenessTest, PreservePhantomPseudosOptionControlsZeroOccurrenceCombineT
   EXPECT_FALSE(post_combine_cfg.sideband.reg_n_sets.contains(75));
   EXPECT_FALSE(post_combine_cfg.sideband.reg_renumber.contains(75));
   EXPECT_GE(post_combine_cfg.sideband.max_regno, 76);
+
+  const CompilationProfile o0_profile{.optimize_level = 0, .c_flags = {"-O0"}};
+  RtlControlFlowGraph o0_phantom_cfg = base;
+  ReconstructRtlLiveness(
+      &o0_phantom_cfg, o0_profile,
+      {.reload_completed = false, .update_reg_notes = false, .preserve_phantom_pseudos = true});
+  EXPECT_EQ(o0_phantom_cfg.sideband.reg_n_refs[75], 2);
+  EXPECT_EQ(o0_phantom_cfg.sideband.reg_n_deaths[75], 1);
+  EXPECT_EQ(o0_phantom_cfg.sideband.reg_live_length[75], 2);
+  EXPECT_FALSE(o0_phantom_cfg.sideband.reg_n_sets.contains(75));
+  EXPECT_GE(o0_phantom_cfg.sideband.max_regno, 76);
 }
 
 }  // namespace
