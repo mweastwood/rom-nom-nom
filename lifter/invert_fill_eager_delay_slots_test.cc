@@ -882,5 +882,77 @@ TEST(InvertFillEagerDelaySlotsUnitTest,
                            << res.actual_summary;
 }
 
+TEST(InvertFillEagerDelaySlotsUnitTest,
+     PostEagerTargetStolenDuplicateAttachesBranchRegDeadRightInverse) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  const std::vector<std::string> flags = {"-O2", "-mips1"};
+  const CompilationProfile profile{.optimize_level = 2, .c_flags = flags};
+  hooks.ApplyCompilationProfile(profile);
+  ProductionFillEagerDelaySlotsProvider provider;
+  RightInverseVerifier verifier(&ctx, &hooks, &provider);
+
+  // `B0` sets `(reg:SI 8 t0) (const_int 1)` and jumps to `B2` (`mid_blk`: single bare conditional
+  // jump reading `$8` and jumping to `B4: nxt_b`, which also starts with `(set (reg:SI 8 t0) 1)`).
+  // `ApplyPostEagerDelaySlotNormalizations` duplicates `(set (reg:SI 8 t0) (const_int 1))` into
+  // `B2` AND attaches `REG_DEAD (reg:SI 8 t0)` onto `B0`'s branch at `optimize_level > 0`.
+  RtlControlFlowGraph post_eager_cfg;
+  post_eager_cfg.pass = RtlPassKind::kDbr;
+  post_eager_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 8 t0) (const_int 1))",
+                    "(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (reg:SI 8 t0)) "
+                    "(label_ref L0) (pc)))",
+                },
+                {2, 1}),
+      MakeBlock(1, false,
+                {
+                    "(set (reg/i:SI 2 v0) (const_int 0))",
+                    "(set (pc) (label_ref L2))",
+                },
+                {5}),
+      MakeBlock(2, true,
+                {
+                    "(set (pc) (if_then_else (eq:SI (reg:SI 5 a1) (reg:SI 8 t0)) "
+                    "(label_ref L1) (pc)))",
+                },
+                {4, 3}),
+      MakeBlock(3, false,
+                {
+                    "(set (reg/i:SI 2 v0) (const_int 2))",
+                    "(set (pc) (label_ref L2))",
+                },
+                {5}),
+      MakeBlock(4, true,
+                {
+                    "(set (reg:SI 8 t0) (const_int 1))",
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 6 a2) (reg:SI 8 t0)))",
+                },
+                {5}),
+      MakeBlock(5, true,
+                {
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+
+  const RtlControlFlowGraph lifted = InvertFillEagerDelaySlots(post_eager_cfg, profile);
+  ASSERT_EQ(lifted.rpo_blocks.size(), 6u);
+  EXPECT_EQ(lifted.rpo_blocks[2].instructions.front(), "(set (reg:SI 8 t0) (const_int 1))");
+  EXPECT_NE(lifted.rpo_blocks[0].instructions.back().find("REG_DEAD (reg:SI 8 t0)"),
+            std::string::npos)
+      << lifted.rpo_blocks[0].instructions.back();
+
+  const auto replayed = hooks.ExecuteSubfunctionBoundary(
+      rom_nom_nom::gcc_harness::SubfunctionId::kFillEagerDelaySlots, lifted, {}, 2, flags);
+  const RightInverseResult snap_res = verifier.VerifySubfunctionBoundaryRightInverse(replayed);
+  EXPECT_TRUE(snap_res.matches) << snap_res.diff_detail;
+  const RightInverseResult direct_res =
+      verifier.VerifyFillEagerDelaySlotsRightInverse(replayed.post_state);
+  EXPECT_TRUE(direct_res.matches) << direct_res.diff_detail;
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::lifter

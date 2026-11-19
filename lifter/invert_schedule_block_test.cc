@@ -1368,6 +1368,85 @@ TEST_F(InvertScheduleBlockTest,
             "(expr_list:REG_DEAD (reg:SF 7 a3) (expr_list:REG_DEAD (reg:SF 44 $f12) (nil)))");
 }
 
+TEST_F(InvertScheduleBlockTest,
+       RunsSched1CallerSavedDeadOrderGuardAndSched2DeletedNoopMovesRightInverse) {
+  // 1. `UnscheduleBlockInstructions` `runs_sched1` caller-saved `REG_DEAD` `gpr_alloc_ord` guard:
+  //    under `-O3` (`runs_sched1 == true`), a general-pointer load into `$8` (`t0`, `ord = 6`)
+  //    followed by a 1-cycle ALU killing `$5` (`a1`, `ord = 3 < 6`) was already in `[load, alu]`
+  //    order after `sched1` (so `local_alloc` saw `$5` live across the load and picked `$8`) and
+  //    must NOT be swapped into `[alu, load]` by `InvertScheduleBlock`.
+  RtlControlFlowGraph o3_sched2_cfg;
+  o3_sched2_cfg.pass = RtlPassKind::kSched2;
+  o3_sched2_cfg.sideband.basic_block_live_at_start[0] = {5, 12, 29, 31};
+  o3_sched2_cfg.rpo_blocks.resize(1);
+  o3_sched2_cfg.rpo_blocks[0].id = 0;
+  o3_sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg:SI 8 t0) (mem:SI (reg:SI 12 t4))) (expr_list:REG_DEAD (reg:SI 12 t4) (nil))");
+  o3_sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg:SI 9 t1) (plus:SI (reg:SI 5 a1) (const_int 3))) "
+      "(expr_list:REG_DEAD (reg:SI 5 a1) (nil))");
+  o3_sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 8 t0) (reg:SI 9 t1))) "
+      "(expr_list:REG_DEAD (reg:SI 8 t0) (expr_list:REG_DEAD (reg:SI 9 t1) (nil)))");
+  o3_sched2_cfg.rpo_blocks[0].AddPatternOnly(
+      "(use (reg/i:SI 2 v0)) (expr_list:REG_DEAD (reg/i:SI 2 v0) (nil))");
+
+  const CompilationProfile o3_prof{.optimize_level = 3, .c_flags = {"-O3", "-mips2"}};
+  const RtlControlFlowGraph lifted_o3 = InvertScheduleBlock(o3_sched2_cfg, o3_prof);
+  ASSERT_EQ(lifted_o3.rpo_blocks[0].instructions.size(), 4u);
+  EXPECT_NE(lifted_o3.rpo_blocks[0].instructions[0].find("(mem:SI (reg:SI 12 t4))"),
+            std::string::npos);
+  hooks_.ApplyCompilationProfile(o3_prof);
+  const gcc_harness::RightInverseResult o3_res =
+      verifier_.VerifySched2StageRightInverse(o3_sched2_cfg);
+  EXPECT_TRUE(o3_res.matches) << o3_res.diff_detail;
+
+  // Contrast: with `-fno-schedule-insns` (`runs_sched1 == false`), `InvertScheduleBlock` swaps
+  // `[load, alu]` back to pre-`sched2` `[alu, load]` order and satisfies
+  // `VerifySched2StageRightInverse`.
+  const CompilationProfile no_s1_prof{.optimize_level = 2,
+                                      .c_flags = {"-O2", "-fno-schedule-insns", "-mips2"}};
+  const RtlControlFlowGraph lifted_o2 = InvertScheduleBlock(o3_sched2_cfg, no_s1_prof);
+  ASSERT_EQ(lifted_o2.rpo_blocks[0].instructions.size(), 4u);
+  EXPECT_NE(lifted_o2.rpo_blocks[0].instructions[0].find("(plus:SI (reg:SI 5 a1)"),
+            std::string::npos);
+  hooks_.ApplyCompilationProfile(no_s1_prof);
+  EXPECT_TRUE(verifier_.VerifySched2StageRightInverse(o3_sched2_cfg).matches);
+
+  const CompilationProfile o2_prof{.optimize_level = 2, .c_flags = {"-O2", "-mips2"}};
+
+  // 2. Stage 3 post-reload noop-move restoration (`RestoreSched2DeletedNoopMoves` inside
+  //    `InvertScheduleBlock` and `RestoreSched2PreScheduleDeletedNoopMoves` folded into
+  //    `InvertThreadPrologueAndEpilogueInsns`).
+  RtlControlFlowGraph arg_pref_cfg;
+  arg_pref_cfg.pass = RtlPassKind::kSched2;
+  arg_pref_cfg.sideband.basic_block_live_at_start = {{0, {4}}, {1, {3, 4}}, {2, {3, 4}}};
+  arg_pref_cfg.rpo_blocks.resize(3);
+  arg_pref_cfg.rpo_blocks[0].id = 0;
+  arg_pref_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 3 v1) (const_int 0))");
+  arg_pref_cfg.rpo_blocks[0].successors = {1};
+  arg_pref_cfg.rpo_blocks[1].id = 1;
+  arg_pref_cfg.rpo_blocks[1].has_label = true;
+  arg_pref_cfg.rpo_blocks[1].AddPatternOnly(
+      "(set (reg:SI 3 v1) (plus:SI (reg:SI 3 v1) (const_int 1)))");
+  arg_pref_cfg.rpo_blocks[1].AddPatternOnly(
+      "(set (pc) (if_then_else (lt:SI (reg:SI 3 v1) (reg:SI 4 a0)) (label_ref L0) (pc)))");
+  arg_pref_cfg.rpo_blocks[1].successors = {1, 2};
+  arg_pref_cfg.rpo_blocks[2].id = 2;
+  arg_pref_cfg.rpo_blocks[2].AddPatternOnly(
+      "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 4 a0) (reg:SI 3 v1))) "
+      "(expr_list:REG_DEAD (reg:SI 4 a0) (expr_list:REG_DEAD (reg:SI 3 v1) (nil)))");
+  arg_pref_cfg.rpo_blocks[2].AddPatternOnly(
+      "(use (reg/i:SI 2 v0)) (expr_list:REG_DEAD (reg/i:SI 2 v0) (nil))");
+
+  const RtlControlFlowGraph lifted_arg_pref =
+      InvertThreadPrologueAndEpilogueInsns(InvertScheduleBlock(arg_pref_cfg, o2_prof), o2_prof);
+  ASSERT_GE(lifted_arg_pref.rpo_blocks[0].instructions.size(), 2u);
+  EXPECT_EQ(lifted_arg_pref.rpo_blocks[0].instructions[0],
+            "(set (reg:SI 4 a0) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+  EXPECT_TRUE(verifier_.VerifySched2StageRightInverse(arg_pref_cfg).matches);
+}
+
 class InvertScheduleBlockCorpusTest : public ::testing::TestWithParam<RoundTripTestCase> {
  protected:
   gcc_harness::GccContext ctx_;

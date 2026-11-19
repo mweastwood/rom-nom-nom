@@ -843,15 +843,10 @@ TEST_F(InvertDoCrossJumpTest, RestoresDeletedNoopSharedReturnMoveForFourPredsAnd
       .optimize_level = 2,
       .c_flags = {"-O2", "-mips2", "-mcpu=r4000"},
   };
-  RtlControlFlowGraph lifted = InvertDoCrossJump(cfg, sched2_profile);
+  const RtlControlFlowGraph lifted = InvertDoCrossJump(cfg, sched2_profile);
   ASSERT_EQ(lifted.rpo_blocks.size(), 8u);
   ASSERT_EQ(lifted.rpo_blocks[7].instructions.size(), 1u) << lifted.FormatSummary();
   EXPECT_EQ(lifted.rpo_blocks[7].instructions[0], "(use (reg/i:DF 32 $f0))");
-  RestoreSched2DeletedNoopMoves(&lifted, sched2_profile);
-  ASSERT_EQ(lifted.rpo_blocks[7].instructions.size(), 2u) << lifted.FormatSummary();
-  EXPECT_EQ(lifted.rpo_blocks[7].instructions[0],
-            "(set (reg/i:DF 32 $f0) (reg:DF 32 $f0)) "
-            "(expr_list:REG_DEAD (reg:DF 32 $f0) (nil))");
 
   const RightInverseResult res = verifier_.VerifyDoCrossJumpRightInverse(cfg);
   EXPECT_TRUE(res.matches) << res.diff_detail;
@@ -904,13 +899,9 @@ TEST_F(InvertDoCrossJumpTest, RestoresSingleDyingMultiBlockArgPreferenceMove) {
       .optimize_level = 2,
       .c_flags = {"-O2", "-mips2", "-mcpu=r4000"},
   };
-  RtlControlFlowGraph lifted = InvertDoCrossJump(cfg, sched2_profile);
+  const RtlControlFlowGraph lifted = InvertDoCrossJump(cfg, sched2_profile);
   ASSERT_EQ(lifted.rpo_blocks.size(), 3u);
   ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 1u) << lifted.FormatSummary();
-  RestoreSched2DeletedNoopMoves(&lifted, sched2_profile);
-  ASSERT_GE(lifted.rpo_blocks[0].instructions.size(), 2u) << lifted.FormatSummary();
-  EXPECT_EQ(lifted.rpo_blocks[0].instructions[0],
-            "(set (reg:SI 4 a0) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
 
   const RightInverseResult res = verifier_.VerifyDoCrossJumpRightInverse(cfg);
   EXPECT_TRUE(res.matches) << res.diff_detail;
@@ -1011,6 +1002,165 @@ TEST_F(InvertDoCrossJumpTest, RestoreNoopMovesConsumedDeathsRequiresInterveningS
   RightInverseVerifier bad_verifier(&ctx_, &hooks_, &bad_provider);
   const RightInverseResult bad_res = bad_verifier.VerifyDoCrossJumpRightInverse(no_read_cfg);
   EXPECT_FALSE(bad_res.matches);
+}
+
+TEST_F(InvertDoCrossJumpTest, FixScratchWitnessLocalRmwBoundaryAndPrologueSaveMdStallRightInverse) {
+  const CompilationProfile sched2_profile{
+      .optimize_level = 2,
+      .c_flags = {"-O2", "-mips2", "-mcpu=r4000"},
+  };
+
+  // 1. `SelectSched2SafeSharedPrefixLen`: `B1` defines caller-saved `$2` (`v0`) via
+  // `fix_truncdfsi2`
+  //    `PARALLEL` with GPR scratch clobber `$8` (`t0`, `scr_ord > dead_ord`), `B2` defines `$2` via
+  //    ALU, and shared `B3` starts with 1-cycle ALU killing `$2` (`REG_DEAD (reg:SI 2 v0)`).
+  //    `InvertDoCrossJump` duplicates `shared_insns[0]` back into `B1` and `B2`.
+  RtlControlFlowGraph fix_cfg;
+  fix_cfg.pass = RtlPassKind::kJump2;
+  fix_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {"(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) "
+                 "(label_ref L0) (pc)))"},
+                {2, 1}),
+      MakeBlock(1, false,
+                {
+                    "(parallel[ (set (reg:SI 2 v0) (fix:SI (reg:DF 44 $f12))) "
+                    "(clobber (reg:SI 8 t0)) (clobber (reg:DF 36 $f4)) ] ) "
+                    "(expr_list:REG_DEAD (reg:DF 44 $f12) "
+                    "(expr_list:REG_UNUSED (reg:SI 8 t0) "
+                    "(expr_list:REG_UNUSED (reg:DF 36 $f4) (nil))))",
+                    "(set (pc) (label_ref L1))",
+                },
+                {3}),
+      MakeBlock(2, true,
+                {
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 5 a1) (const_int 1))) "
+                    "(expr_list:REG_DEAD (reg:SI 5 a1) (nil))",
+                },
+                {3}),
+      MakeBlock(3, true,
+                {
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 3))) "
+                    "(expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+                    "(set (mem:SI (reg:SI 6 a2)) (reg:SI 2 v0)) "
+                    "(expr_list:REG_DEAD (reg:SI 6 a2) (nil))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  fix_cfg.sideband.basic_block_live_at_start = {
+      {0, {4, 5, 6, 44, 45}}, {1, {6, 44, 45}}, {2, {5, 6}}, {3, {2, 6}}};
+  const RtlControlFlowGraph lifted_fix = InvertDoCrossJump(fix_cfg, sched2_profile);
+  ASSERT_EQ(lifted_fix.rpo_blocks.size(), 4u);
+  EXPECT_GE(lifted_fix.rpo_blocks[1].instructions.size(), 3u);
+  EXPECT_GE(lifted_fix.rpo_blocks[2].instructions.size(), 2u);
+  const RightInverseResult fix_res = verifier_.VerifyDoCrossJumpRightInverse(fix_cfg);
+  EXPECT_TRUE(fix_res.matches) << fix_res.diff_detail;
+
+  // 2. `SelectSched2SafeSharedPrefixLen`: `conflicts_with_local_rmw` trims shared prefix when the
+  //    first remaining reference to written register `$6` (`a2`) is a non-dead RMW.
+  RtlControlFlowGraph rmw_cfg;
+  rmw_cfg.pass = RtlPassKind::kJump2;
+  rmw_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {"(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) "
+                 "(label_ref L0) (pc)))"},
+                {2, 1}),
+      MakeBlock(1, false,
+                {
+                    "(set (reg:SI 3 v1) (plus:SI (reg:SI 5 a1) (const_int 1))) "
+                    "(expr_list:REG_DEAD (reg:SI 5 a1) (nil))",
+                    "(set (pc) (label_ref L1))",
+                },
+                {3}),
+      MakeBlock(2, true,
+                {
+                    "(set (reg:SI 3 v1) (minus:SI (reg:SI 5 a1) (const_int 1))) "
+                    "(expr_list:REG_DEAD (reg:SI 5 a1) (nil))",
+                },
+                {3}),
+      MakeBlock(3, true,
+                {
+                    "(set (reg:SI 6 a2) (plus:SI (reg:SI 3 v1) (const_int 2))) "
+                    "(expr_list:REG_DEAD (reg:SI 3 v1) (nil))",
+                    "(set (reg:SI 6 a2) (plus:SI (reg:SI 6 a2) (reg:SI 7 a3))) "
+                    "(expr_list:REG_DEAD (reg:SI 7 a3) (nil))",
+                    "(set (pc) (if_then_else (eq:SI (reg:SI 6 a2) (const_int 0)) "
+                    "(label_ref L2) (pc)))",
+                },
+                {5, 4}),
+      MakeBlock(4, false, {"(set (reg/i:SI 2 v0) (reg:SI 6 a2))"}, {5}),
+      MakeBlock(5, true,
+                {
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  rmw_cfg.sideband.basic_block_live_at_start = {{0, {2, 4, 5, 7}}, {1, {2, 5, 7}}, {2, {2, 5, 7}},
+                                                {3, {2, 3, 7}},    {4, {6}},       {5, {2}}};
+  const RtlControlFlowGraph lifted_rmw = InvertDoCrossJump(rmw_cfg, sched2_profile);
+  ASSERT_EQ(lifted_rmw.rpo_blocks.size(), 6u);
+  EXPECT_EQ(lifted_rmw.rpo_blocks[1].instructions.size(), 2u);
+  const RightInverseResult rmw_res = verifier_.VerifyDoCrossJumpRightInverse(rmw_cfg);
+  EXPECT_TRUE(rmw_res.matches) << rmw_res.diff_detail;
+
+  // 3. `RestoreDeletedNoopMdOutputReloads`: entry-block prologue save store `[sp + 24] = ra`
+  //    scheduled into the 3-cycle `imuldiv` stall window between `(set (reg:DI 6 a2) (reg:DI 64))`
+  //    and `adddi3` restores `(set (reg:DI 64 hi) (reg:DI 6 a2))` and `REG_DEAD (reg:DI 64 hi)`.
+  RtlControlFlowGraph pre_md_cfg;
+  pre_md_cfg.pass = RtlPassKind::kSched2;
+  pre_md_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int -32)))",
+                    "(set (reg:SI 65 lo) (reg:SI 4 a0))",
+                    "(set (reg:SI 4 a0) (ashiftrt:SI (reg:SI 4 a0) (const_int 31))) "
+                    "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))) (reg:SI 17 s1))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 16))) (reg:SI 16 s0))",
+                    "(set (reg:DI 16 s0) (reg:DI 6 a2)) (expr_list:REG_DEAD (reg:DI 6 a2) (nil))",
+                    "(set (reg:SI 64 hi) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                    "(set (reg:DI 6 a2) (reg:DI 64 hi)) (expr_list:REG_DEAD (reg:DI 64 hi) (nil))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 24))) (reg:SI 31 ra))",
+                    "(set (reg:DI 64 hi) (reg:DI 6 a2))",
+                    "(parallel[ (set (reg:DI 16 s0) (plus:DI (reg:DI 16 s0) (reg:DI 6 a2))) "
+                    "(clobber (reg:SI 2 v0)) ] ) (expr_list:REG_DEAD (reg:DI 6 a2) "
+                    "(expr_list:REG_DEAD (reg:DI 64 hi) "
+                    "(expr_list:REG_UNUSED (reg:SI 2 v0) (nil))))",
+                    "(set (reg/i:DI 2 v0) (reg:DI 16 s0)) "
+                    "(expr_list:REG_DEAD (reg:DI 16 s0) (nil))",
+                    "(set (reg:SI 31 ra) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 24))))",
+                    "(set (reg:SI 17 s1) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))))",
+                    "(set (reg:SI 16 s0) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 16))))",
+                    "(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int 32)))",
+                    "(use (reg/i:DI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  pre_md_cfg.sideband.basic_block_live_at_start = {{0, {4, 6, 7, 16, 17, 29, 31}}};
+  const auto md_snap =
+      hooks_.ExecuteSubfunctionBoundary(SubfunctionId::kDoCrossJump, pre_md_cfg, {},
+                                        sched2_profile.optimize_level, sched2_profile.c_flags);
+  const RtlControlFlowGraph lifted_md = InvertDoCrossJump(md_snap.post_state, sched2_profile);
+  ASSERT_EQ(lifted_md.rpo_blocks.size(), 1u);
+  bool saw_restored_md_wb = false;
+  bool saw_adddi_hi_dead = false;
+  for (const std::string& insn : lifted_md.rpo_blocks[0].instructions) {
+    if (insn.find("(set (reg:DI 64 hi) (reg:DI 6 a2))") != std::string::npos) {
+      saw_restored_md_wb = true;
+    }
+    if (insn.find("(plus:DI (reg:DI 16 s0) (reg:DI 6 a2))") != std::string::npos &&
+        insn.find("REG_DEAD (reg:DI 64 hi)") != std::string::npos) {
+      saw_adddi_hi_dead = true;
+    }
+  }
+  EXPECT_TRUE(saw_restored_md_wb) << lifted_md.FormatSummary();
+  EXPECT_TRUE(saw_adddi_hi_dead) << lifted_md.FormatSummary();
+  const RightInverseResult md_res = verifier_.VerifySubfunctionBoundaryRightInverse(md_snap);
+  EXPECT_TRUE(md_res.matches) << md_res.diff_detail;
 }
 
 class DoCrossJumpCorpusTest : public ::testing::TestWithParam<RoundTripTestCase> {

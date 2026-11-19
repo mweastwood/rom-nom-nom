@@ -1,8 +1,8 @@
 #include "lifter/invert_block_alloc.h"
 
-#include <string>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "core/round_trip_test_cases.h"
 #include "core/rtl_cfg.h"
@@ -11,6 +11,13 @@
 #include "gcc_harness/right_inverse_verifier.h"
 #include "gcc_harness/subfunction_inverse_provider.h"
 #include "gtest/gtest.h"
+#include "lifter/pass00_final_and_gas.h"
+#include "lifter/pass01_dbr_schedule.h"
+#include "lifter/pass02_jump2_cross_jump.h"
+#include "lifter/pass03_sched2_post_reload.h"
+#include "lifter/pass04_greg_reload.h"
+
+extern "C" void regclass_init();  // NOLINT(readability-identifier-naming)
 
 namespace rom_nom_nom::lifter {
 namespace {
@@ -24,11 +31,16 @@ using ::rom_nom_nom::gcc_harness::SubfunctionBoundarySnapshot;
 using ::rom_nom_nom::gcc_harness::SubfunctionId;
 
 // Inverse provider that ONLY wires `InvertBlockAlloc`, leaving all other 25
-// subfunction methods as empty stubs (`NoOpSubfunctionInverses`).
+// subfunction methods as empty stubs (`SubfunctionInverseProvider` defaults).
 class BlockAllocOnlyInverseProvider final : public gcc_harness::SubfunctionInverseProvider {
  public:
   RtlControlFlowGraph InvertBlockAlloc(const RtlControlFlowGraph& x) const override {
     absl::StatusOr<RtlControlFlowGraph> res = ::rom_nom_nom::lifter::InvertBlockAlloc(x);
+    return res.ok() ? *res : RtlControlFlowGraph{};
+  }
+  RtlControlFlowGraph InvertBlockAlloc(const RtlControlFlowGraph& x,
+                                       const CompilationProfile& profile) const override {
+    absl::StatusOr<RtlControlFlowGraph> res = ::rom_nom_nom::lifter::InvertBlockAlloc(x, profile);
     return res.ok() ? *res : RtlControlFlowGraph{};
   }
 };
@@ -37,8 +49,9 @@ class BlockAllocOnlyInverseProvider final : public gcc_harness::SubfunctionInver
 // corrupts the instruction pattern so replaying `kBlockAlloc` fails to match.
 class CorruptedBlockAllocInverseProvider final : public gcc_harness::SubfunctionInverseProvider {
  public:
-  RtlControlFlowGraph InvertBlockAlloc(const RtlControlFlowGraph& x) const override {
-    absl::StatusOr<RtlControlFlowGraph> res = ::rom_nom_nom::lifter::InvertBlockAlloc(x);
+  RtlControlFlowGraph InvertBlockAlloc(const RtlControlFlowGraph& x,
+                                       const CompilationProfile& profile) const override {
+    absl::StatusOr<RtlControlFlowGraph> res = ::rom_nom_nom::lifter::InvertBlockAlloc(x, profile);
     if (!res.ok() || res->rpo_blocks.empty() || res->rpo_blocks[0].instructions.empty()) {
       return RtlControlFlowGraph{};
     }
@@ -46,6 +59,7 @@ class CorruptedBlockAllocInverseProvider final : public gcc_harness::Subfunction
     res->rpo_blocks[0].SyncRtlInsnsFromInstructions();
     return *res;
   }
+  using SubfunctionInverseProvider::InvertBlockAlloc;
 };
 
 class InvertBlockAllocTest : public ::testing::Test {
@@ -76,6 +90,8 @@ FunctionHooks* InvertBlockAllocTest::hooks = nullptr;
 TEST_F(InvertBlockAllocTest, SingleBlockGprAndFprLocalPseudosRoundTrip) {
   BlockAllocOnlyInverseProvider provider;
   RightInverseVerifier verifier(ctx, hooks, &provider);
+  ctx->BeginFunction("harness_func");
+  hooks->ApplyCompilationProfile({.optimize_level = 2, .c_flags = {"-O2"}});
 
   RtlControlFlowGraph pre_cfg;
   pre_cfg.pass = RtlPassKind::kLreg;
@@ -105,10 +121,9 @@ TEST_F(InvertBlockAllocTest, SingleBlockGprAndFprLocalPseudosRoundTrip) {
 TEST_F(InvertBlockAllocTest, MultiBlockLocalPseudosAllocatedWhileCrossBlockPseudoPreserved) {
   BlockAllocOnlyInverseProvider provider;
   RightInverseVerifier verifier(ctx, hooks, &provider);
+  ctx->BeginFunction("harness_func");
+  hooks->ApplyCompilationProfile({.optimize_level = 2, .c_flags = {"-O2"}});
 
-  // Pseudo 72 lives across blocks 0..2 (left for `global_alloc`), while
-  // pseudos 73 (block 0), 74 (block 1), and 75 (block 2) are block-local and
-  // allocated by `block_alloc` across multiple basic blocks.
   RtlControlFlowGraph pre_cfg;
   pre_cfg.pass = RtlPassKind::kLreg;
   pre_cfg.rpo_blocks.resize(3);
@@ -143,6 +158,8 @@ TEST_F(InvertBlockAllocTest, MultiBlockLocalPseudosAllocatedWhileCrossBlockPseud
 TEST_F(InvertBlockAllocTest, ScratchClobbersAndSharedRegUnusedNotesRestoredAndRoundTrip) {
   BlockAllocOnlyInverseProvider provider;
   RightInverseVerifier verifier(ctx, hooks, &provider);
+  ctx->BeginFunction("harness_func");
+  hooks->ApplyCompilationProfile({.optimize_level = 2, .c_flags = {"-O2"}});
 
   RtlControlFlowGraph raw_cfg;
   raw_cfg.pass = RtlPassKind::kFlow;
@@ -173,8 +190,8 @@ TEST_F(InvertBlockAllocTest, ScratchClobbersAndSharedRegUnusedNotesRestoredAndRo
   ASSERT_TRUE(lifted.ok()) << lifted.status();
   EXPECT_TRUE(lifted->sideband.reg_renumber.empty());
   EXPECT_EQ(lifted->rpo_blocks[0].instructions[0],
-            "(parallel [(set (reg:SI 65 lo) (mult:SI (reg:SI 4 a0) (reg:SI 5 a1))) "
-            "(clobber (scratch:SI)) (clobber (scratch:SI))]) "
+            "(parallel[ (set (reg:SI 65 lo) (mult:SI (reg:SI 4 a0) (reg:SI 5 a1))) "
+            "(clobber (scratch:SI)) (clobber (scratch:SI)) ] ) "
             "(expr_list:REG_DEAD (reg:SI 5 a1) "
             "(expr_list:REG_UNUSED (scratch:SI) "
             "(expr_list:REG_UNUSED (scratch:SI) (nil))))");
@@ -183,9 +200,71 @@ TEST_F(InvertBlockAllocTest, ScratchClobbersAndSharedRegUnusedNotesRestoredAndRo
   EXPECT_TRUE(res.matches) << res.diff_detail;
 }
 
+TEST_F(InvertBlockAllocTest, PrunesLocalOnlyCalleeSavedRegsAndSupportsO0Profile) {
+  BlockAllocOnlyInverseProvider provider;
+  RightInverseVerifier verifier(ctx, hooks, &provider);
+  ctx->BeginFunction("harness_callee_saved");
+  const CompilationProfile o2_profile{.optimize_level = 2, .c_flags = {"-O2"}};
+  hooks->ApplyCompilationProfile(o2_profile);
+
+  // Construct `pre_cfg` with single-block call-crossing pseudos `72` (`SImode`) and
+  // `73` (`DFmode`) where `4 * calls >= refs` (`4 * 1 >= 2`), so `block_alloc`
+  // genuinely assigns `$16` (`$s0`) and `$52` (`$f20..$f21`), while `$17` (`$s1`)
+  // is directly referenced in the RTL stream.
+  RtlControlFlowGraph pre_cfg;
+  pre_cfg.pass = RtlPassKind::kLreg;
+  pre_cfg.rpo_blocks.resize(1);
+  pre_cfg.rpo_blocks[0].id = 0;
+  pre_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 72) (plus:SI (reg:SI 4 a0) (const_int 1)))");
+  pre_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:DF 73) (reg:DF 44 $f12))");
+  pre_cfg.rpo_blocks[0].AddPatternOnly(
+      "(parallel[ (call (mem:SI (symbol_ref:SI (\"ext_fn\"))) (const_int 16)) "
+      "(clobber (reg:SI 31 ra)) ] )");
+  pre_cfg.rpo_blocks[0].AddPatternOnly("(set (mem:DF (reg:SI 17 s1)) (reg:DF 73))");
+  pre_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 72) (reg:SI 17 s1)))");
+  pre_cfg.rpo_blocks[0].AddPatternOnly("(use (reg/i:SI 2 v0))");
+
+  const SubfunctionBoundarySnapshot flow_snap =
+      hooks->ExecuteSubfunctionBoundary(SubfunctionId::kPropagateBlock, pre_cfg, {}, 2, {"-O2"});
+  RtlControlFlowGraph flow_cfg = flow_snap.post_state;
+  flow_cfg.pass = RtlPassKind::kLreg;
+  const SubfunctionBoundarySnapshot snap =
+      hooks->ExecuteSubfunctionBoundary(SubfunctionId::kBlockAlloc, flow_cfg, {}, 2, {"-O2"});
+  ASSERT_EQ(snap.post_state.sideband.reg_renumber.at(72), 16);
+  ASSERT_EQ(snap.post_state.sideband.reg_renumber.at(73), 52);
+
+  RtlControlFlowGraph lreg_with_saved = snap.post_state;
+  lreg_with_saved.sideband.saved_gpr_regnos = {16, 17};
+  lreg_with_saved.sideband.saved_fpr_regnos = {52, 53};
+
+  absl::StatusOr<RtlControlFlowGraph> lifted = InvertBlockAlloc(lreg_with_saved, o2_profile);
+  ASSERT_TRUE(lifted.ok()) << lifted.status();
+  EXPECT_EQ(lifted->sideband.saved_gpr_regnos, std::vector<int>({17}));
+  EXPECT_TRUE(lifted->sideband.saved_fpr_regnos.empty());
+
+  hooks->ApplyCompilationProfile(o2_profile);
+  const RightInverseResult ba_res = verifier.VerifyBlockAllocRightInverse(snap.post_state);
+  EXPECT_TRUE(ba_res.matches) << ba_res.diff_detail;
+  const RightInverseResult snap_res = verifier.VerifySubfunctionBoundaryRightInverse(snap);
+  EXPECT_TRUE(snap_res.matches) << snap_res.diff_detail;
+
+  const FunctionCompilationTrace o0_trace = hooks->TraceForwardCompilation(
+      "int o0_reg_fn(int a, int b) { register int x = a + b; return x * 2; }\n", "o0_reg_fn",
+      {"-O0"}, "block_alloc_o0");
+  ASSERT_TRUE(o0_trace.pass_snapshots.contains(RtlPassKind::kLreg));
+  ctx->BeginFunction("harness_o0");
+  hooks->ApplyCompilationProfile(o0_trace.stage0_input.profile);
+  const RightInverseResult o0_res =
+      verifier.VerifyBlockAllocRightInverse(o0_trace.pass_snapshots.at(RtlPassKind::kLreg));
+  EXPECT_TRUE(o0_res.matches) << o0_res.diff_detail;
+}
+
 TEST_F(InvertBlockAllocTest, PreservesCallClobberRaPseudoClobbersAndFlowSideband) {
   BlockAllocOnlyInverseProvider provider;
   RightInverseVerifier verifier(ctx, hooks, &provider);
+  ctx->BeginFunction("harness_func");
+  hooks->ApplyCompilationProfile({.optimize_level = 2, .c_flags = {"-O2"}});
 
   RtlControlFlowGraph raw_cfg;
   raw_cfg.pass = RtlPassKind::kFlow;
@@ -294,6 +373,8 @@ TEST_F(InvertBlockAllocTest, RejectsInvalidSidebandRegisterAndBlockNumbers) {
 TEST_F(InvertBlockAllocTest, CorruptedInverseIsRejectedByRightInverseVerifier) {
   CorruptedBlockAllocInverseProvider bad_provider;
   RightInverseVerifier bad_verifier(ctx, hooks, &bad_provider);
+  ctx->BeginFunction("harness_func");
+  hooks->ApplyCompilationProfile({.optimize_level = 2, .c_flags = {"-O2"}});
 
   RtlControlFlowGraph cfg;
   cfg.pass = RtlPassKind::kLreg;
@@ -307,15 +388,19 @@ TEST_F(InvertBlockAllocTest, CorruptedInverseIsRejectedByRightInverseVerifier) {
 }
 
 // =============================================================================
-// 2,480-Case Parameterized Round-Trip Verification Suite
+// 4,172-Case Parameterized Round-Trip Verification Suite (Standalone + Fresh)
 // =============================================================================
 
 class InvertBlockAllocRoundTripTest : public InvertBlockAllocTest,
                                       public ::testing::WithParamInterface<RoundTripTestCase> {};
 
-TEST_P(InvertBlockAllocRoundTripTest, RoundTrip2480Cases) {
+TEST_P(InvertBlockAllocRoundTripTest, StandaloneAndFreshStage0To4AcrossAll4172Cases) {
   const RoundTripTestCase& tc = GetParam();
-  FunctionCompilationTrace trace = hooks->TraceForwardCompilation(tc);
+  ctx->BeginFunction("harness_init");
+  hooks->ApplyCompilationProfile({2, tc.options.c_flags, {}});
+  regclass_init();
+  const FunctionCompilationTrace trace = hooks->TraceForwardCompilation(tc);
+  ASSERT_FALSE(trace.stage0_input.machine_words.empty()) << tc.test_name;
 
   BlockAllocOnlyInverseProvider provider;
   RightInverseVerifier verifier(ctx, hooks, &provider);
@@ -331,6 +416,25 @@ TEST_P(InvertBlockAllocRoundTripTest, RoundTrip2480Cases) {
     ++verified_count;
   }
   EXPECT_GT(verified_count, 0) << "No kBlockAlloc snapshot captured for " << tc.test_name;
+
+  // Fresh cumulative Stage 0..4 `.08.lreg` boundary check:
+  const RtlControlFlowGraph p0 = InvertFinalAndGasFunction(trace.stage0_input);
+  ASSERT_FALSE(p0.rpo_blocks.empty()) << tc.test_name;
+  const RtlControlFlowGraph p1 = InvertPass01DbrSchedule(p0, trace.stage0_input.profile);
+  ASSERT_FALSE(p1.rpo_blocks.empty()) << tc.test_name;
+  const RtlControlFlowGraph p2 = InvertPass02Jump2CrossJump(p1, trace.stage0_input.profile);
+  ASSERT_FALSE(p2.rpo_blocks.empty()) << tc.test_name;
+  const RtlControlFlowGraph p3 = InvertPass03Sched2PostReload(p2, trace.stage0_input.profile);
+  ASSERT_FALSE(p3.rpo_blocks.empty()) << tc.test_name;
+  const RtlControlFlowGraph p4 = InvertPass04GregReload(p3, trace.stage0_input.profile);
+  ASSERT_FALSE(p4.rpo_blocks.empty()) << tc.test_name;
+
+  ctx->BeginFunction("harness_fresh_block_alloc");
+  hooks->ApplyCompilationProfile(trace.stage0_input.profile);
+  const RightInverseResult fresh_res = verifier.VerifyBlockAllocRightInverse(p4);
+  EXPECT_TRUE(fresh_res.matches) << "Fresh kBlockAlloc right-inverse failed for " << tc.test_name
+                                 << ":\n"
+                                 << fresh_res.diff_detail;
 }
 
 INSTANTIATE_TEST_SUITE_P(AllRoundTripCases, InvertBlockAllocRoundTripTest,

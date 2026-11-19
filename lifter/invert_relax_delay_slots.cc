@@ -1058,15 +1058,64 @@ void InvertRelaxUncondAndMergedDelaySlots(RtlControlFlowGraph* out_ptr,
 
       // Flavour 4b: Target block `target_b` (`own_thread_p`: single pred `b`,
       // no fallthrough from `target_b - 1`) consists of a single bare
-      // conditional jump (`reorg.c:4041-4043` + `1866-1884`).
+      // conditional jump (`reorg.c:4041-4043` + `1802-1803` + `1866-1884`).
       auto& tgt_blk = out.rpo_blocks[target_b];
       const bool target_is_own_thread =
           preds[target_b].size() == 1 && preds[target_b][0] == b &&
           (target_b == 0 || std::find(out.rpo_blocks[target_b - 1].successors.begin(),
                                       out.rpo_blocks[target_b - 1].successors.end(),
                                       target_b) == out.rpo_blocks[target_b - 1].successors.end());
-      if (target_is_own_thread && tgt_blk.instructions.size() == 1 &&
-          tgt_blk.successors.size() == 2) {
+      bool slot_kills_any_reg =
+          std::any_of(slot_pat_notes->reg_notes.begin(), slot_pat_notes->reg_notes.end(),
+                      [](const RtlRegNote& n) {
+                        return n.kind == RtlMachineMode::kRegDead && n.datum.IsReg();
+                      });
+      if (!slot_kills_any_reg && target_is_own_thread && blk.instructions.size() >= 2 &&
+          tgt_blk.instructions.size() == 1 && tgt_blk.successors.size() == 2) {
+        std::vector<int> slot_src_regs;
+        slot_pat_notes->pattern.Visit([&](const RtlExpr& node) {
+          if (node.IsReg() && !node.IsArgPointerReg()) {
+            const int r = node.RegNo();
+            if (r >= 2 && r < 64 && r != 28 && r != 29 && r != 30 && r != slot_dst_reg &&
+                ExprReferencesRegInSrcOrMem(slot_pat_notes->pattern, r) &&
+                !ExprReferencesRegInSrcOrMem(jump_pat_notes->pattern, r) &&
+                std::find(slot_src_regs.begin(), slot_src_regs.end(), r) == slot_src_regs.end()) {
+              slot_src_regs.push_back(r);
+            }
+          }
+        });
+        if (!slot_src_regs.empty()) {
+          const auto live_in = ComputePostReloadHardRegLiveIn(out);
+          const auto is_live_at = [&](size_t blk_i, int r) {
+            return blk_i < live_in.size() && std::find(live_in[blk_i].begin(), live_in[blk_i].end(),
+                                                       r) != live_in[blk_i].end();
+          };
+          for (int r : slot_src_regs) {
+            if (is_live_at(fallthrough_b, r) || is_live_at(target_b, r)) {
+              continue;
+            }
+            for (size_t rev = blk.instructions.size() - 1; rev > 0; --rev) {
+              auto prev_p = ParsePatternAndNotes(blk.instructions[rev - 1]);
+              if (!prev_p.ok()) {
+                break;
+              }
+              if (ExprSetsOrClobbersReg(prev_p->pattern, r)) {
+                slot_kills_any_reg = true;
+                break;
+              }
+              if (ExprReferencesRegInSrcOrMem(prev_p->pattern, r)) {
+                break;
+              }
+            }
+            if (slot_kills_any_reg) {
+              break;
+            }
+          }
+        }
+      }
+      if (target_is_own_thread && !slot_kills_any_reg && tgt_blk.instructions.size() == 1 &&
+          tgt_blk.successors.size() == 2 &&
+          !ExprReferencesRegInSrcOrMem(slot_pat_notes->pattern, slot_dst_reg)) {
         auto tgt_parsed = ParsePatternAndNotes(tgt_blk.instructions[0]);
         if (tgt_parsed.ok() && IsCondJumpExpr(tgt_parsed->pattern) &&
             !ExprReferencesRegInSrcOrMem(tgt_parsed->pattern, slot_dst_reg)) {
@@ -1232,6 +1281,286 @@ void RestoreBareInvertedCondJumpAroundUncondJump(RtlControlFlowGraph* out) {
     InsertBlockAt(out, b + 1, std::move(tramp_blk));
     out->rpo_blocks[b].successors = {b + 2, b + 1};
     break;
+  }
+}
+
+void RestoreRelaxedTargetBlockRedundantInsns(RtlControlFlowGraph* out_ptr,
+                                             const CompilationProfile& profile) {
+  RtlControlFlowGraph& out = *out_ptr;
+  const auto preds = BuildPredecessors(out);
+  auto find_read_reg_expr = [](const RtlExpr& root, int regno, RtlMachineMode fallback_mode) {
+    RtlExpr found = RtlExpr::MakeReg(fallback_mode, regno);
+    bool have = false;
+    auto visit = [&](const auto& self, const RtlExpr& e, bool in_dst) -> void {
+      if (have || e.op == RtlOp::kClobber) return;
+      if (e.IsSet()) {
+        if (!e.SetDest().IsReg()) self(self, e.SetDest(), true);
+        self(self, e.SetSrc(), false);
+        return;
+      }
+      if (in_dst && e.op == RtlOp::kMem) {
+        for (const RtlExpr& ch : e.children) self(self, ch, false);
+        return;
+      }
+      if (!in_dst && e.IsReg() && !e.IsArgPointerReg() && e.RegNo() == regno) {
+        found = e;
+        have = true;
+        return;
+      }
+      for (const RtlExpr& ch : e.children) self(self, ch, in_dst);
+    };
+    visit(visit, root, false);
+    return found;
+  };
+  for (size_t b = 0; b < out.rpo_blocks.size(); ++b) {
+    auto& blk = out.rpo_blocks[b];
+    if (blk.instructions.size() < 2 || blk.successors.size() != 2) {
+      continue;
+    }
+    const size_t target_b = (blk.successors[0] == b + 1) ? blk.successors[1] : blk.successors[0];
+    if (target_b == 0 || target_b >= out.rpo_blocks.size()) {
+      continue;
+    }
+    auto last_parsed = ParsePatternAndNotes(blk.instructions.back());
+    if (!last_parsed.ok() || last_parsed->pattern.op != RtlOp::kSequence ||
+        last_parsed->pattern.children.size() != 2 ||
+        last_parsed->pattern.children[0].op != RtlOp::kJumpInsn ||
+        last_parsed->pattern.children[0].children.empty() ||
+        last_parsed->pattern.children[1].children.empty()) {
+      continue;
+    }
+
+    if (target_b == b + 2 && IsCondJumpExpr(last_parsed->pattern.children[0].children[0])) {
+      auto& ft_blk = out.rpo_blocks[b + 1];
+      auto& tgt_blk = out.rpo_blocks[target_b];
+      const size_t min_ft_insns = last_parsed->pattern.children[0].flags.unchanging ? 1 : 2;
+      if (!ft_blk.has_label && preds[b + 1].size() == 1 && preds[b + 1][0] == b &&
+          ft_blk.instructions.size() >= min_ft_insns && ft_blk.successors.size() == 1 &&
+          ft_blk.successors[0] == target_b && tgt_blk.has_label && preds[target_b].size() == 2 &&
+          !tgt_blk.instructions.empty() && !BlockStartsWithUseInsn(tgt_blk)) {
+        auto tgt_first = ParsePatternAndNotes(tgt_blk.instructions.front());
+        auto cand_parsed = ParsePatternAndNotes(ft_blk.instructions.back());
+        const RtlOp cand_src_op = (cand_parsed.ok() && cand_parsed->pattern.IsSet())
+                                      ? cand_parsed->pattern.SetSrc().op
+                                      : RtlOp::kUnknown;
+        const bool cand_is_const_src =
+            cand_src_op == RtlOp::kConstInt || cand_src_op == RtlOp::kConstDouble ||
+            cand_src_op == RtlOp::kConst || cand_src_op == RtlOp::kSymbolRef ||
+            cand_src_op == RtlOp::kLabelRef;
+        if (tgt_first.ok() && tgt_first->pattern.op != RtlOp::kNote && cand_parsed.ok() &&
+            cand_parsed->pattern.IsSet() && !ExprHasMem(cand_parsed->pattern) &&
+            cand_is_const_src) {
+          const int cand_dst = GetSingleSetDestRegNo(cand_parsed->pattern);
+          if (cand_dst >= 0 &&
+              !ExprReferencesRegInSrcOrMem(last_parsed->pattern.children[0].children[0],
+                                           cand_dst) &&
+              !ExprSetsOrClobbersReg(last_parsed->pattern.children[1].children[0], cand_dst)) {
+            bool ft_conflict = false;
+            for (size_t fi = 0; fi + 1 < ft_blk.instructions.size(); ++fi) {
+              auto fp = ParsePatternAndNotes(ft_blk.instructions[fi]);
+              if (!fp.ok() || ExprReferencesRegInSrcOrMem(fp->pattern, cand_dst) ||
+                  ExprSetsOrClobbersReg(fp->pattern, cand_dst)) {
+                ft_conflict = true;
+                break;
+              }
+            }
+            bool tgt_reads_cand_dst = false;
+            if (!ft_conflict) {
+              for (const std::string& t_insn : tgt_blk.instructions) {
+                auto tp = ParsePatternAndNotes(t_insn);
+                if (!tp.ok()) {
+                  break;
+                }
+                if (ExprReferencesRegInSrcOrMem(tp->pattern, cand_dst)) {
+                  tgt_reads_cand_dst = true;
+                  break;
+                }
+                if (ExprSetsOrClobbersReg(tp->pattern, cand_dst)) {
+                  break;
+                }
+              }
+            }
+            if (!ft_conflict && tgt_reads_cand_dst) {
+              std::vector<int> cand_regs;
+              CollectRegs(cand_parsed->pattern, &cand_regs);
+              bool matched_without_conflict = false;
+              size_t matched_idx = blk.instructions.size();
+              for (size_t i = blk.instructions.size() - 1; i > 0;) {
+                --i;
+                auto prev_p = ParsePatternAndNotes(blk.instructions[i]);
+                if (!prev_p.ok()) {
+                  break;
+                }
+                if (prev_p->pattern == cand_parsed->pattern) {
+                  bool conflict = false;
+                  for (size_t k = i + 1; k < blk.instructions.size(); ++k) {
+                    auto kp = ParsePatternAndNotes(blk.instructions[k]);
+                    if (!kp.ok()) {
+                      conflict = true;
+                      break;
+                    }
+                    for (int r : cand_regs) {
+                      if (ExprSetsOrClobbersReg(kp->pattern, r)) {
+                        conflict = true;
+                        break;
+                      }
+                    }
+                  }
+                  if (!conflict) {
+                    matched_without_conflict = true;
+                    matched_idx = i;
+                  }
+                  break;
+                }
+              }
+              if (matched_without_conflict) {
+                if (profile.optimize_level > 0 &&
+                    !ExprReferencesRegInSrcOrMem(last_parsed->pattern.children[1].children[0],
+                                                 cand_dst)) {
+                  for (size_t rev_k = blk.instructions.size() - 1; rev_k > matched_idx + 1;
+                       --rev_k) {
+                    const size_t k = rev_k - 1;
+                    auto kp = ParsePatternAndNotes(blk.instructions[k]);
+                    if (!kp.ok()) break;
+                    if (ExprReferencesRegInSrcOrMem(kp->pattern, cand_dst)) {
+                      bool only_reads_cand_dst = true;
+                      auto scan_src_regs = [&](const auto& self, const RtlExpr& e,
+                                               bool in_set_dst) -> void {
+                        if (e.op == RtlOp::kSet && e.children.size() >= 2) {
+                          if (e.children[0].op == RtlOp::kMem) {
+                            self(self, e.children[0], false);
+                          }
+                          for (size_t c = 1; c < e.children.size(); ++c) {
+                            self(self, e.children[c], false);
+                          }
+                          return;
+                        }
+                        if (e.op == RtlOp::kClobber) return;
+                        if (!in_set_dst && e.IsHardReg() && !e.IsArgPointerReg()) {
+                          const int r = e.RegNo();
+                          if (r != cand_dst && r != 0 && r != 28 && r != 29 && r != 31 &&
+                              !(out.sideband.frame_pointer_needed && r == 30)) {
+                            only_reads_cand_dst = false;
+                          }
+                          return;
+                        }
+                        for (const RtlExpr& ch : e.children) self(self, ch, in_set_dst);
+                      };
+                      scan_src_regs(scan_src_regs, kp->pattern, false);
+                      const bool has_dead = std::any_of(
+                          kp->reg_notes.begin(), kp->reg_notes.end(), [&](const RtlRegNote& n) {
+                            if (n.kind != RtlMachineMode::kRegDead) return false;
+                            if (only_reads_cand_dst && n.datum.IsConstInt() &&
+                                n.datum.int_val == 0) {
+                              return true;
+                            }
+                            return n.datum.IsReg() && !n.datum.IsArgPointerReg() &&
+                                   n.datum.RegNo() == cand_dst;
+                          });
+                      if (!has_dead) {
+                        kp->reg_notes.insert(
+                            kp->reg_notes.begin(),
+                            RtlRegNote{
+                                .kind = RtlMachineMode::kRegDead,
+                                .list_op = RtlOp::kExprList,
+                                .datum = find_read_reg_expr(kp->pattern, cand_dst,
+                                                            cand_parsed->pattern.SetDest().mode),
+                            });
+                        blk.instructions[k] = kp->ToGccPrintRtlString();
+                      }
+                      break;
+                    }
+                  }
+                }
+                std::string moved_insn = std::move(ft_blk.instructions.back());
+                ft_blk.instructions.pop_back();
+                tgt_blk.instructions.insert(tgt_blk.instructions.begin(), std::move(moved_insn));
+                if (ft_blk.instructions.empty()) {
+                  out.rpo_blocks.erase(out.rpo_blocks.begin() + static_cast<ptrdiff_t>(b + 1));
+                  for (size_t rb = 0; rb < out.rpo_blocks.size(); ++rb) {
+                    out.rpo_blocks[rb].id = static_cast<uint32_t>(rb);
+                    for (size_t& s : out.rpo_blocks[rb].successors) {
+                      if (s > b + 1) {
+                        --s;
+                      }
+                    }
+                    for (size_t& t : out.rpo_blocks[rb].addr_vec_targets) {
+                      if (t > b + 1) {
+                        --t;
+                      }
+                    }
+                  }
+                  out.rpo_blocks[b].successors = {b + 1, b + 1};
+                }
+                continue;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (last_parsed->pattern.children[0].flags.unchanging) {
+      continue;
+    }
+
+    const size_t cand_b = target_b - 1;
+    if (cand_b <= b + 1) {
+      continue;
+    }
+    const auto& cand_blk = out.rpo_blocks[cand_b];
+    if (!cand_blk.has_label || preds[cand_b].size() != 1 || preds[cand_b][0] == b ||
+        preds[cand_b][0] == cand_b - 1 || cand_blk.instructions.size() != 1 ||
+        cand_blk.successors.size() != 1 || cand_blk.successors[0] != target_b) {
+      continue;
+    }
+    auto cand_parsed = ParsePatternAndNotes(cand_blk.instructions[0]);
+    if (!cand_parsed.ok() || !cand_parsed->pattern.IsSet() || ExprHasMem(cand_parsed->pattern)) {
+      continue;
+    }
+    const int cand_dst = GetSingleSetDestRegNo(cand_parsed->pattern);
+    if (cand_dst < 0 ||
+        ExprReferencesRegInSrcOrMem(last_parsed->pattern.children[0].children[0], cand_dst)) {
+      continue;
+    }
+    std::vector<int> cand_regs;
+    CollectRegs(cand_parsed->pattern, &cand_regs);
+
+    bool matched_without_conflict = false;
+    for (size_t i = blk.instructions.size() - 1; i > 0;) {
+      --i;
+      auto prev_p = ParsePatternAndNotes(blk.instructions[i]);
+      if (!prev_p.ok()) {
+        break;
+      }
+      if (prev_p->pattern == cand_parsed->pattern) {
+        bool conflict = false;
+        for (size_t k = i + 1; k < blk.instructions.size(); ++k) {
+          auto kp = ParsePatternAndNotes(blk.instructions[k]);
+          if (!kp.ok()) {
+            conflict = true;
+            break;
+          }
+          for (int r : cand_regs) {
+            if (ExprSetsOrClobbersReg(kp->pattern, r)) {
+              conflict = true;
+              break;
+            }
+          }
+        }
+        if (!conflict) {
+          matched_without_conflict = true;
+        }
+        break;
+      }
+    }
+    if (matched_without_conflict) {
+      for (size_t& succ : blk.successors) {
+        if (succ == target_b) {
+          succ = cand_b;
+        }
+      }
+    }
   }
 }
 
@@ -1790,201 +2119,7 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
 
   // 7c: Target-block redundant instruction re-vectoring
   // (`reorg.c:3902-3914`, `redundant_insn(trial, insn, 0)`).
-  {
-    const auto preds = BuildPredecessors(out);
-    for (size_t b = 0; b < out.rpo_blocks.size(); ++b) {
-      auto& blk = out.rpo_blocks[b];
-      if (blk.instructions.size() < 2 || blk.successors.size() != 2) {
-        continue;
-      }
-      const size_t target_b = (blk.successors[0] == b + 1) ? blk.successors[1] : blk.successors[0];
-      if (target_b == 0 || target_b >= out.rpo_blocks.size()) {
-        continue;
-      }
-      auto last_parsed = ParsePatternAndNotes(blk.instructions.back());
-      if (!last_parsed.ok() || last_parsed->pattern.op != RtlOp::kSequence ||
-          last_parsed->pattern.children.size() != 2 ||
-          last_parsed->pattern.children[0].op != RtlOp::kJumpInsn ||
-          last_parsed->pattern.children[0].children.empty() ||
-          last_parsed->pattern.children[1].children.empty()) {
-        continue;
-      }
-
-      if (target_b == b + 2 && IsCondJumpExpr(last_parsed->pattern.children[0].children[0])) {
-        auto& ft_blk = out.rpo_blocks[b + 1];
-        auto& tgt_blk = out.rpo_blocks[target_b];
-        const size_t min_ft_insns = last_parsed->pattern.children[0].flags.unchanging ? 1 : 2;
-        if (!ft_blk.has_label && preds[b + 1].size() == 1 && preds[b + 1][0] == b &&
-            ft_blk.instructions.size() >= min_ft_insns && ft_blk.successors.size() == 1 &&
-            ft_blk.successors[0] == target_b && tgt_blk.has_label && preds[target_b].size() == 2 &&
-            !tgt_blk.instructions.empty() && !BlockStartsWithUseInsn(tgt_blk)) {
-          auto tgt_first = ParsePatternAndNotes(tgt_blk.instructions.front());
-          auto cand_parsed = ParsePatternAndNotes(ft_blk.instructions.back());
-          const RtlOp cand_src_op = (cand_parsed.ok() && cand_parsed->pattern.IsSet())
-                                        ? cand_parsed->pattern.SetSrc().op
-                                        : RtlOp::kUnknown;
-          const bool cand_is_const_src =
-              cand_src_op == RtlOp::kConstInt || cand_src_op == RtlOp::kConstDouble ||
-              cand_src_op == RtlOp::kConst || cand_src_op == RtlOp::kSymbolRef ||
-              cand_src_op == RtlOp::kLabelRef;
-          if (tgt_first.ok() && tgt_first->pattern.op != RtlOp::kNote && cand_parsed.ok() &&
-              cand_parsed->pattern.IsSet() && !ExprHasMem(cand_parsed->pattern) &&
-              cand_is_const_src) {
-            const int cand_dst = GetSingleSetDestRegNo(cand_parsed->pattern);
-            if (cand_dst >= 0 &&
-                !ExprReferencesRegInSrcOrMem(last_parsed->pattern.children[0].children[0],
-                                             cand_dst) &&
-                !ExprSetsOrClobbersReg(last_parsed->pattern.children[1].children[0], cand_dst)) {
-              bool ft_conflict = false;
-              for (size_t fi = 0; fi + 1 < ft_blk.instructions.size(); ++fi) {
-                auto fp = ParsePatternAndNotes(ft_blk.instructions[fi]);
-                if (!fp.ok() || ExprReferencesRegInSrcOrMem(fp->pattern, cand_dst) ||
-                    ExprSetsOrClobbersReg(fp->pattern, cand_dst)) {
-                  ft_conflict = true;
-                  break;
-                }
-              }
-              bool tgt_reads_cand_dst = false;
-              if (!ft_conflict) {
-                for (const std::string& t_insn : tgt_blk.instructions) {
-                  auto tp = ParsePatternAndNotes(t_insn);
-                  if (!tp.ok()) {
-                    break;
-                  }
-                  if (ExprReferencesRegInSrcOrMem(tp->pattern, cand_dst)) {
-                    tgt_reads_cand_dst = true;
-                    break;
-                  }
-                  if (ExprSetsOrClobbersReg(tp->pattern, cand_dst)) {
-                    break;
-                  }
-                }
-              }
-              if (!ft_conflict && tgt_reads_cand_dst) {
-                std::vector<int> cand_regs;
-                CollectRegs(cand_parsed->pattern, &cand_regs);
-                bool matched_without_conflict = false;
-                for (size_t i = blk.instructions.size() - 1; i > 0;) {
-                  --i;
-                  auto prev_p = ParsePatternAndNotes(blk.instructions[i]);
-                  if (!prev_p.ok()) {
-                    break;
-                  }
-                  if (prev_p->pattern == cand_parsed->pattern) {
-                    bool conflict = false;
-                    for (size_t k = i + 1; k < blk.instructions.size(); ++k) {
-                      auto kp = ParsePatternAndNotes(blk.instructions[k]);
-                      if (!kp.ok()) {
-                        conflict = true;
-                        break;
-                      }
-                      for (int r : cand_regs) {
-                        if (ExprSetsOrClobbersReg(kp->pattern, r)) {
-                          conflict = true;
-                          break;
-                        }
-                      }
-                    }
-                    if (!conflict) {
-                      matched_without_conflict = true;
-                    }
-                    break;
-                  }
-                }
-                if (matched_without_conflict) {
-                  std::string moved_insn = std::move(ft_blk.instructions.back());
-                  ft_blk.instructions.pop_back();
-                  tgt_blk.instructions.insert(tgt_blk.instructions.begin(), std::move(moved_insn));
-                  if (ft_blk.instructions.empty()) {
-                    out.rpo_blocks.erase(out.rpo_blocks.begin() + static_cast<ptrdiff_t>(b + 1));
-                    for (size_t rb = 0; rb < out.rpo_blocks.size(); ++rb) {
-                      out.rpo_blocks[rb].id = static_cast<uint32_t>(rb);
-                      for (size_t& s : out.rpo_blocks[rb].successors) {
-                        if (s > b + 1) {
-                          --s;
-                        }
-                      }
-                      for (size_t& t : out.rpo_blocks[rb].addr_vec_targets) {
-                        if (t > b + 1) {
-                          --t;
-                        }
-                      }
-                    }
-                    out.rpo_blocks[b].successors = {b + 1, b + 1};
-                  }
-                  continue;
-                }
-              }
-            }
-          }
-        }
-      }
-
-      if (last_parsed->pattern.children[0].flags.unchanging) {
-        continue;
-      }
-
-      const size_t cand_b = target_b - 1;
-      if (cand_b <= b + 1) {
-        continue;
-      }
-      const auto& cand_blk = out.rpo_blocks[cand_b];
-      if (!cand_blk.has_label || preds[cand_b].size() != 1 || preds[cand_b][0] == b ||
-          preds[cand_b][0] == cand_b - 1 || cand_blk.instructions.size() != 1 ||
-          cand_blk.successors.size() != 1 || cand_blk.successors[0] != target_b) {
-        continue;
-      }
-      auto cand_parsed = ParsePatternAndNotes(cand_blk.instructions[0]);
-      if (!cand_parsed.ok() || !cand_parsed->pattern.IsSet() || ExprHasMem(cand_parsed->pattern)) {
-        continue;
-      }
-      const int cand_dst = GetSingleSetDestRegNo(cand_parsed->pattern);
-      if (cand_dst < 0 ||
-          ExprReferencesRegInSrcOrMem(last_parsed->pattern.children[0].children[0], cand_dst)) {
-        continue;
-      }
-      std::vector<int> cand_regs;
-      CollectRegs(cand_parsed->pattern, &cand_regs);
-
-      bool matched_without_conflict = false;
-      for (size_t i = blk.instructions.size() - 1; i > 0;) {
-        --i;
-        auto prev_p = ParsePatternAndNotes(blk.instructions[i]);
-        if (!prev_p.ok()) {
-          break;
-        }
-        if (prev_p->pattern == cand_parsed->pattern) {
-          // Verify no instruction between `i + 1` and `blk.instructions.back()`
-          // (including the delay slot) modifies any register in `cand_regs`.
-          bool conflict = false;
-          for (size_t k = i + 1; k < blk.instructions.size(); ++k) {
-            auto kp = ParsePatternAndNotes(blk.instructions[k]);
-            if (!kp.ok()) {
-              conflict = true;
-              break;
-            }
-            for (int r : cand_regs) {
-              if (ExprSetsOrClobbersReg(kp->pattern, r)) {
-                conflict = true;
-                break;
-              }
-            }
-          }
-          if (!conflict) {
-            matched_without_conflict = true;
-          }
-          break;
-        }
-      }
-      if (matched_without_conflict) {
-        for (size_t& succ : blk.successors) {
-          if (succ == target_b) {
-            succ = cand_b;
-          }
-        }
-      }
-    }
-  }
+  RestoreRelaxedTargetBlockRedundantInsns(&out, profile);
 
   RewrapSharedUseBridgePredecessors(&out);
 

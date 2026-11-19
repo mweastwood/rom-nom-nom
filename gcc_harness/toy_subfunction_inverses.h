@@ -82,7 +82,9 @@ class ToySubfunctionInverses : public SubfunctionInverseProvider {
   RtlControlFlowGraph InvertGlobalAlloc(const RtlControlFlowGraph& x) const override;
   using SubfunctionInverseProvider::InvertGlobalAlloc;
   RtlControlFlowGraph InvertBlockAlloc(const RtlControlFlowGraph& x) const override;
+  using SubfunctionInverseProvider::InvertBlockAlloc;
   RtlControlFlowGraph InvertUpdateEquivRegs(const RtlControlFlowGraph& x) const override;
+  using SubfunctionInverseProvider::InvertUpdateEquivRegs;
 
   // ---------------------------------------------------------------------------
   // Stage 7: Instruction Combination (`combine.c`)

@@ -70,6 +70,12 @@ void ResolvePostReloadConstZeroRegDeadNotes(RtlControlFlowGraph* cfg);
 // back to `.09.greg` / pre-`dbr_schedule` invariants.
 void NormalizePostReloadHardRegNotes(RtlControlFlowGraph* cfg, const CompilationProfile& profile);
 
+// Refreshes `update_equiv_regs`-synthesized `(expr_list:REG_EQUIV (mem ...) ...)`
+// notes on a post-reload CFG after final Stage 0 / Stage 1 `MEM` flag (`mem/u`,
+// `mem/v`), `REG_LIBCALL`/`REG_RETVAL`, and outgoing-argument updates.
+void SynthesizePostReloadMemRegEquivNotes(RtlControlFlowGraph* cfg,
+                                          const CompilationProfile& profile);
+
 // Computes post-reload hard-register live-in sets purely from `cfg`'s
 // instructions, control-flow edges, and frame/epilogue metadata (ignoring
 // `cfg.sideband.basic_block_live_at_start`), returning true if any hard

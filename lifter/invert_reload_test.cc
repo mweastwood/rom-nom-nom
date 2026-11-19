@@ -252,10 +252,10 @@ TEST_F(InvertReloadTest, ReversesFramePointerEliminationInStackAccesses) {
   ASSERT_TRUE(lifted.ok()) << lifted.status();
   ASSERT_EQ(lifted->rpo_blocks.size(), 1u);
   EXPECT_EQ(lifted->rpo_blocks[0].instructions[1],
-            "(set (mem:SI (plus:SI (reg:SI 30 fp) (const_int 16))) (reg:SI 72)) "
+            "(set (mem:SI (plus:SI (reg:SI 30 $fp) (const_int 16))) (reg:SI 72)) "
             "(expr_list:REG_DEAD (reg:SI 72) (nil))");
   EXPECT_EQ(lifted->rpo_blocks[0].instructions[2],
-            "(set (reg:SI 73) (mem:SI (plus:SI (reg:SI 30 fp) (const_int 16))))");
+            "(set (reg:SI 73) (mem:SI (plus:SI (reg:SI 30 $fp) (const_int 16))))");
 
   ReloadOnlyInverseProvider provider;
   RightInverseVerifier verifier(ctx, hooks, &provider);
@@ -355,7 +355,7 @@ TEST_F(InvertReloadTest, UneliminatesThreeStackRegionsAndLargeFrameOffsets) {
     EXPECT_EQ(lifted->rpo_blocks[0].instructions[1],
               "(set (reg:SI 73) (mem:SI (plus:SI (reg:SI 0 argp) (const_int 16))))");
     EXPECT_EQ(lifted->rpo_blocks[0].instructions[2],
-              "(set (mem:SI (plus:SI (reg:SI 30 fp) (const_int 24))) (reg:SI 72)) "
+              "(set (mem:SI (plus:SI (reg:SI 30 $fp) (const_int 24))) (reg:SI 72)) "
               "(expr_list:REG_DEAD (reg:SI 72) (nil))");
     EXPECT_EQ(lifted->rpo_blocks[0].instructions[4],
               "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 16))) (reg:SI 73)) "
@@ -456,7 +456,7 @@ TEST_F(InvertReloadTest, UneliminatesThreeStackRegionsAndLargeFrameOffsets) {
     ASSERT_TRUE(lifted.ok()) << lifted.status();
     ASSERT_EQ(lifted->rpo_blocks[0].instructions.size(), 4u);
     EXPECT_EQ(lifted->rpo_blocks[0].instructions[1],
-              "(set (mem:SI (plus:SI (reg:SI 30 fp) (const_int 70000))) (reg:SI 72)) "
+              "(set (mem:SI (plus:SI (reg:SI 30 $fp) (const_int 70000))) (reg:SI 72)) "
               "(expr_list:REG_DEAD (reg:SI 72) (nil))");
     EXPECT_FALSE(lifted->sideband.reg_renumber.contains(74));
     EXPECT_FALSE(lifted->sideband.reg_renumber.contains(75));
@@ -1719,6 +1719,62 @@ TEST_F(InvertReloadTest,
       }
     }
     EXPECT_TRUE(saw_direct_di_zero_store) << zero_pre_reload.FormatSummary();
+  }
+
+  // 4. First-insn `movstrsi` scratch recovery (`RestorePreReloadMovstrsiFirstInsnScratches`) with
+  //    dead `dst_base` / `src_base` (`$4 a0`, `$5 a1`) when `sched1` has not split
+  //    `movstrsi_internal` prior to `reload`, plus cross-class `SFmode` GPR incoming parameter
+  //    equivalence reads (`RestoreCrossClassCallArgEquivReads`).
+  {
+    const std::vector<std::string> mips1_nosched1_flags = {"-O2", "-fno-schedule-insns", "-mips1",
+                                                           "-Wa,-g"};
+    const CompilationProfile mips1_nosched1_prof{2, mips1_nosched1_flags, {}};
+    ctx->BeginFunction("harness_init");
+    hooks->ApplyCompilationProfile(mips1_nosched1_prof);
+    regclass_init();
+
+    const FunctionCompilationTrace movstr_trace = hooks->TraceForwardCompilation(
+        "struct S16 { int a, b, c, d; };\n"
+        "void CopyS16(struct S16* dst, const struct S16* src) {\n"
+        "  *dst = *src;\n"
+        "}\n",
+        "CopyS16", mips1_nosched1_flags);
+    bool checked_movstr_reload = false;
+    for (const SubfunctionBoundarySnapshot& snap : movstr_trace.subfunction_snapshots) {
+      if (snap.subfunction_id != SubfunctionId::kReload) {
+        continue;
+      }
+      checked_movstr_reload = true;
+      const RightInverseResult sub_res = verifier.VerifySubfunctionBoundaryRightInverse(snap);
+      EXPECT_TRUE(sub_res.matches) << sub_res.diff_detail;
+      hooks->ApplyCompilationProfile(mips1_nosched1_prof);
+      const RightInverseResult vres = verifier.VerifyReloadRightInverse(snap.post_state);
+      EXPECT_TRUE(vres.matches) << vres.diff_detail;
+      const absl::StatusOr<RtlControlFlowGraph> movstr_pre_reload =
+          InvertReload(snap.post_state, mips1_nosched1_prof);
+      ASSERT_TRUE(movstr_pre_reload.ok()) << movstr_pre_reload.status();
+      EXPECT_NE(movstr_pre_reload->rpo_blocks[0].instructions[0].find("(clobber (reg:SI 4 a0))"),
+                std::string::npos)
+          << movstr_pre_reload->FormatSummary();
+      EXPECT_NE(movstr_pre_reload->rpo_blocks[0].instructions[0].find("(clobber (reg:SI 5 a1))"),
+                std::string::npos)
+          << movstr_pre_reload->FormatSummary();
+    }
+    EXPECT_TRUE(checked_movstr_reload);
+
+    const std::vector<std::string> flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"};
+    ctx->BeginFunction("harness_init");
+    hooks->ApplyCompilationProfile({2, flags, {}});
+    regclass_init();
+
+    const FunctionCompilationTrace cross_cls_trace = hooks->TraceForwardCompilation(
+        "float CrossClassSecondFloatArg(int tag, float x, float* out) {\n"
+        "  float y = x + 2.0f;\n"
+        "  if (tag > 0) *out = x;\n"
+        "  return y;\n"
+        "}\n",
+        "CrossClassSecondFloatArg", flags);
+    verify_trace_reload_and_fresh_greg_replay(cross_cls_trace);
   }
 }
 

@@ -329,7 +329,12 @@ TEST_F(InvertGlobalAllocTest, ReversesStupidLifeAnalysisAtO0WithoutSidebandSenti
           InvertGlobalAlloc(stripped, trace.stage0_input.profile);
       ASSERT_TRUE(lifted.ok()) << lifted.status();
       EXPECT_EQ(lifted->pass, RtlPassKind::kLreg);
-      EXPECT_TRUE(lifted->sideband.reg_renumber.empty());
+      EXPECT_FALSE(lifted->sideband.reg_renumber.empty());
+      for (const auto& [regno, hr] : lifted->sideband.reg_renumber) {
+        EXPECT_GE(regno, 72);
+        EXPECT_GE(hr, 0);
+        EXPECT_LT(hr, 68);
+      }
 
       RightInverseResult boundary_res = verifier.VerifySubfunctionBoundaryRightInverse(snap);
       EXPECT_TRUE(boundary_res.matches) << boundary_res.diff_detail;
@@ -877,7 +882,11 @@ TEST_F(InvertGlobalAllocTest,
   const absl::StatusOr<RtlControlFlowGraph> lifted_lreg =
       InvertGlobalAlloc(*lifted_pre_reload, effective_profile);
   ASSERT_TRUE(lifted_lreg.ok()) << lifted_lreg.status();
-  EXPECT_TRUE(lifted_lreg->sideband.reg_renumber.empty());
+  EXPECT_FALSE(lifted_lreg->sideband.reg_renumber.empty());
+  for (const auto& [regno, hr] : lifted_lreg->sideband.reg_renumber) {
+    EXPECT_GE(regno, 72);
+    EXPECT_GE(hr, 0);
+  }
   EXPECT_EQ(lifted_lreg->rpo_blocks.size(), lifted_pre_reload->rpo_blocks.size());
   EXPECT_EQ(lifted_lreg->sideband.frame_size_bytes, lifted_pre_reload->sideband.frame_size_bytes);
 
@@ -886,6 +895,91 @@ TEST_F(InvertGlobalAllocTest,
   hooks->ApplyCompilationProfile(effective_profile);
   const RightInverseResult vres = verifier.VerifyGlobalAllocRightInverse(*lifted_pre_reload);
   EXPECT_TRUE(vres.matches) << vres.diff_detail;
+}
+
+TEST_F(InvertGlobalAllocTest,
+       EnforceBlockAllocQuantityAtomicityAndLocalPriorityReconcileRightInverse) {
+  const CompilationProfile o2_prof{2, {"-O2", "-mips1"}, {}};
+  ctx->BeginFunction("harness_init");
+  hooks->ApplyCompilationProfile(o2_prof);
+  regclass_init();
+
+  // 1. `EnforceBlockAllocQuantityAtomicity`: single-block local copy `r73 <- r72` with
+  //    `REG_DEAD (reg:SI 72)` ties `r72` and `r73` into one `local_alloc` quantity (`offset == 0`).
+  //    If `greg_cfg` carries a non-atomic assignment (`r72 -> 2`, `r73 -> 3`), `InvertGlobalAlloc`
+  //    erases both `72` and `73` from `sideband.reg_renumber` so `global_alloc` / `local_alloc`
+  //    atomicity is never violated.
+  RtlControlFlowGraph non_atomic_cfg;
+  non_atomic_cfg.pass = RtlPassKind::kGreg;
+  non_atomic_cfg.sideband.max_regno = 74;
+  non_atomic_cfg.sideband.reg_renumber = {{72, 2}, {73, 3}};
+  RtlBasicBlock bb0;
+  bb0.id = 0;
+  bb0.AddPatternOnly(
+      "(set (reg:SI 72) (plus:SI (reg:SI 4 a0) (const_int 1))) "
+      "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+  bb0.AddPatternOnly("(set (reg:SI 73) (reg:SI 72)) (expr_list:REG_DEAD (reg:SI 72) (nil))");
+  bb0.AddPatternOnly(
+      "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 73) (const_int 2))) "
+      "(expr_list:REG_DEAD (reg:SI 73) (nil))");
+  bb0.AddPatternOnly("(use (reg/i:SI 2 v0))");
+  non_atomic_cfg.rpo_blocks.push_back(std::move(bb0));
+
+  absl::StatusOr<RtlControlFlowGraph> lifted_non_atomic =
+      InvertGlobalAlloc(non_atomic_cfg, o2_prof);
+  ASSERT_TRUE(lifted_non_atomic.ok()) << lifted_non_atomic.status();
+  EXPECT_FALSE(lifted_non_atomic->sideband.reg_renumber.contains(72));
+  EXPECT_FALSE(lifted_non_atomic->sideband.reg_renumber.contains(73));
+
+  // 2. `ReconcileLocalBlockAllocPriorities`: two overlapping single-block local pseudos (`72` and
+  //    `73`) where `73` has target hard reg `$2` (`v0`) and `72` has target hard reg `$3` (`v1`)
+  //    even though `72` has an equal/shorter raw span. `ReconcileLocalBlockAllocPriorities` adjusts
+  //    `reg_n_refs` so `block_alloc` + `global_alloc` reproduces `{72: 3, 73: 2}` and passes
+  //    `VerifyGlobalAllocRightInverse`!
+  RtlControlFlowGraph local_pri_cfg;
+  local_pri_cfg.pass = RtlPassKind::kGreg;
+  local_pri_cfg.sideband.max_regno = 74;
+  local_pri_cfg.sideband.reg_renumber = {{72, 3}, {73, 2}};
+  RtlBasicBlock pri_bb;
+  pri_bb.id = 0;
+  pri_bb.AddPatternOnly("(set (reg:SI 73) (plus:SI (reg:SI 4 a0) (const_int 5)))");
+  pri_bb.AddPatternOnly("(set (reg:SI 72) (plus:SI (reg:SI 4 a0) (const_int 7)))");
+  pri_bb.AddPatternOnly(
+      "(set (mem:SI (plus:SI (reg:SI 6 a2) (const_int 4))) (reg:SI 72)) "
+      "(expr_list:REG_DEAD (reg:SI 72) (nil))");
+  pri_bb.AddPatternOnly(
+      "(set (mem:SI (reg:SI 6 a2)) (reg:SI 73)) "
+      "(expr_list:REG_DEAD (reg:SI 73) (expr_list:REG_DEAD (reg:SI 6 a2) (nil)))");
+  pri_bb.AddPatternOnly(
+      "(set (reg/i:SI 2 v0) (reg:SI 4 a0)) "
+      "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+  pri_bb.AddPatternOnly("(use (reg/i:SI 2 v0))");
+  local_pri_cfg.rpo_blocks.push_back(std::move(pri_bb));
+
+  ctx->MaterializeFromCfg(local_pri_cfg);
+  RtlControlFlowGraph canon_pri = ctx->DematerializeToCfg(ctx->GetInsns(), RtlPassKind::kGreg);
+  canon_pri.sideband = local_pri_cfg.sideband;
+
+  absl::StatusOr<RtlControlFlowGraph> lifted_pri = InvertGlobalAlloc(canon_pri, o2_prof);
+  ASSERT_TRUE(lifted_pri.ok()) << lifted_pri.status();
+  EXPECT_GT(lifted_pri->sideband.reg_n_refs[73], lifted_pri->sideband.reg_n_refs[72]);
+
+  GlobalAllocOnlyInverseProvider provider;
+  RightInverseVerifier verifier(ctx, hooks, &provider);
+  const RightInverseResult ga_res = verifier.VerifyGlobalAllocRightInverse(canon_pri);
+  EXPECT_TRUE(ga_res.matches) << ga_res.diff_detail;
+
+  // Verify clearing local `reg_renumber` and replaying `kBlockAlloc -> kGlobalAlloc` reproduces
+  // `{72: 3, 73: 2}`!
+  RtlControlFlowGraph pre_ba = *lifted_pri;
+  pre_ba.sideband.reg_renumber.clear();
+  const SubfunctionBoundarySnapshot ba_snap = hooks->ExecuteSubfunctionBoundary(
+      SubfunctionId::kBlockAlloc, pre_ba, {}, o2_prof.optimize_level, o2_prof.c_flags);
+  const SubfunctionBoundarySnapshot ga_snap = hooks->ExecuteSubfunctionBoundary(
+      SubfunctionId::kGlobalAlloc, ba_snap.post_state, {}, o2_prof.optimize_level, o2_prof.c_flags);
+  EXPECT_EQ(ga_snap.post_state.sideband.reg_renumber.at(72), 3);
+  EXPECT_EQ(ga_snap.post_state.sideband.reg_renumber.at(73), 2);
+  EXPECT_TRUE(verifier.VerifySubfunctionBoundaryRightInverse(ga_snap).matches);
 }
 
 class InvertGlobalAllocCorpusTest : public InvertGlobalAllocTest,

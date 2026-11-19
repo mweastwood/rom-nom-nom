@@ -17,8 +17,8 @@
 #include "core/compiler_flags.h"
 #include "core/rtl_cfg.h"
 #include "core/rtl_expr.h"
-#include "lifter/invert_do_cross_jump.h"
 #include "lifter/mips_multi_insn_idioms.h"
+#include "lifter/post_reload_noop_moves.h"
 #include "lifter/reconstruct_hard_reg_liveness.h"
 #include "lifter/rtl_liveness.h"
 
@@ -1921,7 +1921,7 @@ bool UnscheduleSunkPreCallStackStores(std::vector<ParsedBlockInsn>* insns_ptr,
 }
 
 void UnscheduleBlockInstructions(RtlBasicBlock* blk, bool gp64, bool fp64, bool is_sched2 = false,
-                                 bool frame_pointer_needed = false) {
+                                 bool frame_pointer_needed = false, bool runs_sched1 = false) {
   const size_t n = blk->instructions.size();
   if (n < 3) {
     return;
@@ -2002,6 +2002,33 @@ void UnscheduleBlockInstructions(RtlBasicBlock* blk, bool gp64, bool fp64, bool 
           insns[i + 3].read_regs.contains(alu_regno) &&
           HasNoLaterDirectDependents(insns, i + 3, insns[i], load_regno, insns[i + 1], alu_regno)) {
         should_swap = true;
+      }
+    }
+
+    if (should_swap && is_sched2 && runs_sched1 && load_regno >= 2 && load_regno <= 25 &&
+        !insns[i].read_regs.contains(kMipsSpRegno) &&
+        !(frame_pointer_needed && insns[i].read_regs.contains(kMipsFpRegno)) &&
+        !consumer.write_regs.contains(load_regno)) {
+      auto gpr_alloc_ord = [](int hr) -> int {
+        static constexpr std::array<int, 16> kCallerSavedGprOrder = {
+            2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 24, 25};
+        for (size_t k = 0; k < kCallerSavedGprOrder.size(); ++k) {
+          if (kCallerSavedGprOrder[k] == hr) {
+            return static_cast<int>(k);
+          }
+        }
+        return 100;
+      };
+      const int load_ord = gpr_alloc_ord(load_regno);
+      for (const RtlRegNote& n : insns[i + 1].parsed.reg_notes) {
+        if (n.kind == RtlMachineMode::kRegDead && n.datum.op == RtlOp::kReg) {
+          const int dr = n.datum.RegNo();
+          if (dr >= 2 && dr <= 25 && !insns[i + 1].write_regs.contains(dr) &&
+              gpr_alloc_ord(dr) < load_ord) {
+            should_swap = false;
+            break;
+          }
+        }
       }
     }
 
@@ -4812,7 +4839,7 @@ RtlControlFlowGraph InvertScheduleBlock(const RtlControlFlowGraph& scheduled_cfg
 
     for (RtlBasicBlock& blk : out.rpo_blocks) {
       UnscheduleBlockInstructions(&blk, gp64, fp64, scheduled_cfg.pass == RtlPassKind::kSched2,
-                                  out.sideband.frame_pointer_needed);
+                                  out.sideband.frame_pointer_needed, flags.RunsSched1());
     }
 
     if (scheduled_cfg.pass == RtlPassKind::kSched2) {
@@ -5463,6 +5490,10 @@ RtlControlFlowGraph InvertThreadPrologueAndEpilogueInsns(const RtlControlFlowGra
     }
   }
   if (!any_stripped) {
+    if (flags.opt_level > 0 && flags.RunsSched2() &&
+        (scheduled_cfg.pass == RtlPassKind::kSched2 || scheduled_cfg.pass == RtlPassKind::kGreg)) {
+      RestoreSched2PreScheduleDeletedNoopMoves(&out, profile);
+    }
     return out;
   }
 
@@ -5577,6 +5608,11 @@ RtlControlFlowGraph InvertThreadPrologueAndEpilogueInsns(const RtlControlFlowGra
     entry.rtl_insns = std::move(kept_rtl_insns);
   } else {
     entry.SyncRtlInsnsFromInstructions();
+  }
+
+  if (flags.opt_level > 0 && flags.RunsSched2() &&
+      (scheduled_cfg.pass == RtlPassKind::kSched2 || scheduled_cfg.pass == RtlPassKind::kGreg)) {
+    RestoreSched2PreScheduleDeletedNoopMoves(&out, profile);
   }
 
   return out;

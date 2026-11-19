@@ -2268,7 +2268,8 @@ bool PrefixInsnsAreRedundantInAllJumpers(const RtlControlFlowGraph& out,
   return true;
 }
 
-void ApplyPostEagerDelaySlotNormalizations(RtlControlFlowGraph* out_ptr) {
+void ApplyPostEagerDelaySlotNormalizations(RtlControlFlowGraph* out_ptr,
+                                           const CompilationProfile& profile) {
   RtlControlFlowGraph& out = *out_ptr;
   for (auto& blk : out.rpo_blocks) {
     for (size_t i = 0; i + 1 < blk.instructions.size(); ++i) {
@@ -2397,6 +2398,29 @@ void ApplyPostEagerDelaySlotNormalizations(RtlControlFlowGraph* out_ptr) {
     }
     mid_blk.instructions.insert(mid_blk.instructions.begin() + static_cast<ptrdiff_t>(ins_pos),
                                 dup_set.ToGccPrintRtlString());
+    if (profile.optimize_level > 0 && !dup_set.pattern.SetSrc().ContainsReg(dst_r) &&
+        b_jmp->pattern.ContainsReg(dst_r)) {
+      const bool has_dead =
+          std::any_of(b_jmp->reg_notes.begin(), b_jmp->reg_notes.end(), [&](const RtlRegNote& n) {
+            return n.kind == RtlMachineMode::kRegDead && n.datum.IsReg() &&
+                   !n.datum.IsArgPointerReg() && n.datum.RegNo() == dst_r;
+          });
+      if (!has_dead) {
+        RtlExpr read_expr = b_prev->pattern.SetDest();
+        read_expr.flags = RtlFlags{};
+        b_jmp->pattern.Visit([&](const RtlExpr& e) {
+          if (e.IsReg() && !e.IsArgPointerReg() && e.RegNo() == dst_r) {
+            read_expr = e;
+          }
+        });
+        b_jmp->reg_notes.insert(b_jmp->reg_notes.begin(), RtlRegNote{
+                                                              .kind = RtlMachineMode::kRegDead,
+                                                              .list_op = RtlOp::kExprList,
+                                                              .datum = std::move(read_expr),
+                                                          });
+        out.rpo_blocks[b].instructions.back() = b_jmp->ToGccPrintRtlString();
+      }
+    }
   }
 
   for (size_t ret_b = 1; ret_b < out.rpo_blocks.size(); ++ret_b) {
@@ -3680,7 +3704,7 @@ RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eag
     }
   }
 
-  ApplyPostEagerDelaySlotNormalizations(&out);
+  ApplyPostEagerDelaySlotNormalizations(&out, profile);
 
   for (size_t b = 0; b < out.rpo_blocks.size(); ++b) {
     RtlBasicBlock& blk = out.rpo_blocks[b];

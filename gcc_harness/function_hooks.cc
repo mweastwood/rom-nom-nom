@@ -3542,6 +3542,33 @@ void FunctionHooks::ExecuteSchedPassGranular(Rtx first) {
   }
 }
 
+namespace {
+
+// Preserves `regno_pointer_flag` across harness-only `restore_reg_data` +
+// `reg_scan` setup calls for allocation passes: in genuine GCC 2.7.2
+// (`toplev.c:3048-3083`), `local_alloc`, `global_alloc`, and `-O0` `reload`
+// never invoke `restore_reg_data` or `reg_scan`.
+void RestoreRegDataAndScanPreservingPointerFlags(Rtx head, int repeat) {
+  std::vector<char> saved_pointer_flags;
+  if (regno_pointer_flag != nullptr && regno_pointer_flag_length > 0) {
+    saved_pointer_flags.assign(regno_pointer_flag,
+                               regno_pointer_flag + static_cast<size_t>(regno_pointer_flag_length));
+  }
+  restore_reg_data(head);
+  max_regno = max_reg_num();
+  reg_scan(head, max_regno, repeat);
+  if (regno_pointer_flag != nullptr && regno_pointer_flag_length > 0) {
+    std::memset(regno_pointer_flag, 0, static_cast<size_t>(regno_pointer_flag_length));
+    const size_t copy_len =
+        std::min(saved_pointer_flags.size(), static_cast<size_t>(regno_pointer_flag_length));
+    if (copy_len > 0) {
+      std::memcpy(regno_pointer_flag, saved_pointer_flags.data(), copy_len);
+    }
+  }
+}
+
+}  // namespace
+
 void FunctionHooks::PrepareLocalAllocState(Rtx first) {
   struct PreAllocatedScratch {
     Rtx insn;
@@ -3576,9 +3603,7 @@ void FunctionHooks::PrepareLocalAllocState(Rtx first) {
 
   const SavedFlowState saved_flow = CaptureExistingFlowState(first);
   StripFlowGeneratedNotes(first);
-  restore_reg_data(first);
-  max_regno = max_reg_num();
-  reg_scan(first, max_regno, 1);
+  RestoreRegDataAndScanPreservingPointerFlags(first, /*repeat=*/1);
   flow_analysis(first, max_regno, nullptr);
   RestoreExistingFlowState(saved_flow);
   regclass(first, max_regno);
@@ -3652,9 +3677,7 @@ void FunctionHooks::RunLocalAlloc(Rtx first) {
   }
   const SavedFlowState saved_flow = CaptureExistingFlowState(head);
   StripFlowGeneratedNotes(head);
-  restore_reg_data(head);
-  max_regno = max_reg_num();
-  reg_scan(head, max_regno, 1);
+  RestoreRegDataAndScanPreservingPointerFlags(head, /*repeat=*/1);
   flow_analysis(head, max_regno, nullptr);
   RestoreExistingFlowState(saved_flow);
   regclass(head, max_regno);
@@ -4029,9 +4052,7 @@ int FunctionHooks::RunReload(Rtx first, int global) {
   reload_completed = 0;
   if ((obey_regdecls != 0 || optimize == 0) && global_flag == 0) {
     StripFlowGeneratedNotes(head);
-    restore_reg_data(head);
-    max_regno = max_reg_num();
-    reg_scan(head, max_regno, 0);
+    RestoreRegDataAndScanPreservingPointerFlags(head, /*repeat=*/0);
     regclass_init();
     regclass(head, max_regno);
     stupid_life_analysis(head, max_regno, nullptr);
@@ -7305,9 +7326,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
           in_local_alloc_pass_ = false;
         } else {
           StripFlowGeneratedNotes(head);
-          restore_reg_data(head);
-          max_regno = max_reg_num();
-          reg_scan(head, max_regno, 0);
+          RestoreRegDataAndScanPreservingPointerFlags(head, /*repeat=*/0);
           regclass_init();
           regclass(head, max_regno);
           stupid_life_analysis(head, max_regno, nullptr);
@@ -7326,9 +7345,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
           RunGlobalAlloc(head);
         } else {
           StripFlowGeneratedNotes(head);
-          restore_reg_data(head);
-          max_regno = max_reg_num();
-          reg_scan(head, max_regno, 0);
+          RestoreRegDataAndScanPreservingPointerFlags(head, /*repeat=*/0);
           regclass_init();
           regclass(head, max_regno);
           stupid_life_analysis(head, max_regno, nullptr);

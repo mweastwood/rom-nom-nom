@@ -1356,7 +1356,8 @@ void StripNewlyFoldedEarlyclobberDiOutputReloadDeadNotes(
   }
 }
 
-void RecombineReorgSplitIdioms(RtlControlFlowGraph* cfg, const CompilationProfile& profile) {
+void RecombineReorgSplitIdioms(RtlControlFlowGraph* cfg, const CompilationProfile& profile,
+                               std::optional<size_t> unpacked_epilogue_delay_idx) {
   const ParsedCompilerFlags flags = ParseCompilationProfileFlags(profile);
   if (flags.opt_level <= 0 || cfg->rpo_blocks.empty()) {
     return;
@@ -1381,6 +1382,14 @@ void RecombineReorgSplitIdioms(RtlControlFlowGraph* cfg, const CompilationProfil
       }
       parsed_blocks[b].push_back(std::move(*parsed));
     }
+  }
+  bool has_unpacked_epilogue_delay = false;
+  if (unpacked_epilogue_delay_idx.has_value() &&
+      *unpacked_epilogue_delay_idx < parsed_blocks.back().size() &&
+      parsed_blocks.back()[*unpacked_epilogue_delay_idx].reg_notes.empty()) {
+    parsed_blocks.back()[*unpacked_epilogue_delay_idx].reg_notes.push_back(
+        RtlRegNote{.kind = RtlMachineMode::kVoid, .datum = RtlExpr::MakeConstInt(0)});
+    has_unpacked_epilogue_delay = true;
   }
 
   bool recombined_split_movstrsi = false;
@@ -1432,7 +1441,7 @@ void RecombineReorgSplitIdioms(RtlControlFlowGraph* cfg, const CompilationProfil
     }
   }
 
-  if (!recombined_split_movstrsi && !folded_multi_insn) {
+  if (!recombined_split_movstrsi && !folded_multi_insn && !has_unpacked_epilogue_delay) {
     return;
   }
 
@@ -1493,6 +1502,9 @@ void RecombineReorgSplitIdioms(RtlControlFlowGraph* cfg, const CompilationProfil
     StripNewlyFoldedEarlyclobberDiOutputReloadDeadNotes(is_newly_folded, cfg);
   }
   NormalizePostReloadHardRegNotes(cfg, profile);
+  if (folded_multi_insn) {
+    SynthesizePostReloadMemRegEquivNotes(cfg, profile);
+  }
 
   if (!folded_multi_insn) {
     for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
@@ -2454,12 +2466,65 @@ RtlControlFlowGraph InvertFillSimpleDelaySlots(const RtlControlFlowGraph& dbr_si
     }
   }
 
+  std::optional<size_t> unpacked_epilogue_delay_idx;
   if (out.sideband.epilogue_delay_pattern.has_value() &&
-      !out.sideband.epilogue_delay_pattern->empty() && !out.rpo_blocks.empty() &&
-      out.rpo_blocks.back().instructions.empty()) {
-    out.rpo_blocks.back().instructions.push_back(*out.sideband.epilogue_delay_pattern);
-    out.rpo_blocks.back().SyncRtlInsnsFromInstructions();
-    out.sideband.epilogue_delay_pattern.reset();
+      !out.sideband.epilogue_delay_pattern->empty() && !out.rpo_blocks.empty()) {
+    auto ep_pn = ParsePatternAndNotes(*out.sideband.epilogue_delay_pattern);
+    bool eligible_epilogue_delay =
+        ep_pn.ok() && ep_pn->pattern.op != RtlOp::kSequence && ep_pn->pattern.op != RtlOp::kNote &&
+        ep_pn->pattern.op != RtlOp::kUse && ep_pn->pattern.op != RtlOp::kClobber &&
+        !IsAnyJumpOrReturnTopExpr(ep_pn->pattern) && !IsCallPattern(ep_pn->pattern);
+    if (eligible_epilogue_delay) {
+      if (ep_pn->pattern.IsSet() && ep_pn->pattern.SetSrc().op == RtlOp::kMem) {
+        eligible_epilogue_delay = false;
+      }
+      const absl::flat_hash_set<int> saved_gprs(out.sideband.saved_gpr_regnos.begin(),
+                                                out.sideband.saved_gpr_regnos.end());
+      const absl::flat_hash_set<int> saved_fprs(out.sideband.saved_fpr_regnos.begin(),
+                                                out.sideband.saved_fpr_regnos.end());
+      ep_pn->pattern.Visit([&](const RtlExpr& n) {
+        if (!eligible_epilogue_delay || !n.IsHardReg() || n.IsArgPointerReg()) {
+          return;
+        }
+        const int r = n.RegNo();
+        const int span = std::max(1, MipsHardRegNregs(r, n.mode, gp64, fp64));
+        for (int w = r; w < r + span && w < kMipsFirstPseudoRegister; ++w) {
+          if (w == 29 || w == 31 || (w == 30 && out.sideband.frame_pointer_needed) ||
+              saved_gprs.contains(w) || saved_fprs.contains(w)) {
+            eligible_epilogue_delay = false;
+            return;
+          }
+        }
+      });
+    }
+    if (eligible_epilogue_delay) {
+      RtlBasicBlock& exit_blk = out.rpo_blocks.back();
+      size_t insert_pos = exit_blk.instructions.size();
+      while (insert_pos > 0) {
+        auto tail_pn = ParsePatternAndNotes(exit_blk.instructions[insert_pos - 1]);
+        if (!tail_pn.ok() ||
+            (tail_pn->pattern.op != RtlOp::kUse && tail_pn->pattern.op != RtlOp::kClobber &&
+             tail_pn->pattern.op != RtlOp::kNote)) {
+          break;
+        }
+        --insert_pos;
+      }
+      const std::vector<RtlInsn> prev_exit_rtl = exit_blk.rtl_insns;
+      exit_blk.instructions.insert(
+          exit_blk.instructions.begin() + static_cast<ptrdiff_t>(insert_pos),
+          *out.sideband.epilogue_delay_pattern);
+      exit_blk.SyncRtlInsnsFromInstructions();
+      for (size_t k = 0; k < prev_exit_rtl.size(); ++k) {
+        const size_t dst_k = (k < insert_pos) ? k : (k + 1);
+        if (dst_k < exit_blk.rtl_insns.size() && prev_exit_rtl[k].has_explicit_call_fusage &&
+            !exit_blk.rtl_insns[dst_k].has_explicit_call_fusage) {
+          exit_blk.rtl_insns[dst_k].has_explicit_call_fusage = true;
+          exit_blk.rtl_insns[dst_k].call_fusage = prev_exit_rtl[k].call_fusage;
+        }
+      }
+      out.sideband.epilogue_delay_pattern.reset();
+      unpacked_epilogue_delay_idx = insert_pos;
+    }
   }
 
   SynchronizeCanonicalLabels(&out);
@@ -2479,7 +2544,7 @@ RtlControlFlowGraph InvertFillSimpleDelaySlots(const RtlControlFlowGraph& dbr_si
   const std::vector<PreservedFallthroughZeroDead> preserved_ft_zero_dead =
       CollectFallthroughRelaxedZeroDeadInsns(out);
   RecomputePostReloadLiveAtStart(&out, profile);
-  RecombineReorgSplitIdioms(&out, profile);
+  RecombineReorgSplitIdioms(&out, profile, unpacked_epilogue_delay_idx);
   ResolvePostReloadConstZeroRegDeadNotes(&out, profile);
   RestoreFallthroughRelaxedZeroDeadInsns(&out, preserved_ft_zero_dead);
 

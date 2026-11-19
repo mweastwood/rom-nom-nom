@@ -1021,6 +1021,101 @@ int sum_const_pair_impl(const struct Pair* p) {
   EXPECT_TRUE(found);
 }
 
+TEST_F(InvertFinalScanInsnTest,
+       Gp32DiNotMovstrsiFirstScratchAndInterSrcReadExtendSubregRightInverse) {
+  // 1. `!gp64` `DImode` `(not:DI ...)` folding (`one_cmpldi2`): two `nor` instructions on an
+  //    even/odd GPR pair witnessed by `DImode` arithmetic fold into `(not:DI (reg:DI ...))`.
+  {
+    const CompilationProfile prof{.optimize_level = 2, .c_flags = {"-O2", "-mips1", "-Wa,-g"}};
+    RtlSidebandState sideband;
+    sideband.is_leaf_function = true;
+    const std::vector<std::string> asm_lines = {
+        "nor\t$8,$0,$4",  "nor\t$9,$0,$5",   "addu\t$3,$9,$7", "sltu\t$10,$3,$7",
+        "addu\t$2,$8,$6", "addu\t$2,$2,$10", "j\t$31",
+    };
+    const RtlControlFlowGraph lifted =
+        InvertFinalScanInsnLinesToCfg(asm_lines, sideband, {}, {}, &prof);
+    ASSERT_EQ(lifted.rpo_blocks.size(), 1u);
+    bool saw_not_di = false;
+    for (const std::string& insn : lifted.rpo_blocks[0].instructions) {
+      if (absl::StrContains(insn, "(not:DI (reg:DI 4 a0))")) {
+        saw_not_di = true;
+      }
+    }
+    EXPECT_TRUE(saw_not_di) << lifted.FormatSummary();
+    const auto snap = hooks_.ExecuteSubfunctionBoundary(gcc_harness::SubfunctionId::kFinalScanInsn,
+                                                        lifted, {}, 2, prof.c_flags);
+    const auto res = verifier_.VerifySubfunctionBoundaryRightInverse(snap);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+
+  // 2. First-insn `movstrsi` scratch recovery when `src_base` (`$5 a1`) dies on `movstrsi`.
+  {
+    const CompilationProfile prof{.optimize_level = 2, .c_flags = {"-O2", "-mips2", "-Wa,-g"}};
+    RtlSidebandState sideband;
+    sideband.is_leaf_function = true;
+    const std::vector<std::string> asm_lines = {
+        "lw\t$6,0($5)",  "lw\t$7,4($5)",  "lw\t$8,8($5)",  "lw\t$2,12($5)", "sw\t$6,0($4)",
+        "sw\t$7,4($4)",  "sw\t$8,8($4)",  "sw\t$2,12($4)", "lw\t$6,16($5)", "lw\t$7,20($5)",
+        "sw\t$6,16($4)", "sw\t$7,20($4)", "j\t$31",
+    };
+    const RtlControlFlowGraph lifted =
+        InvertFinalScanInsnLinesToCfg(asm_lines, sideband, {}, {}, &prof);
+    ASSERT_EQ(lifted.rpo_blocks.size(), 1u);
+    bool saw_blk_copy = false;
+    for (const std::string& insn : lifted.rpo_blocks[0].instructions) {
+      if (absl::StrContains(insn, "(mem:BLK ")) {
+        saw_blk_copy = true;
+      }
+    }
+    EXPECT_TRUE(saw_blk_copy) << lifted.FormatSummary();
+    const auto snap = hooks_.ExecuteSubfunctionBoundary(gcc_harness::SubfunctionId::kFinalScanInsn,
+                                                        lifted, {}, 2, prof.c_flags);
+    const auto res = verifier_.VerifySubfunctionBoundaryRightInverse(snap);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+
+  // 3. `RestoreNoConflictExtendClobbersInBlock` `inter_src_read` `(subreg:SI (reg:DI dh) 0/1)` and
+  //    `DImode` consumer `REG_DEAD` note when `src_reg` (`$4 a0`) is read between the two halves of
+  //    a sign-extension into `(reg:DI 6 a2)` before an in-place `adddi3` on `(reg:DI 6 a2)`.
+  {
+    const CompilationProfile prof{.optimize_level = 2, .c_flags = {"-O2", "-mips2", "-Wa,-g"}};
+    RtlSidebandState sideband;
+    sideband.is_leaf_function = true;
+    const std::vector<std::string> asm_lines = {
+        "move\t$7,$4",    "addu\t$8,$4,1",  "sra\t$6,$4,31",  "addu\t$7,$7,$3",
+        "sltu\t$9,$7,$3", "addu\t$6,$6,$2", "addu\t$6,$6,$9", "xor\t$7,$7,$8",
+        "move\t$2,$6",    "move\t$3,$7",    "j\t$31",
+    };
+    const RtlControlFlowGraph lifted =
+        InvertFinalScanInsnLinesToCfg(asm_lines, sideband, {}, {}, &prof);
+    ASSERT_EQ(lifted.rpo_blocks.size(), 1u);
+    bool saw_subreg_hi = false;
+    bool saw_subreg_lo = false;
+    bool saw_consumer_dead = false;
+    for (const std::string& insn : lifted.rpo_blocks[0].instructions) {
+      if (absl::StrContains(insn, "(set (subreg:SI (reg:DI 6 a2) 0)")) {
+        saw_subreg_hi = true;
+      }
+      if (absl::StrContains(insn, "(set (subreg:SI (reg:DI 6 a2) 1)")) {
+        saw_subreg_lo = true;
+      }
+      if (absl::StrContains(insn, "(plus:DI (reg:DI 6 a2)") &&
+          absl::StrContains(insn, "REG_DEAD (reg:DI 6 a2)")) {
+        saw_consumer_dead = true;
+      }
+    }
+    EXPECT_TRUE(saw_subreg_hi) << lifted.FormatSummary();
+    EXPECT_TRUE(saw_subreg_lo) << lifted.FormatSummary();
+    EXPECT_TRUE(saw_consumer_dead) << lifted.FormatSummary();
+
+    const auto snap = hooks_.ExecuteSubfunctionBoundary(gcc_harness::SubfunctionId::kFinalScanInsn,
+                                                        lifted, {}, 2, prof.c_flags);
+    const auto res = verifier_.VerifySubfunctionBoundaryRightInverse(snap);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+}
+
 class InvertFinalScanInsnRoundTripTest : public ::testing::TestWithParam<RoundTripTestCase> {
  protected:
   static void SetUpTestSuite() {

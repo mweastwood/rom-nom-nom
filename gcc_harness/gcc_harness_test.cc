@@ -3062,5 +3062,80 @@ TEST(RightInverseVerifierTest, AdversarialNegativePostCseJumpAndCseJumpsAlteredV
   EXPECT_TRUE(unfold_verifier.VerifySubfunctionBoundaryRightInverse(cse2_altered_snap).matches);
 }
 
+TEST(GccHarnessTest, PreservesRegnoPointerFlagFidelityAcrossLocalAllocHooksAndVerifiers) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+
+  // Pseudo 72 is declared in `pointer_regnos` without a pointer-inducing `PLUS`/`MEM`
+  // expression (unguarded `restore_reg_data` + `reg_scan` would clear `regno_pointer_flag[72]`).
+  // Pseudo 73 is a non-pointer integer holding `sp + 16` (unguarded `reg_scan` would set
+  // `regno_pointer_flag[73] = 1`).
+  RtlControlFlowGraph pre_cfg;
+  pre_cfg.pass = RtlPassKind::kSched;
+  pre_cfg.rpo_blocks.resize(1);
+  pre_cfg.rpo_blocks[0].id = 0;
+  pre_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 72) (reg:SI 4 a0))");
+  pre_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 73) (plus:SI (reg:SI 29 sp) (const_int 16)))");
+  pre_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 72) (reg:SI 73))) "
+      "(expr_list:REG_DEAD (reg:SI 72) (expr_list:REG_DEAD (reg:SI 73) (nil)))");
+  pre_cfg.rpo_blocks[0].AddPatternOnly("(use (reg/i:SI 2 v0))");
+  pre_cfg.sideband.pointer_regnos = {72};
+
+  // 1. `RunUpdateEquivRegs` preserves `pointer_regnos == {72}`.
+  hooks.ApplyCompilationProfile({.optimize_level = 2, .c_flags = {"-O2"}});
+  ctx.MaterializeFromCfg(pre_cfg);
+  hooks.RunUpdateEquivRegs();
+  const RtlControlFlowGraph after_equiv =
+      ctx.DematerializeToCfg(ctx.GetInsns(), RtlPassKind::kLreg);
+  EXPECT_EQ(after_equiv.sideband.pointer_regnos, std::vector<int>({72}));
+
+  // 2. `ExecuteSubfunctionBoundary(kBlockAlloc)` preserves `pointer_regnos == {72}` at `-O2` &
+  // `-O0`.
+  const SubfunctionBoundarySnapshot ba_o2 =
+      hooks.ExecuteSubfunctionBoundary(SubfunctionId::kBlockAlloc, after_equiv, {}, 2, {"-O2"});
+  EXPECT_EQ(ba_o2.post_state.sideband.pointer_regnos, std::vector<int>({72}));
+
+  const SubfunctionBoundarySnapshot ba_o0 =
+      hooks.ExecuteSubfunctionBoundary(SubfunctionId::kBlockAlloc, pre_cfg, {}, 0, {"-O0"});
+  EXPECT_EQ(ba_o0.post_state.sideband.pointer_regnos, std::vector<int>({72}));
+
+  // 3. `RunLocalAlloc` preserves `pointer_regnos == {72}`.
+  hooks.ApplyCompilationProfile({.optimize_level = 2, .c_flags = {"-O2"}});
+  ctx.MaterializeFromCfg(pre_cfg);
+  hooks.RunLocalAlloc();
+  const RtlControlFlowGraph after_lreg = ctx.DematerializeToCfg(ctx.GetInsns(), RtlPassKind::kLreg);
+  EXPECT_EQ(after_lreg.sideband.pointer_regnos, std::vector<int>({72}));
+
+  // 4. `RightInverseVerifier` catches corrupted `pointer_regnos` without post-pass masking.
+  class CorruptedPointerFlagProvider final : public ToySubfunctionInverses {
+   public:
+    CorruptedPointerFlagProvider(RtlControlFlowGraph pre, RtlControlFlowGraph mid)
+        : pre_(std::move(pre)), mid_(std::move(mid)) {}
+    RtlControlFlowGraph InvertUpdateEquivRegs(const RtlControlFlowGraph&,
+                                              const CompilationProfile&) const override {
+      RtlControlFlowGraph bad = pre_;
+      bad.sideband.pointer_regnos = {73};
+      return bad;
+    }
+    RtlControlFlowGraph InvertBlockAlloc(const RtlControlFlowGraph&,
+                                         const CompilationProfile&) const override {
+      RtlControlFlowGraph bad = mid_;
+      bad.sideband.pointer_regnos = {73};
+      return bad;
+    }
+
+   private:
+    RtlControlFlowGraph pre_;
+    RtlControlFlowGraph mid_;
+  };
+  CorruptedPointerFlagProvider bad_prov(pre_cfg, after_equiv);
+  RightInverseVerifier bad_verifier(&ctx, &hooks, &bad_prov);
+  hooks.ApplyCompilationProfile({.optimize_level = 2, .c_flags = {"-O2"}});
+  EXPECT_FALSE(bad_verifier.VerifyUpdateEquivRegsRightInverse(after_equiv).matches);
+  EXPECT_FALSE(bad_verifier.VerifyBlockAllocRightInverse(ba_o2.post_state).matches);
+  EXPECT_FALSE(bad_verifier.VerifyLocalAllocStageRightInverse(after_lreg).matches);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::gcc_harness

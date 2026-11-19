@@ -1365,6 +1365,25 @@ bool TryFoldGp32DiWitnessedIdioms(const RtlControlFlowGraph& cfg, int frame_size
               continue;
             }
           }
+          if (op0 == RtlOp::kNot && p1.SetSrc().op == RtlOp::kNot &&
+              p0.SetSrc().children.size() == 1 && p1.SetSrc().children.size() == 1 &&
+              IsPlainSiGpr(p0.SetDest(), &d_hi) && IsPlainSiGpr(p1.SetDest(), &d_lo) &&
+              IsValidGp32DiPair(d_hi) && d_lo == d_hi + 1 &&
+              IsPlainSiGpr(p0.SetSrc().children[0], &a_hi) &&
+              IsPlainSiGpr(p1.SetSrc().children[0], &a_lo) && IsValidGp32DiPair(a_hi) &&
+              a_lo == a_hi + 1) {
+            const RtlFlags dst_flags = p0.SetDest().flags;
+            insns[i] = MakeFoldedInsn(
+                RtlExpr::MakeSet(RtlExpr::MakeReg(RtlMachineMode::kDi, d_hi, dst_flags),
+                                 RtlExpr::MakeUnary(RtlOp::kNot, RtlMachineMode::kDi,
+                                                    RtlExpr::MakeReg(RtlMachineMode::kDi, a_hi))),
+                options.mark_newly_folded_sentinel);
+            insns.erase(insns.begin() + static_cast<ptrdiff_t>(i + 1));
+            defined_so_far.Set(d_hi);
+            defined_so_far.Set(d_lo);
+            changed = true;
+            continue;
+          }
 
           // `movdi` load (`[dH <- mem(addr0), dL <- mem(addr4)]` when `dH != base`, or
           // `[dL <- mem(addr4), dH <- mem(addr0)]` when `dH == base`).
@@ -1838,17 +1857,58 @@ bool TryFoldMovstrsiBlockMovesInBlock(const RtlControlFlowGraph& cfg, size_t b,
                 break;
               }
             }
-            MipsHardRegSet forbidden = temp_set;
-            forbidden.Set(src_base);
-            forbidden.Set(dst_base);
-            for (size_t k = n; ok && k < 4; ++k) {
-              const int extra = PickDeadCallerSavedGpr(live_end, forbidden);
-              if (extra < 2) {
-                ok = false;
+            bool is_first_nonnote = true;
+            for (size_t prev = 0; prev < pos; ++prev) {
+              if ((*insns)[prev].pattern.op != RtlOp::kNote) {
+                is_first_nonnote = false;
                 break;
               }
-              temps[k] = extra;
-              forbidden.Set(extra);
+            }
+            if (is_first_nonnote && !live_end.Test(src_base) && src_base >= 2 && src_base <= 25) {
+              MipsHardRegSet la_forbidden = temp_set;
+              for (size_t k = n; ok && k < 4; ++k) {
+                const int extra = PickDeadCallerSavedGpr(live_end, la_forbidden);
+                if (extra < 2) {
+                  ok = false;
+                  break;
+                }
+                temps[k] = extra;
+                la_forbidden.Set(extra);
+              }
+              if (ok) {
+                MipsHardRegSet rl_forbidden = temp_set;
+                rl_forbidden.Set(src_base);
+                rl_forbidden.Set(dst_base);
+                for (size_t k = n; k < 4; ++k) {
+                  if (temps[k] != src_base && temps[k] != dst_base) {
+                    rl_forbidden.Set(temps[k]);
+                  }
+                }
+                for (size_t k = n; k < 4; ++k) {
+                  if (temps[k] == src_base || temps[k] == dst_base) {
+                    const int repl = PickDeadCallerSavedGpr(live_end, rl_forbidden);
+                    if (repl < 2) {
+                      ok = false;
+                      break;
+                    }
+                    temps[k] = repl;
+                    rl_forbidden.Set(repl);
+                  }
+                }
+              }
+            } else {
+              MipsHardRegSet forbidden = temp_set;
+              forbidden.Set(src_base);
+              forbidden.Set(dst_base);
+              for (size_t k = n; ok && k < 4; ++k) {
+                const int extra = PickDeadCallerSavedGpr(live_end, forbidden);
+                if (extra < 2) {
+                  ok = false;
+                  break;
+                }
+                temps[k] = extra;
+                forbidden.Set(extra);
+              }
             }
             if (ok) {
               (*insns)[pos] =
@@ -2606,6 +2666,7 @@ void RestoreNoConflictExtendClobbersInBlock(const RtlControlFlowGraph& cfg, size
     int matched_dh = -1;
     size_t matched_hi_idx = 0;
     size_t matched_insert_pos = 0;
+    std::optional<size_t> matched_di_consumer_idx;
     for (int dh : kCandidateDiRegs) {
       const int dl = dh + 1;
       if (src_reg == dl || !MatchGp32WordDest(pi.children[0], dl)) {
@@ -2705,18 +2766,100 @@ void RestoreNoConflictExtendClobbersInBlock(const RtlControlFlowGraph& cfg, size
         matched_dh = dh;
         matched_hi_idx = j;
         matched_insert_pos = insert_pos;
+        matched_di_consumer_idx = di_consumer_idx;
       }
       break;
     }
     if (matched_dh != -1) {
-      if (matched_dh == 64 && insns[i].parsed.pattern.children[0].op == RtlOp::kReg) {
-        insns[i].parsed.pattern.children[0] =
-            RtlExpr::MakeSubreg(RtlMachineMode::kSi, RtlExpr::MakeReg(RtlMachineMode::kDi, 64), 1);
+      bool inter_src_read = false;
+      if (matched_dh >= 2 && matched_dh <= 24 && matched_di_consumer_idx.has_value()) {
+        const size_t first_ext = std::min(i, matched_hi_idx);
+        const size_t second_ext = std::max(i, matched_hi_idx);
+        for (size_t k = first_ext + 1; k < *matched_di_consumer_idx; ++k) {
+          if (k != second_ext && insns[k].read_regs.Test(src_reg)) {
+            inter_src_read = true;
+            break;
+          }
+        }
+      }
+      if ((matched_dh == 64 || inter_src_read) &&
+          insns[i].parsed.pattern.children[0].op == RtlOp::kReg) {
+        insns[i].parsed.pattern.children[0] = RtlExpr::MakeSubreg(
+            RtlMachineMode::kSi, RtlExpr::MakeReg(RtlMachineMode::kDi, matched_dh), 1);
         std::string updated = insns[i].parsed.ToGccPrintRtlString();
         if (blk->rtl_insns.size() == blk->instructions.size()) {
           blk->rtl_insns[i].canonical_pattern = updated;
         }
         blk->instructions[i] = std::move(updated);
+      }
+      if (inter_src_read && insns[matched_hi_idx].parsed.pattern.children[0].op == RtlOp::kReg) {
+        insns[matched_hi_idx].parsed.pattern.children[0] = RtlExpr::MakeSubreg(
+            RtlMachineMode::kSi, RtlExpr::MakeReg(RtlMachineMode::kDi, matched_dh), 0);
+        std::string updated = insns[matched_hi_idx].parsed.ToGccPrintRtlString();
+        if (blk->rtl_insns.size() == blk->instructions.size()) {
+          blk->rtl_insns[matched_hi_idx].canonical_pattern = updated;
+        }
+        blk->instructions[matched_hi_idx] = std::move(updated);
+      }
+      if (matched_di_consumer_idx.has_value()) {
+        RtlPatternAndNotes& cons_pn = insns[*matched_di_consumer_idx].parsed;
+        const RtlExpr* cons_set = nullptr;
+        if (cons_pn.pattern.IsSet()) {
+          cons_set = &cons_pn.pattern;
+        } else if (cons_pn.pattern.IsParallel()) {
+          for (const RtlExpr& elem : cons_pn.pattern.children) {
+            if (elem.IsSet()) {
+              cons_set = (cons_set == nullptr) ? &elem : nullptr;
+              if (cons_set == nullptr) {
+                break;
+              }
+            }
+          }
+        }
+        const bool has_retval_or_dead = std::any_of(
+            cons_pn.reg_notes.begin(), cons_pn.reg_notes.end(), [&](const RtlRegNote& n) {
+              return n.kind == RtlMachineMode::kRegRetval ||
+                     (n.kind == RtlMachineMode::kRegDead && n.datum.IsReg() &&
+                      n.datum.RegNo() == matched_dh);
+            });
+        if (cons_set != nullptr && !has_retval_or_dead && cons_set->SetDest().IsHardReg() &&
+            cons_set->SetDest().mode == RtlMachineMode::kDi &&
+            cons_set->SetDest().RegNo() == matched_dh && !cons_set->SetDest().flags.integrated) {
+          auto first_preorder_pos = [](const RtlExpr& root, int regno) {
+            int idx = 0;
+            int found = -1;
+            root.Visit([&](const RtlExpr& n) {
+              ++idx;
+              if (found < 0 && n.IsReg() && !n.IsArgPointerReg() && n.RegNo() == regno) {
+                found = idx;
+              }
+            });
+            return (found < 0) ? idx : found;
+          };
+          const int my_ord = first_preorder_pos(cons_set->SetSrc(), matched_dh);
+          auto ins_it = std::find_if(
+              cons_pn.reg_notes.begin(), cons_pn.reg_notes.end(), [&](const RtlRegNote& ex) {
+                if (ex.kind == RtlMachineMode::kRegEquiv) {
+                  return false;
+                }
+                if (ex.kind != RtlMachineMode::kRegDead || !ex.datum.IsReg() ||
+                    ex.datum.IsArgPointerReg()) {
+                  return true;
+                }
+                return first_preorder_pos(cons_set->SetSrc(), ex.datum.RegNo()) > my_ord;
+              });
+          cons_pn.reg_notes.insert(ins_it,
+                                   RtlRegNote{
+                                       .kind = RtlMachineMode::kRegDead,
+                                       .list_op = RtlOp::kExprList,
+                                       .datum = RtlExpr::MakeReg(RtlMachineMode::kDi, matched_dh),
+                                   });
+          std::string updated = cons_pn.ToGccPrintRtlString();
+          if (blk->rtl_insns.size() == blk->instructions.size()) {
+            blk->rtl_insns[*matched_di_consumer_idx].canonical_pattern = updated;
+          }
+          blk->instructions[*matched_di_consumer_idx] = std::move(updated);
+        }
       }
       used_indices.insert(i);
       used_indices.insert(matched_hi_idx);

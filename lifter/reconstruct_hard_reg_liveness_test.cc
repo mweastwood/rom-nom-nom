@@ -1928,5 +1928,148 @@ unsigned div_ten(unsigned a) {
   EXPECT_TRUE(highpart_res.matches) << highpart_res.diff_detail;
 }
 
+TEST(ReconstructHardRegLivenessTest,
+     ReversesMultiClobberUnusedNoteOrderOnDemotedParallelHardSetDest) {
+  const CompilationProfile profile = MakeProfile(2, {"-O2", "-mips1"});
+
+  // 1. Positive case: 3-clobber `mult:SI` `PARALLEL` writing `(reg:SI 8 t0)` while lower GPR `$5`
+  //    (`a1`) dies on the multiply and stays dead across `t0`'s `[0, 2]` live range (`8 t0` is
+  //    demoted to a hard register in `.08.lreg`). `REG_UNUSED` notes on `(64, 65, 66)` must be
+  //    emitted in reversed `(66, 65, 64)` order matching `GccContext::MaterializeFromCfg`.
+  RtlControlFlowGraph demoted_cfg;
+  demoted_cfg.pass = RtlPassKind::kDbr;
+  demoted_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(parallel[ (set (reg:SI 8 t0) (mult:SI (reg:SI 5 a1) (reg:SI 6 a2))) "
+                    "(clobber (reg:SI 64 hi)) (clobber (reg:SI 65 lo)) "
+                    "(clobber (reg:SI 66 hilo)) ] )",
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 4 a0) (const_int 3)))",
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 8 t0)))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&demoted_cfg, profile);
+  const auto demoted_pn = ParsePatternAndNotes(demoted_cfg.rpo_blocks[0].instructions[0]);
+  ASSERT_TRUE(demoted_pn.ok());
+  std::vector<int> demoted_unused_regs;
+  for (const RtlRegNote& n : demoted_pn->reg_notes) {
+    if (n.kind == RtlMachineMode::kRegUnused && n.datum.IsReg()) {
+      demoted_unused_regs.push_back(n.datum.RegNo());
+    }
+  }
+  const std::vector<int> expected_rev = {66, 65, 64};
+  EXPECT_EQ(demoted_unused_regs, expected_rev) << demoted_cfg.rpo_blocks[0].instructions[0];
+
+  // 2. Contrast case: when the same 3-clobber `PARALLEL` writes `(reg:SI 2 v0)` (lowest caller-save
+  //    GPR, which lifts to a pseudo in `.08.lreg`), `REG_UNUSED` notes remain in forward
+  //    `(64, 65, 66)` order.
+  RtlControlFlowGraph pseudo_cfg;
+  pseudo_cfg.pass = RtlPassKind::kDbr;
+  pseudo_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(parallel[ (set (reg:SI 2 v0) (mult:SI (reg:SI 5 a1) (reg:SI 6 a2))) "
+                    "(clobber (reg:SI 64 hi)) (clobber (reg:SI 65 lo)) "
+                    "(clobber (reg:SI 66 hilo)) ] )",
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 4 a0)))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&pseudo_cfg, profile);
+  const auto pseudo_pn = ParsePatternAndNotes(pseudo_cfg.rpo_blocks[0].instructions[0]);
+  ASSERT_TRUE(pseudo_pn.ok());
+  std::vector<int> pseudo_unused_regs;
+  for (const RtlRegNote& n : pseudo_pn->reg_notes) {
+    if (n.kind == RtlMachineMode::kRegUnused && n.datum.IsReg()) {
+      pseudo_unused_regs.push_back(n.datum.RegNo());
+    }
+  }
+  const std::vector<int> expected_fwd = {64, 65, 66};
+  EXPECT_EQ(pseudo_unused_regs, expected_fwd) << pseudo_cfg.rpo_blocks[0].instructions[0];
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     SynthesizePostReloadMemRegEquivNotesAndExcludeProvenGprSpillFromCallFusage) {
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips2", "-mcpu=r4000"});
+
+  // 1. `SynthesizePostReloadMemRegEquivNotes`: in a leaf function (`frame_size_bytes == 0`), an
+  //    unmodified incoming 5th stack parameter load `[sp + 16]` receives `REG_EQUIV (mem:SI ...)`,
+  //    while any stale `REG_EQUIV (mem:SI ...)` on a slot overwritten later in the function is
+  //    stripped cleanly.
+  RtlControlFlowGraph equiv_cfg;
+  equiv_cfg.pass = RtlPassKind::kDbr;
+  equiv_cfg.sideband.frame_size_bytes = 0;
+  equiv_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 6 a2) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 16))))",
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 6 a2) (const_int 1)))",
+                    "(set (reg:SI 3 v1) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20)))) "
+                    "(expr_list:REG_EQUIV (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))) (nil))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))) (reg:SI 4 a0))",
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 3 v1)))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&equiv_cfg, profile_o2);
+  SynthesizePostReloadMemRegEquivNotes(&equiv_cfg, profile_o2);
+  EXPECT_NE(equiv_cfg.rpo_blocks[0].instructions[0].find(
+                "REG_EQUIV (mem:SI (plus:SI (reg:SI 29 sp) (const_int 16)))"),
+            std::string::npos)
+      << equiv_cfg.rpo_blocks[0].instructions[0];
+  EXPECT_EQ(equiv_cfg.rpo_blocks[0].instructions[2].find("REG_EQUIV"), std::string::npos)
+      << equiv_cfg.rpo_blocks[0].instructions[2];
+
+  // 2. `CollectProvenGprSpillOffsetsForCallFusage`: when all callee-saved GPRs (`16..23, 30, 31`)
+  //    are saved in the prologue and `$5` (`a1`) is stored into proven GPR reload spill slot
+  //    `[sp + 20]` (`8`-byte bucket `[16, 24)` below saved registers `[24, 64)`) before a 1-arg
+  //    `CALL_INSN` and reloaded from `[sp + 20]` into `$2` (`v0`) after the call, `$5` is excluded
+  //    from reconstructed `CALL_INSN_FUNCTION_USAGE` (which keeps only `(use (reg:SI 4 a0))`).
+  RtlControlFlowGraph spill_call_cfg;
+  spill_call_cfg.pass = RtlPassKind::kDbr;
+  spill_call_cfg.sideband.frame_size_bytes = 64;
+  spill_call_cfg.sideband.outgoing_args_size = 16;
+  spill_call_cfg.sideband.saved_gpr_regnos = {16, 17, 18, 19, 20, 21, 22, 23, 30, 31};
+  spill_call_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int -64)))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 60))) (reg:SI 31 ra))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 56))) (reg:SI 30 $fp))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 52))) (reg:SI 23 s7))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 48))) (reg:SI 22 s6))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 44))) (reg:SI 21 s5))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 40))) (reg:SI 20 s4))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 36))) (reg:SI 19 s3))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 32))) (reg:SI 18 s2))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 28))) (reg:SI 17 s1))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 24))) (reg:SI 16 s0))",
+                    "(set (reg:SI 5 a1) (plus:SI (reg:SI 4 a0) (const_int 9)))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))) (reg:SI 5 a1))",
+                    "(set (reg:SI 4 a0) (const_int 1))",
+                    "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref \"one_arg_callee\")) "
+                    "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+                    "(set (reg:SI 3 v1) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))))",
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 3 v1)))",
+                    "(set (reg:SI 31 ra) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 60))))",
+                    "(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int 64)))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&spill_call_cfg, profile_o2);
+  ASSERT_TRUE(spill_call_cfg.rpo_blocks[0].rtl_insns[14].has_explicit_call_fusage);
+  ASSERT_EQ(spill_call_cfg.rpo_blocks[0].rtl_insns[14].call_fusage.size(), 1u);
+  EXPECT_EQ(spill_call_cfg.rpo_blocks[0].rtl_insns[14].call_fusage[0].ToGccPrintRtlString(),
+            "(use (reg:SI 4 a0))");
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::lifter

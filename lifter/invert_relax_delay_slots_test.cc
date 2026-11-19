@@ -1132,6 +1132,103 @@ TEST(InvertRelaxDelaySlotsTest,
   }
 }
 
+TEST(InvertRelaxDelaySlotsTest,
+     Flavour4bSlotKilledSrcRegGuardAndConstantTargetRedundantRestoreRightInverse) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  hooks.ApplyCompilationProfile(
+      CompilationProfile{.optimize_level = 2, .c_flags = {"-O2", "-mips2", "-mcpu=r4000"}});
+  ProductionRelaxDelaySlotsProvider provider;
+  RightInverseVerifier verifier(&ctx, &hooks, &provider);
+
+  // 1. Flavour 4b `slot_kills_any_reg` guard: `B0` sets `$8` (`t0 = 5`) and ends with an
+  //    unconditional `SEQUENCE` jumping to single-insn conditional-branch block `B2`
+  //    (`own_thread_p`) with delay slot `(set (reg:SI 2 v0) (plus:SI (reg:SI 8 t0) (const_int
+  //    1)))`, where `$8` is dead at both `B1` and `B2` (`reorg.c:1802-1803`).
+  //    `InvertRelaxDelaySlots` must NOT pull `B2`'s conditional jump into `B0`.
+  {
+    RtlControlFlowGraph flavour4b_guard_cfg;
+    flavour4b_guard_cfg.pass = RtlPassKind::kDbr;
+    flavour4b_guard_cfg.rpo_blocks.resize(5);
+    flavour4b_guard_cfg.rpo_blocks[0].id = 0;
+    flavour4b_guard_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 8 t0) (const_int 5))");
+    flavour4b_guard_cfg.rpo_blocks[0].AddPatternOnly(
+        "(sequence [(jump_insn (set (pc) (label_ref L1))) "
+        "(insn (set (reg/i:SI 2 v0) (plus:SI (reg:SI 8 t0) (const_int 1))))])");
+    flavour4b_guard_cfg.rpo_blocks[0].successors = {2};
+
+    flavour4b_guard_cfg.rpo_blocks[1].id = 1;
+    flavour4b_guard_cfg.rpo_blocks[1].has_label = true;
+    flavour4b_guard_cfg.rpo_blocks[1].AddPatternOnly("(set (reg/i:SI 2 v0) (const_int 9))");
+    flavour4b_guard_cfg.rpo_blocks[1].AddPatternOnly("(set (pc) (label_ref L2))");
+    flavour4b_guard_cfg.rpo_blocks[1].successors = {4};
+
+    flavour4b_guard_cfg.rpo_blocks[2].id = 2;
+    flavour4b_guard_cfg.rpo_blocks[2].has_label = true;
+    flavour4b_guard_cfg.rpo_blocks[2].AddPatternOnly(
+        "(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) (label_ref L0) (pc)))");
+    flavour4b_guard_cfg.rpo_blocks[2].successors = {1, 3};
+
+    flavour4b_guard_cfg.rpo_blocks[3].id = 3;
+    flavour4b_guard_cfg.rpo_blocks[3].AddPatternOnly(
+        "(set (reg/i:SI 2 v0) (plus:SI (reg/i:SI 2 v0) (const_int 2)))");
+    flavour4b_guard_cfg.rpo_blocks[3].successors = {4};
+
+    flavour4b_guard_cfg.rpo_blocks[4].id = 4;
+    flavour4b_guard_cfg.rpo_blocks[4].has_label = true;
+    flavour4b_guard_cfg.rpo_blocks[4].AddPatternOnly("(use (reg/i:SI 2 v0))");
+    flavour4b_guard_cfg.rpo_blocks[4].AddPatternOnly(
+        "(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+
+    const RtlControlFlowGraph lifted = InvertRelaxDelaySlots(flavour4b_guard_cfg);
+    ASSERT_EQ(lifted.rpo_blocks.size(), 5u);
+    EXPECT_EQ(lifted.rpo_blocks[0].successors, std::vector<size_t>{2u});
+    const RightInverseResult res = verifier.VerifyRelaxDelaySlotsRightInverse(flavour4b_guard_cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+
+  // 2. `RestoreRelaxedTargetBlockRedundantInsns`: `B0` sets `(set (reg:SI 3 v1) (const_int 7))`,
+  //    consumes `$3` in a memory store, and conditionally jumps over single-pred fallthrough `B1`
+  //    (ending in `(set (reg:SI 3 v1) (const_int 7))`) to `B2` reading `$3`.
+  //    `InvertRelaxDelaySlots` restores `(set (reg:SI 3 v1) (const_int 7))` at the start of `B2`
+  //    and attaches `REG_DEAD` on `$3`'s consumer in `B0`.
+  {
+    RtlControlFlowGraph redundant_tgt_cfg;
+    redundant_tgt_cfg.pass = RtlPassKind::kDbr;
+    redundant_tgt_cfg.rpo_blocks.resize(3);
+    redundant_tgt_cfg.rpo_blocks[0].id = 0;
+    redundant_tgt_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 3 v1) (const_int 7))");
+    redundant_tgt_cfg.rpo_blocks[0].AddPatternOnly(
+        "(set (mem:SI (reg:SI 4 a0)) (reg:SI 3 v1)) (expr_list:REG_DEAD (reg:SI 3 v1) (nil))");
+    redundant_tgt_cfg.rpo_blocks[0].AddPatternOnly(
+        "(sequence [(jump_insn (set (pc) (if_then_else (eq:SI (reg:SI 5 a1) (const_int 0)) "
+        "(label_ref L0) (pc)))) (insn (set (reg:SI 8 t0) (const_int 1)))])");
+    redundant_tgt_cfg.rpo_blocks[0].successors = {2, 1};
+
+    redundant_tgt_cfg.rpo_blocks[1].id = 1;
+    redundant_tgt_cfg.rpo_blocks[1].AddPatternOnly("(set (mem:SI (reg:SI 6 a2)) (reg:SI 8 t0))");
+    redundant_tgt_cfg.rpo_blocks[1].AddPatternOnly("(set (reg:SI 3 v1) (const_int 7))");
+    redundant_tgt_cfg.rpo_blocks[1].successors = {2};
+
+    redundant_tgt_cfg.rpo_blocks[2].id = 2;
+    redundant_tgt_cfg.rpo_blocks[2].has_label = true;
+    redundant_tgt_cfg.rpo_blocks[2].AddPatternOnly(
+        "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 3 v1) (reg:SI 7 a3)))");
+    redundant_tgt_cfg.rpo_blocks[2].AddPatternOnly("(use (reg/i:SI 2 v0))");
+    redundant_tgt_cfg.rpo_blocks[2].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+
+    const RtlControlFlowGraph lifted = InvertRelaxDelaySlots(
+        redundant_tgt_cfg,
+        CompilationProfile{.optimize_level = 2, .c_flags = {"-O2", "-mips2", "-mcpu=r4000"}});
+    ASSERT_EQ(lifted.rpo_blocks.size(), 3u);
+    EXPECT_EQ(lifted.rpo_blocks[2].instructions.front(), "(set (reg:SI 3 v1) (const_int 7))");
+    EXPECT_TRUE(absl::StrContains(lifted.rpo_blocks[0].instructions[1], "REG_DEAD (reg:SI 3 v1)"));
+
+    const RightInverseResult res = verifier.VerifyRelaxDelaySlotsRightInverse(redundant_tgt_cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+}
+
 class RelaxDelaySlotsCorpusTest : public ::testing::TestWithParam<RoundTripTestCase> {
  protected:
   static void SetUpTestSuite() {

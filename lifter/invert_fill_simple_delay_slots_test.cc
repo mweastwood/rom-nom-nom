@@ -717,5 +717,67 @@ TEST(InvertFillSimpleDelaySlotsUnitTest,
   EXPECT_TRUE(res.matches) << res.diff_detail;
 }
 
+TEST(InvertFillSimpleDelaySlotsUnitTest, ConditionalEpilogueDelayUnpackingEligibilityRightInverse) {
+  const CompilationProfile o2_profile{.optimize_level = 2,
+                                      .c_flags = {"-O2", "-mips2", "-mcpu=r4000"}};
+
+  // 1. Eligible ALU `epilogue_delay_pattern` before trailing `(use (reg/i:SI 2 v0))`:
+  //    `InvertFillSimpleDelaySlots` unpacks it ahead of `(use ...)`, clears
+  //    `sideband.epilogue_delay_pattern`, resolves `REG_DEAD (reg:SI 4 a0)`, and satisfies
+  //    `VerifySubfunctionBoundaryRightInverse`.
+  RtlControlFlowGraph elig_cfg;
+  elig_cfg.pass = RtlPassKind::kDbr;
+  elig_cfg.sideband.frame_size_bytes = 24;
+  elig_cfg.sideband.saved_gpr_regnos = {31};
+  elig_cfg.sideband.epilogue_delay_pattern =
+      "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 4 a0) (const_int 1)))";
+  elig_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int -24)))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 16))) (reg:SI 31 ra))",
+                    "(use (reg/i:SI 2 v0))",
+                },
+                {}),
+  };
+
+  const RtlControlFlowGraph lifted_elig = InvertFillSimpleDelaySlots(elig_cfg, o2_profile);
+  EXPECT_FALSE(lifted_elig.sideband.epilogue_delay_pattern.has_value());
+  ASSERT_EQ(lifted_elig.rpo_blocks.size(), 1u);
+  ASSERT_EQ(lifted_elig.rpo_blocks[0].instructions.size(), 4u) << lifted_elig.FormatSummary();
+  EXPECT_EQ(lifted_elig.rpo_blocks[0].instructions[2],
+            "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 4 a0) (const_int 1))) "
+            "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+  EXPECT_EQ(lifted_elig.rpo_blocks[0].instructions[3], "(use (reg/i:SI 2 v0))");
+
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  EnsureMips2TargetConfigured(&hooks);
+  RtlControlFlowGraph pre_with_ret = lifted_elig;
+  pre_with_ret.rpo_blocks[0].AddPatternOnly("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+  const SubfunctionBoundarySnapshot simple_snap =
+      hooks.ExecuteSubfunctionBoundary(SubfunctionId::kFillSimpleDelaySlots, pre_with_ret, {},
+                                       o2_profile.optimize_level, o2_profile.c_flags);
+  ProductionFillSimpleDelaySlotsProvider provider;
+  RightInverseVerifier verifier(&ctx, &hooks, &provider);
+  EXPECT_TRUE(verifier.VerifyFillSimpleDelaySlotsRightInverse(simple_snap.post_state).matches);
+  EXPECT_TRUE(verifier.VerifySubfunctionBoundaryRightInverse(simple_snap).matches);
+
+  // 2. Ineligible `MEM`-load or saved-register `epilogue_delay_pattern` stays in
+  //    `sideband.epilogue_delay_pattern` without being unpacked into `rpo_blocks.back()`.
+  RtlControlFlowGraph mem_ep_cfg = elig_cfg;
+  mem_ep_cfg.sideband.epilogue_delay_pattern = "(set (reg/i:SI 2 v0) (mem:SI (reg:SI 4 a0)))";
+  const RtlControlFlowGraph lifted_mem_ep = InvertFillSimpleDelaySlots(mem_ep_cfg, o2_profile);
+  EXPECT_TRUE(lifted_mem_ep.sideband.epilogue_delay_pattern.has_value());
+  EXPECT_EQ(lifted_mem_ep.rpo_blocks[0].instructions.size(), 3u);
+
+  RtlControlFlowGraph saved_ep_cfg = elig_cfg;
+  saved_ep_cfg.sideband.saved_gpr_regnos = {16, 31};
+  saved_ep_cfg.sideband.epilogue_delay_pattern = "(set (reg/i:SI 2 v0) (reg:SI 16 s0))";
+  const RtlControlFlowGraph lifted_saved_ep = InvertFillSimpleDelaySlots(saved_ep_cfg, o2_profile);
+  EXPECT_TRUE(lifted_saved_ep.sideband.epilogue_delay_pattern.has_value());
+  EXPECT_EQ(lifted_saved_ep.rpo_blocks[0].instructions.size(), 3u);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::lifter

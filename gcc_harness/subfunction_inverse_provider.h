@@ -298,10 +298,18 @@ class SubfunctionInverseProvider {
   virtual RtlControlFlowGraph InvertBlockAlloc(const RtlControlFlowGraph& /*x*/) const {
     return {};
   }
+  virtual RtlControlFlowGraph InvertBlockAlloc(const RtlControlFlowGraph& x,
+                                               const CompilationProfile& /*profile*/) const {
+    return InvertBlockAlloc(x);
+  }
 
   // 15. Inverse of `local-alloc.c:update_equiv_regs`.
   virtual RtlControlFlowGraph InvertUpdateEquivRegs(const RtlControlFlowGraph& /*x*/) const {
     return {};
+  }
+  virtual RtlControlFlowGraph InvertUpdateEquivRegs(const RtlControlFlowGraph& x,
+                                                    const CompilationProfile& /*profile*/) const {
+    return InvertUpdateEquivRegs(x);
   }
 
   // ---------------------------------------------------------------------------

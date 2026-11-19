@@ -6506,6 +6506,7 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
       NarrowMultiUseSubwordZeroExtendWebs(&cfg);
       MarkSelfLoopSpinWaitLoadsVolatile(&cfg);
     }
+    UpgradeCallOutgoingArgBytes(&cfg, *profile);
     ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, *profile);
     if (FoldFinalScanMultiInsnTemplates(&cfg, *profile)) {
       StripRegDeadAndUnusedNotesOnCfg(&cfg);
@@ -6519,8 +6520,8 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
       DetectMipsRegisterWidthFlags(cfg, profile, &gp64, &fp64);
       RestoreNoConflictExtendClobbers(&cfg, gp64, fp64,
                                       ParseCompilationProfileFlags(*profile).RunsSched2());
+      SynthesizePostReloadMemRegEquivNotes(&cfg, *profile);
     }
-    UpgradeCallOutgoingArgBytes(&cfg, *profile);
     ReconstructMissingCallFusage(&cfg, *profile);
     if (profile->optimize_level == 0) {
       ReconstructO0FinalScanDeletions(&cfg, *profile);

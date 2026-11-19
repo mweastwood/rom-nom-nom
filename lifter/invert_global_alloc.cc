@@ -1296,7 +1296,8 @@ int MinLiveLengthForDensityCap(int refs, double max_density) {
 
 bool FindBestRefsAndLengthInPriorityRange(int orig_refs, int orig_len, int size, int calls_crossed,
                                           bool caller_saves, double max_density, int min_pri,
-                                          int max_pri, int* out_refs, int* out_len) {
+                                          int max_pri, int* out_refs, int* out_len,
+                                          bool lock_refs = false) {
   if (min_pri > max_pri) {
     return false;
   }
@@ -1309,11 +1310,13 @@ bool FindBestRefsAndLengthInPriorityRange(int orig_refs, int orig_len, int size,
     return true;
   }
 
-  const int max_refs_search = std::max({orig_refs * 4, 64, 4 * calls_crossed + 8});
+  const int r_min = lock_refs ? std::max(1, orig_refs) : 1;
+  const int max_refs_search =
+      lock_refs ? std::max(1, orig_refs) : std::max({orig_refs * 4, 64, 4 * calls_crossed + 8});
 
   int best_cost = std::numeric_limits<int>::max();
   bool found = false;
-  for (int r = 1; r <= max_refs_search; ++r) {
+  for (int r = r_min; r <= max_refs_search; ++r) {
     if (caller_saves && calls_crossed > 0 && ((4 * calls_crossed < r) != orig_cs_prof)) {
       continue;
     }
@@ -1370,14 +1373,16 @@ bool FindBestRefsAndLengthInPriorityRange(int orig_refs, int orig_len, int size,
 
 bool FindLowestPriorityAtLeast(int orig_refs, int orig_len, int size, int calls_crossed,
                                bool caller_saves, double max_density, int min_pri, int* out_refs,
-                               int* out_len) {
+                               int* out_len, bool lock_refs = false) {
   const bool orig_cs_prof = caller_saves && calls_crossed > 0 && (4 * calls_crossed < orig_refs);
-  const int max_refs_search = std::max({orig_refs * 4, 64, 4 * calls_crossed + 8});
+  const int r_min = lock_refs ? std::max(1, orig_refs) : 1;
+  const int max_refs_search =
+      lock_refs ? std::max(1, orig_refs) : std::max({orig_refs * 4, 64, 4 * calls_crossed + 8});
 
   int best_pri = std::numeric_limits<int>::max();
   int best_cost = std::numeric_limits<int>::max();
   bool found = false;
-  for (int r = 1; r <= max_refs_search; ++r) {
+  for (int r = r_min; r <= max_refs_search; ++r) {
     if (caller_saves && calls_crossed > 0 && ((4 * calls_crossed < r) != orig_cs_prof)) {
       continue;
     }
@@ -2095,6 +2100,7 @@ GlobalAllocModel BuildGlobalAllocModel(
 void ReconcileGlobalAllocPriorities(
     RtlControlFlowGraph* out, const RtlControlFlowGraph& liveness_cfg,
     const RtlControlFlowGraph& greg_cfg, const MipsTargetConfig& mips_cfg,
+    const absl::flat_hash_set<int>& live_at_any_block_start,
     const absl::flat_hash_map<int, PseudoLivenessSummary>& pseudo_summaries,
     const absl::flat_hash_map<int, RegModeInfo>& pseudo_modes,
     const absl::flat_hash_set<int>& fp_op_pseudos,
@@ -2104,6 +2110,21 @@ void ReconcileGlobalAllocPriorities(
                             fp_op_pseudos, gr_or_mem_op_pseudos, scratch_hard_regs);
   if (m.max_allocno == 0) {
     return;
+  }
+  std::vector<bool> lock_allocno_refs(m.max_allocno, false);
+  for (int a = 0; a < m.max_allocno; ++a) {
+    const int p = m.allocno_reg[a];
+    if (live_at_any_block_start.contains(p)) {
+      continue;
+    }
+    const auto d_it = out->sideband.reg_n_deaths.find(p);
+    const auto s_it = pseudo_summaries.find(p);
+    if (d_it != out->sideband.reg_n_deaths.end() && d_it->second == 1 &&
+        s_it != pseudo_summaries.end() && s_it->second.blocks_referenced.size() == 1 &&
+        s_it->second.has_set_in_block && !s_it->second.used_before_set &&
+        !s_it->second.alive_after_redef && s_it->second.note_deaths < 2) {
+      lock_allocno_refs[a] = true;
+    }
   }
 
   // Mirror `global.c:1085` (`CALLER_SAVE_PROFITABLE(refs, calls)`): on MIPS,
@@ -2359,7 +2380,7 @@ void ReconcileGlobalAllocPriorities(
     if (FindBestRefsAndLengthInPriorityRange(m.allocno_n_refs[a], m.allocno_live_length[a],
                                              m.allocno_size[a], m.allocno_calls_crossed[a],
                                              mips_cfg.caller_saves, max_density[a], min_pri,
-                                             max_pri, &new_refs, &new_len)) {
+                                             max_pri, &new_refs, &new_len, lock_allocno_refs[a])) {
       GlobalAllocModel test_m = m;
       test_m.allocno_n_refs[a] = new_refs;
       test_m.allocno_live_length[a] = new_len;
@@ -2411,7 +2432,7 @@ void ReconcileGlobalAllocPriorities(
       if (FindBestRefsAndLengthInPriorityRange(
               m.allocno_n_refs[v], m.allocno_live_length[v], work_m.allocno_size[v],
               work_m.allocno_calls_crossed[v], mips_cfg.caller_saves, max_density[v], v_min_pri,
-              v_max_pri, &cand_refs, &cand_len)) {
+              v_max_pri, &cand_refs, &cand_len, lock_allocno_refs[v])) {
         work_m.allocno_n_refs[v] = cand_refs;
         work_m.allocno_live_length[v] = cand_len;
         changed = true;
@@ -2431,12 +2452,13 @@ void ReconcileGlobalAllocPriorities(
       if (FindBestRefsAndLengthInPriorityRange(
               m.allocno_n_refs[u], m.allocno_live_length[u], work_m.allocno_size[u],
               work_m.allocno_calls_crossed[u], mips_cfg.caller_saves, max_density[u],
-              pri_v + needed_gap, u_max_pri, &cand_refs, &cand_len) ||
+              pri_v + needed_gap, u_max_pri, &cand_refs, &cand_len, lock_allocno_refs[u]) ||
           (u_max_pri < std::numeric_limits<int>::max() &&
            FindBestRefsAndLengthInPriorityRange(
                m.allocno_n_refs[u], m.allocno_live_length[u], work_m.allocno_size[u],
                work_m.allocno_calls_crossed[u], mips_cfg.caller_saves, max_density[u],
-               pri_v + needed_gap, std::numeric_limits<int>::max(), &cand_refs, &cand_len))) {
+               pri_v + needed_gap, std::numeric_limits<int>::max(), &cand_refs, &cand_len,
+               lock_allocno_refs[u]))) {
         work_m.allocno_n_refs[u] = cand_refs;
         work_m.allocno_live_length[u] = cand_len;
         changed = true;
@@ -2465,7 +2487,12 @@ void ReconcileGlobalAllocPriorities(
       if (!FindLowestPriorityAtLeast(m.allocno_n_refs[u], m.allocno_live_length[u],
                                      mono_m.allocno_size[u], mono_m.allocno_calls_crossed[u],
                                      mips_cfg.caller_saves, max_density[u], min_req, &cand_refs,
-                                     &cand_len)) {
+                                     &cand_len, lock_allocno_refs[u]) &&
+          (!lock_allocno_refs[u] ||
+           !FindLowestPriorityAtLeast(m.allocno_n_refs[u], m.allocno_live_length[u],
+                                      mono_m.allocno_size[u], mono_m.allocno_calls_crossed[u],
+                                      mips_cfg.caller_saves, max_density[u], min_req, &cand_refs,
+                                      &cand_len, /*lock_refs=*/false))) {
         mono_ok = false;
         break;
       }
@@ -2627,11 +2654,1175 @@ RtlControlFlowGraph InvertStupidGlobalAlloc(const RtlControlFlowGraph& greg_cfg,
   RtlControlFlowGraph out = greg_cfg;
   out.pass = RtlPassKind::kLreg;
   out.sideband.max_regno = max_seen_regno;
-  out.sideband.reg_renumber.clear();
+  absl::erase_if(out.sideband.reg_renumber, [](const auto& kv) {
+    return kv.first < kFirstPseudoRegister || kv.second < 0 || kv.second >= kFirstPseudoRegister;
+  });
   ReconstructRtlLiveness(
       &out, profile,
       {.reload_completed = false, .update_reg_notes = false, .preserve_phantom_pseudos = true});
   return out;
+}
+
+int ComputeLocalQtyPriority(int n_refs, int span_len, int qty_size) {
+  if (span_len <= 0) {
+    span_len = 1;
+  }
+  return static_cast<int>(
+      ((static_cast<double>(FloorLog2(n_refs) * n_refs * qty_size)) / span_len) * 10000.0);
+}
+
+bool ModesTieableForLocalAlloc(const RegModeInfo& m1, const RegModeInfo& m2) {
+  return IsFloatOrComplexFloatMode(m1) == IsFloatOrComplexFloatMode(m2);
+}
+
+struct LocalBlockQty {
+  int qty_id = 0;
+  int first_reg = -1;
+  std::vector<int> member_regs;
+  std::vector<int> member_offsets;
+  RegModeInfo mode;
+  int size = 1;
+  int birth = -1;
+  int death = -1;
+  int calls_crossed = 0;
+  MipsRegClass min_class = MipsRegClass::kGrRegs;
+  MipsRegClass alt_class = MipsRegClass::kNoRegs;
+  int n_refs = 1;
+  HardRegSet phys_copy_sugg;
+  int num_copy_sugg = 0;
+  HardRegSet phys_sugg;
+  int num_sugg = 0;
+};
+
+struct LocalBlockAllocModel {
+  MipsTargetConfig mips_cfg;
+  HardRegSet fixed_regs;
+  HardRegSet call_used_regs;
+  std::vector<HardRegSet> base_regs_live_at;
+  std::vector<LocalBlockQty> qtys;
+  std::vector<int> eligible_pseudos;
+  std::vector<int> reg_offset;
+  absl::flat_hash_map<int, int> target_hr_by_pseudo;
+};
+
+int SimulateLocalBlockAlloc(const LocalBlockAllocModel& m,
+                            const std::vector<int>* custom_pass2_order,
+                            absl::flat_hash_map<int, int>* sim_hr_out = nullptr) {
+  const int next_qty = static_cast<int>(m.qtys.size());
+  std::vector<HardRegSet> regs_live_at = m.base_regs_live_at;
+  std::vector<int> qty_phys_reg(next_qty, -1);
+  std::vector<int> num_copy_sugg(next_qty, 0);
+  for (int q = 0; q < next_qty; ++q) {
+    num_copy_sugg[q] = m.qtys[q].num_copy_sugg;
+  }
+
+  auto post_mark_life = [&](int regno, const RegModeInfo& mode, int birth, int death) {
+    const int nregs = HardRegnoNregs(regno, mode, m.mips_cfg);
+    const int hi_idx = std::min(death, static_cast<int>(regs_live_at.size()));
+    for (int ins = std::max(0, birth); ins < hi_idx; ++ins) {
+      for (int k = 0; k < nregs && regno + k < kFirstPseudoRegister; ++k) {
+        regs_live_at[ins].SetBit(regno + k);
+      }
+    }
+  };
+
+  auto find_free_reg = [&](auto& self, MipsRegClass cls, const RegModeInfo& mode, int q,
+                           bool accept_call_clobbered, bool just_try_suggested, int born_idx,
+                           int dead_idx) -> int {
+    if (born_idx < 0 || born_idx > dead_idx) {
+      return -1;
+    }
+    HardRegSet used =
+        (accept_call_clobbered || m.qtys[q].calls_crossed == 0) ? m.fixed_regs : m.call_used_regs;
+    const int hi_idx = std::min(dead_idx, static_cast<int>(regs_live_at.size()));
+    for (int ins = born_idx; ins < hi_idx; ++ins) {
+      used.Ior(regs_live_at[ins]);
+    }
+    used.IorCompl(RegClassContents(cls));
+    used.SetBit(kArgPointerRegnum);
+    used.SetBit(kFramePointerRegnum);
+
+    HardRegSet first_used = used;
+    if (just_try_suggested) {
+      if (num_copy_sugg[q] != 0) {
+        first_used.IorCompl(m.qtys[q].phys_copy_sugg);
+      } else {
+        first_used.IorCompl(m.qtys[q].phys_sugg);
+      }
+    }
+
+    const HardRegSet all_regs = RegClassContents(MipsRegClass::kAllRegs);
+    const bool all_excluded =
+        (all_regs.lo & ~first_used.lo) == 0 && ((all_regs.hi & 0xfULL) & ~first_used.hi) == 0;
+    if (!all_excluded) {
+      for (int i = 0; i < kFirstPseudoRegister; ++i) {
+        const int regno = i;
+        if (!first_used.TestBit(regno) && HardRegnoModeOk(regno, mode, m.mips_cfg)) {
+          const int size1 = HardRegnoNregs(regno, mode, m.mips_cfg);
+          int j = 1;
+          while (j < size1 && regno + j < kFirstPseudoRegister && !used.TestBit(regno + j)) {
+            ++j;
+          }
+          if (j == size1) {
+            post_mark_life(regno, mode, born_idx, dead_idx);
+            return regno;
+          }
+          i += j;
+        }
+      }
+    }
+
+    if (just_try_suggested && num_copy_sugg[q] != 0 && m.qtys[q].num_sugg != 0) {
+      num_copy_sugg[q] = 0;
+      return self(self, cls, mode, q, accept_call_clobbered, true, born_idx, dead_idx);
+    }
+    if (!accept_call_clobbered && m.mips_cfg.caller_saves && !just_try_suggested &&
+        m.qtys[q].calls_crossed != 0 && (4 * m.qtys[q].calls_crossed < m.qtys[q].n_refs)) {
+      return self(self, cls, mode, q, true, false, born_idx, dead_idx);
+    }
+    return -1;
+  };
+
+  auto qty_pri = [&](int q) {
+    return ComputeLocalQtyPriority(m.qtys[q].n_refs, m.qtys[q].death - m.qtys[q].birth,
+                                   m.qtys[q].size);
+  };
+
+  std::vector<int> custom_rank;
+  if (custom_pass2_order != nullptr) {
+    custom_rank.assign(next_qty, next_qty);
+    for (int pos = 0; pos < static_cast<int>(custom_pass2_order->size()); ++pos) {
+      const int q = (*custom_pass2_order)[pos];
+      if (q >= 0 && q < next_qty) {
+        custom_rank[q] = pos;
+      }
+    }
+  }
+
+  auto qty_sugg_cmp = [&](int q1, int q2) {
+    const int s1 =
+        (num_copy_sugg[q1] != 0) ? num_copy_sugg[q1] : m.qtys[q1].num_sugg * kFirstPseudoRegister;
+    const int s2 =
+        (num_copy_sugg[q2] != 0) ? num_copy_sugg[q2] : m.qtys[q2].num_sugg * kFirstPseudoRegister;
+    if (s1 != s2) {
+      return s1 - s2;
+    }
+    if (!custom_rank.empty()) {
+      return custom_rank[q1] - custom_rank[q2];
+    }
+    return qty_pri(q2) - qty_pri(q1);
+  };
+
+  std::vector<int> sugg_order(next_qty);
+  for (int i = 0; i < next_qty; ++i) {
+    sugg_order[i] = i;
+  }
+  switch (next_qty) {
+    case 3:
+      if (qty_sugg_cmp(0, 1) > 0) {
+        std::swap(sugg_order[0], sugg_order[1]);
+      }
+      if (qty_sugg_cmp(1, 2) > 0) {
+        std::swap(sugg_order[2], sugg_order[1]);
+      }
+      [[fallthrough]];
+    case 2:
+      if (qty_sugg_cmp(0, 1) > 0) {
+        std::swap(sugg_order[0], sugg_order[1]);
+      }
+      break;
+    case 1:
+    case 0:
+      break;
+    default:
+      std::sort(sugg_order.begin(), sugg_order.end(), [&](int q1, int q2) {
+        const int cmp = qty_sugg_cmp(q1, q2);
+        return (cmp != 0) ? (cmp < 0) : (q1 < q2);
+      });
+      break;
+  }
+
+  for (int q : sugg_order) {
+    if (m.qtys[q].num_sugg != 0 || num_copy_sugg[q] != 0) {
+      qty_phys_reg[q] = find_free_reg(find_free_reg, m.qtys[q].min_class, m.qtys[q].mode, q, false,
+                                      true, m.qtys[q].birth, m.qtys[q].death);
+    }
+  }
+
+  auto qty_cmp = [&](int q1, int q2) {
+    if (!custom_rank.empty()) {
+      return custom_rank[q1] - custom_rank[q2];
+    }
+    const int p1 = qty_pri(q1);
+    const int p2 = qty_pri(q2);
+    return p2 - p1;
+  };
+
+  std::vector<int> pass2_order(next_qty);
+  for (int i = 0; i < next_qty; ++i) {
+    pass2_order[i] = i;
+  }
+  switch (next_qty) {
+    case 3:
+      if (qty_cmp(0, 1) > 0) {
+        std::swap(pass2_order[0], pass2_order[1]);
+      }
+      if (qty_cmp(1, 2) > 0) {
+        std::swap(pass2_order[2], pass2_order[1]);
+      }
+      [[fallthrough]];
+    case 2:
+      if (qty_cmp(0, 1) > 0) {
+        std::swap(pass2_order[0], pass2_order[1]);
+      }
+      break;
+    case 1:
+    case 0:
+      break;
+    default:
+      std::sort(pass2_order.begin(), pass2_order.end(), [&](int q1, int q2) {
+        const int cmp = qty_cmp(q1, q2);
+        return (cmp != 0) ? (cmp < 0) : (q1 < q2);
+      });
+      break;
+  }
+
+  for (int q : pass2_order) {
+    if (qty_phys_reg[q] < 0) {
+      qty_phys_reg[q] = find_free_reg(find_free_reg, m.qtys[q].min_class, m.qtys[q].mode, q, false,
+                                      false, m.qtys[q].birth, m.qtys[q].death);
+      if (qty_phys_reg[q] < 0 && m.qtys[q].alt_class != MipsRegClass::kNoRegs) {
+        qty_phys_reg[q] = find_free_reg(find_free_reg, m.qtys[q].alt_class, m.qtys[q].mode, q,
+                                        false, false, m.qtys[q].birth, m.qtys[q].death);
+      }
+    }
+  }
+
+  absl::flat_hash_map<int, int> sim_hr;
+  for (int p : m.eligible_pseudos) {
+    sim_hr[p] = -1;
+  }
+  for (int q = 0; q < next_qty; ++q) {
+    if (qty_phys_reg[q] >= 0) {
+      for (size_t k = 0; k < m.qtys[q].member_regs.size(); ++k) {
+        sim_hr[m.qtys[q].member_regs[k]] = qty_phys_reg[q] + m.qtys[q].member_offsets[k];
+      }
+    }
+  }
+  int mismatches = 0;
+  for (int p : m.eligible_pseudos) {
+    const int target = m.target_hr_by_pseudo.at(p);
+    if (sim_hr[p] != target) {
+      ++mismatches;
+    }
+  }
+  if (sim_hr_out != nullptr) {
+    *sim_hr_out = std::move(sim_hr);
+  }
+  return mismatches;
+}
+
+std::optional<LocalBlockAllocModel> BuildSingleBlockLocalAllocModel(
+    size_t b, RtlControlFlowGraph* dst_out, const RtlControlFlowGraph& liveness_cfg,
+    const MipsTargetConfig& mips_cfg, const absl::flat_hash_set<int>& live_at_any_block_start,
+    const absl::flat_hash_map<int, PseudoLivenessSummary>& pseudo_summaries,
+    const absl::flat_hash_map<int, RegModeInfo>& pseudo_modes,
+    const absl::flat_hash_set<int>& fp_op_pseudos,
+    const absl::flat_hash_set<int>& gr_or_mem_op_pseudos, bool bump_caller_saves_refs) {
+  const int max_regno = std::max(dst_out->sideband.max_regno, kFirstPseudoRegister);
+  std::vector<int> eligible_pseudos;
+  for (int p = kFirstPseudoRegister; p < max_regno; ++p) {
+    if (live_at_any_block_start.contains(p)) {
+      continue;
+    }
+    const auto refs_it = dst_out->sideband.reg_n_refs.find(p);
+    const auto deaths_it = dst_out->sideband.reg_n_deaths.find(p);
+    const auto len_it = dst_out->sideband.reg_live_length.find(p);
+    if (refs_it == dst_out->sideband.reg_n_refs.end() || refs_it->second <= 0 ||
+        deaths_it == dst_out->sideband.reg_n_deaths.end() || deaths_it->second != 1 ||
+        (len_it != dst_out->sideband.reg_live_length.end() && len_it->second < 0)) {
+      continue;
+    }
+    const auto sum_it = pseudo_summaries.find(p);
+    if (sum_it == pseudo_summaries.end() || sum_it->second.blocks_referenced.size() != 1 ||
+        *sum_it->second.blocks_referenced.begin() != b || !sum_it->second.has_set_in_block ||
+        sum_it->second.used_before_set || sum_it->second.alive_after_redef ||
+        sum_it->second.note_deaths >= 2) {
+      continue;
+    }
+    if (sum_it->second.def_count_in_block == 1 &&
+        sum_it->second.single_reg_md_class != MipsRegClass::kNoRegs &&
+        !sum_it->second.used_in_mem_address && sum_it->second.total_read_count <= 1) {
+      continue;
+    }
+    eligible_pseudos.push_back(p);
+  }
+
+  const HardRegSet call_used = CallUsedRegSet(mips_cfg);
+  if (bump_caller_saves_refs && mips_cfg.caller_saves) {
+    for (int p : eligible_pseudos) {
+      const auto ren_it = dst_out->sideband.reg_renumber.find(p);
+      const auto cc_it = dst_out->sideband.reg_n_calls_crossed.find(p);
+      if (ren_it != dst_out->sideband.reg_renumber.end() && ren_it->second >= 0 &&
+          call_used.TestBit(ren_it->second) &&
+          cc_it != dst_out->sideband.reg_n_calls_crossed.end() && cc_it->second > 0) {
+        const int min_refs = 4 * cc_it->second + 1;
+        int& cur_refs = dst_out->sideband.reg_n_refs[p];
+        cur_refs = std::max(cur_refs, min_refs);
+      }
+    }
+  }
+  if (eligible_pseudos.empty()) {
+    return std::nullopt;
+  }
+
+  LocalBlockAllocModel m;
+  m.mips_cfg = mips_cfg;
+  m.fixed_regs = FixedRegSet(mips_cfg);
+  m.call_used_regs = call_used;
+  m.eligible_pseudos = eligible_pseudos;
+
+  std::vector<int> reg_qty(max_regno, -1);
+  m.reg_offset.assign(max_regno, 0);
+  auto& reg_offset = m.reg_offset;
+  std::vector<MipsRegClass> pref_class(max_regno, MipsRegClass::kGrRegs);
+  std::vector<MipsRegClass> alt_class(max_regno, MipsRegClass::kNoRegs);
+  for (int p : eligible_pseudos) {
+    reg_qty[p] = -2;
+    const auto ren_it = dst_out->sideband.reg_renumber.find(p);
+    const int target_hr = (ren_it != dst_out->sideband.reg_renumber.end()) ? ren_it->second : -1;
+    m.target_hr_by_pseudo[p] = target_hr;
+    const auto m_it = pseudo_modes.find(p);
+    const RegModeInfo pmode =
+        (m_it != pseudo_modes.end()) ? m_it->second : RegModeInfo{RtlMachineMode::kSi, ""};
+    if (IsFpCcMode(pmode)) {
+      pref_class[p] = MipsRegClass::kStRegs;
+    } else if (IsFloatOrComplexFloatMode(pmode) && !mips_cfg.soft_float) {
+      if (!fp_op_pseudos.contains(p) &&
+          ((target_hr >= 0 && target_hr < kFirstFprRegnum) || gr_or_mem_op_pseudos.contains(p))) {
+        if (target_hr >= kFirstFprRegnum) {
+          pref_class[p] = MipsRegClass::kFpRegs;
+          alt_class[p] = mips_cfg.mem_move_cost_6 ? MipsRegClass::kAllRegs : MipsRegClass::kNoRegs;
+        } else {
+          pref_class[p] = MipsRegClass::kGrRegs;
+          alt_class[p] = MipsRegClass::kAllRegs;
+        }
+      } else {
+        pref_class[p] = MipsRegClass::kFpRegs;
+        alt_class[p] = mips_cfg.mem_move_cost_6 ? MipsRegClass::kAllRegs : MipsRegClass::kNoRegs;
+      }
+    } else if (pseudo_summaries.at(p).total_def_count == 1 &&
+               pseudo_summaries.at(p).single_reg_md_class != MipsRegClass::kNoRegs &&
+               !pseudo_summaries.at(p).used_in_mem_address &&
+               pseudo_summaries.at(p).total_read_count <= 1) {
+      pref_class[p] = pseudo_summaries.at(p).single_reg_md_class;
+      alt_class[p] = MipsRegClass::kGrRegs;
+    } else if (!mips_cfg.gp_64bit && pseudo_summaries.at(p).total_def_count == 1 &&
+               pseudo_summaries.at(p).defined_by_di_mult &&
+               !pseudo_summaries.at(p).used_in_mem_address &&
+               pseudo_summaries.at(p).total_read_count <= 1) {
+      pref_class[p] = MipsRegClass::kMdRegs;
+      alt_class[p] = MipsRegClass::kGrRegs;
+    } else {
+      pref_class[p] = MipsRegClass::kGrRegs;
+      alt_class[p] = MipsRegClass::kNoRegs;
+    }
+  }
+
+  const RtlBasicBlock& out_blk = dst_out->rpo_blocks[b];
+  const RtlBasicBlock& live_blk = liveness_cfg.rpo_blocks[b];
+  int insn_count = out_blk.has_label ? 1 : 0;
+  std::vector<std::optional<RtlPatternAndNotes>> parsed_insns(out_blk.instructions.size());
+  for (size_t i = 0; i < out_blk.instructions.size(); ++i) {
+    auto pn = ParsePatternAndNotes(out_blk.instructions[i]);
+    if (!pn.ok()) {
+      return std::nullopt;
+    }
+    if (ExprContainsOp(pn->pattern, RtlOp::kCall) && i < live_blk.instructions.size()) {
+      if (auto live_pn = ParsePatternAndNotes(live_blk.instructions[i]); live_pn.ok()) {
+        pn->reg_notes = std::move(live_pn->reg_notes);
+      }
+    }
+    if (pn->pattern.op != RtlOp::kNote) {
+      ++insn_count;
+    }
+    parsed_insns[i] = std::move(*pn);
+  }
+
+  m.base_regs_live_at.assign(static_cast<size_t>(2 * insn_count + 2), {});
+  HardRegSet regs_live;
+  if (auto live_it = dst_out->sideband.basic_block_live_at_start.find(static_cast<int>(b));
+      live_it != dst_out->sideband.basic_block_live_at_start.end()) {
+    for (int r : live_it->second) {
+      if (r >= 0 && r < kFirstPseudoRegister) {
+        regs_live.SetBit(r);
+      }
+    }
+  }
+
+  auto mark_life = [&](int regno, const RegModeInfo& mode, bool life) {
+    const int nregs = HardRegnoNregs(regno, mode, mips_cfg);
+    for (int j = 0; j < nregs && regno + j < kFirstPseudoRegister; ++j) {
+      if (life) {
+        regs_live.SetBit(regno + j);
+      } else {
+        regs_live.ClearBit(regno + j);
+      }
+    }
+  };
+  auto post_mark_base = [&](int regno, const RegModeInfo& mode, int birth, int death) {
+    const int nregs = HardRegnoNregs(regno, mode, mips_cfg);
+    for (int ins = std::max(0, birth);
+         ins < death && ins < static_cast<int>(m.base_regs_live_at.size()); ++ins) {
+      for (int j = 0; j < nregs && regno + j < kFirstPseudoRegister; ++j) {
+        m.base_regs_live_at[ins].SetBit(regno + j);
+      }
+    }
+  };
+  auto alloc_pseudo_qty = [&](int regno, const RegModeInfo& mode, int birth) {
+    const int q = static_cast<int>(m.qtys.size());
+    reg_qty[regno] = q;
+    reg_offset[regno] = 0;
+    LocalBlockQty qty;
+    qty.qty_id = q;
+    qty.first_reg = regno;
+    qty.member_regs = {regno};
+    qty.member_offsets = {0};
+    qty.mode = mode;
+    qty.size = PseudoRegnoSize(mode, mips_cfg);
+    qty.birth = birth;
+    qty.death = -1;
+    if (auto cc_it = dst_out->sideband.reg_n_calls_crossed.find(regno);
+        cc_it != dst_out->sideband.reg_n_calls_crossed.end()) {
+      qty.calls_crossed = cc_it->second;
+    }
+    qty.min_class = pref_class[regno];
+    qty.alt_class = alt_class[regno];
+    qty.n_refs = dst_out->sideband.reg_n_refs.at(regno);
+    m.qtys.push_back(std::move(qty));
+  };
+  auto reg_is_born = [&](const RtlExpr& reg, int birth, int cur_insn_num) {
+    int regno = -1;
+    RegModeInfo rmode{reg.mode, reg.raw_mode};
+    if (reg.op == RtlOp::kSubreg && !reg.children.empty() && reg.children[0].op == RtlOp::kReg) {
+      regno = (reg.children[0].IsArgPointerReg() ? kArgPointerRegnum : reg.children[0].RegNo()) +
+              static_cast<int>(reg.int_val);
+    } else if (reg.op == RtlOp::kReg) {
+      regno = reg.IsArgPointerReg() ? kArgPointerRegnum : reg.RegNo();
+    } else {
+      return;
+    }
+    if (regno < kFirstPseudoRegister) {
+      mark_life(regno, rmode, true);
+      if (birth < 2 * cur_insn_num) {
+        post_mark_base(regno, rmode, birth, 2 * cur_insn_num);
+      }
+    } else if (regno < max_regno) {
+      if (reg_qty[regno] == -2) {
+        const auto m_it = pseudo_modes.find(regno);
+        const RegModeInfo pmode = (m_it != pseudo_modes.end()) ? m_it->second : rmode;
+        alloc_pseudo_qty(regno, pmode, birth);
+      }
+      if (reg_qty[regno] >= 0) {
+        m.qtys[reg_qty[regno]].death = -1;
+      }
+    }
+  };
+
+  int insn_number = 0;
+  if (out_blk.has_label) {
+    insn_number = 1;
+    m.base_regs_live_at[2].Ior(regs_live);
+    m.base_regs_live_at[3].Ior(regs_live);
+  }
+
+  const int units_per_word = mips_cfg.gp_64bit ? 8 : 4;
+  for (size_t i = 0; i < parsed_insns.size(); ++i) {
+    const RtlPatternAndNotes& pn = *parsed_insns[i];
+    if (pn.pattern.op == RtlOp::kNote) {
+      m.base_regs_live_at[2 * insn_number].Ior(regs_live);
+      m.base_regs_live_at[2 * insn_number + 1].Ior(regs_live);
+      continue;
+    }
+    ++insn_number;
+    if (pn.pattern.op == RtlOp::kCodeLabel || pn.pattern.op == RtlOp::kBarrier ||
+        pn.pattern.op == RtlOp::kAddrVec) {
+      m.base_regs_live_at[2 * insn_number].Ior(regs_live);
+      m.base_regs_live_at[2 * insn_number + 1].Ior(regs_live);
+      continue;
+    }
+
+    // Identify `(clobber (reg:M hr))` scratch clobbers that `InvertBlockAlloc`
+    // restores to `(clobber (scratch:M))` before `block_alloc` runs.
+    std::vector<std::pair<int, RegModeInfo>> insn_scratches;
+    auto is_match_scratch_parallel = [&](const RtlExpr& par) {
+      if (par.op != RtlOp::kParallel || ExprContainsOp(par, RtlOp::kCall) ||
+          ExprContainsOp(par, RtlOp::kUnspecVolatile) || ExprContainsOp(par, RtlOp::kAsmOperands)) {
+        return false;
+      }
+      for (const RtlExpr& elem : par.children) {
+        if (elem.op != RtlOp::kSet || elem.children.size() != 2) {
+          continue;
+        }
+        const RtlExpr& dst = elem.children[0];
+        const RtlExpr& src = elem.children[1];
+        if (dst.op == RtlOp::kMem && dst.mode == RtlMachineMode::kBlk && src.op == RtlOp::kMem &&
+            src.mode == RtlMachineMode::kBlk) {
+          return true;
+        }
+        if (src.op == RtlOp::kMult || src.op == RtlOp::kDiv || src.op == RtlOp::kMod ||
+            src.op == RtlOp::kUdiv || src.op == RtlOp::kUmod || src.op == RtlOp::kTruncate ||
+            src.op == RtlOp::kFfs || src.op == RtlOp::kFix ||
+            (src.op == RtlOp::kPlus && ExprContainsOp(src, RtlOp::kMult))) {
+          return true;
+        }
+      }
+      return false;
+    };
+    if (is_match_scratch_parallel(pn.pattern)) {
+      for (const RtlExpr& elem : pn.pattern.children) {
+        if (elem.op == RtlOp::kClobber && elem.children.size() == 1 &&
+            elem.children[0].op == RtlOp::kReg && !elem.children[0].IsArgPointerReg()) {
+          const int hr = elem.children[0].RegNo();
+          const bool is_fixed = (hr == 0 || hr == 1 || hr == 26 || hr == 27 || hr == 28 ||
+                                 hr == 29 || hr == 31 || hr == 67);
+          if (hr >= 0 && hr < kFirstPseudoRegister && !is_fixed) {
+            insn_scratches.push_back({hr, {elem.children[0].mode, elem.children[0].raw_mode}});
+          }
+        }
+      }
+    }
+
+    int combined_regno = -1;
+    const RtlExpr* primary_set = SingleSet(pn);
+    if (primary_set != nullptr && primary_set->children.size() == 2 &&
+        (primary_set->children[0].op == RtlOp::kReg ||
+         primary_set->children[0].op == RtlOp::kSubreg) &&
+        !ExprContainsOp(pn.pattern, RtlOp::kCall)) {
+      const RtlExpr& r0 = primary_set->children[0];
+      const RtlExpr& rhs = primary_set->children[1];
+      const bool earlyclobber_di =
+          !mips_cfg.gp_64bit && r0.mode == RtlMachineMode::kDi &&
+          (rhs.op == RtlOp::kAshift || rhs.op == RtlOp::kAshiftrt || rhs.op == RtlOp::kLshiftrt) &&
+          rhs.children.size() == 2 && !rhs.children[1].IsConstInt();
+      const bool earlyclobber_mul =
+          (rhs.op == RtlOp::kMult && r0.mode == RtlMachineMode::kSi && !insn_scratches.empty());
+      if (!earlyclobber_di && !earlyclobber_mul) {
+        std::vector<const RtlExpr*> cand_r1s;
+        auto collect_cand_r1 = [&](const auto& self, const RtlExpr& e) -> void {
+          if (e.op == RtlOp::kReg ||
+              (e.op == RtlOp::kSubreg && !e.children.empty() && e.children[0].op == RtlOp::kReg)) {
+            cand_r1s.push_back(&e);
+            return;
+          }
+          if (e.op == RtlOp::kMem) {
+            return;
+          }
+          for (const RtlExpr& ch : e.children) {
+            self(self, ch);
+          }
+        };
+        collect_cand_r1(collect_cand_r1, rhs);
+
+        for (const RtlExpr* r1_ptr : cand_r1s) {
+          bool may_save_copy = (pn.pattern.op == RtlOp::kSet && &rhs == r1_ptr);
+          int offset = 0;
+          const RtlExpr* u_expr = r1_ptr;
+          while (u_expr->op == RtlOp::kSubreg && !u_expr->children.empty()) {
+            if (ModeByteSize({u_expr->children[0].mode, u_expr->children[0].raw_mode}) >
+                units_per_word) {
+              may_save_copy = false;
+            }
+            offset += static_cast<int>(u_expr->int_val);
+            u_expr = &u_expr->children[0];
+          }
+          const RtlExpr* s_expr = &r0;
+          while (s_expr->op == RtlOp::kSubreg && !s_expr->children.empty()) {
+            if (ModeByteSize({s_expr->children[0].mode, s_expr->children[0].raw_mode}) >
+                units_per_word) {
+              may_save_copy = false;
+            }
+            offset -= static_cast<int>(s_expr->int_val);
+            s_expr = &s_expr->children[0];
+          }
+          if (u_expr->op != RtlOp::kReg || s_expr->op != RtlOp::kReg) {
+            continue;
+          }
+          const int ureg = u_expr->IsArgPointerReg() ? kArgPointerRegnum : u_expr->RegNo();
+          const int sreg = s_expr->IsArgPointerReg() ? kArgPointerRegnum : s_expr->RegNo();
+          const RegModeInfo umode{u_expr->mode, u_expr->raw_mode};
+          const RegModeInfo smode{s_expr->mode, s_expr->raw_mode};
+          const int usize = (ureg < kFirstPseudoRegister) ? HardRegnoNregs(ureg, umode, mips_cfg)
+                                                          : PseudoRegnoSize(umode, mips_cfg);
+          const int ssize = (sreg < kFirstPseudoRegister) ? HardRegnoNregs(sreg, smode, mips_cfg)
+                                                          : PseudoRegnoSize(smode, mips_cfg);
+          if ((ureg >= kFirstPseudoRegister && (ureg >= max_regno || reg_qty[ureg] < 0)) ||
+              (offset > 0 && usize + offset > ssize) || (offset < 0 && usize + offset < ssize) ||
+              (ssize > usize && ureg >= kFirstPseudoRegister &&
+               usize < m.qtys[reg_qty[ureg]].size) ||
+              (sreg >= kFirstPseudoRegister && (sreg >= max_regno || reg_qty[sreg] == -1)) ||
+              ureg == sreg || (ureg < kFirstPseudoRegister && sreg < kFirstPseudoRegister) ||
+              !ModesTieableForLocalAlloc(umode, smode)) {
+            continue;
+          }
+          if (ureg < kFirstPseudoRegister) {
+            if (reg_qty[sreg] == -2) {
+              reg_is_born(*s_expr, 2 * insn_number, insn_number);
+            }
+            if (reg_qty[sreg] >= 0) {
+              LocalBlockQty& sq = m.qtys[reg_qty[sreg]];
+              if (may_save_copy && !sq.phys_copy_sugg.TestBit(ureg)) {
+                sq.phys_copy_sugg.SetBit(ureg);
+                ++sq.num_copy_sugg;
+              } else if (!may_save_copy && !sq.phys_sugg.TestBit(ureg)) {
+                sq.phys_sugg.SetBit(ureg);
+                ++sq.num_sugg;
+              }
+            }
+            continue;
+          }
+          if (sreg < kFirstPseudoRegister) {
+            LocalBlockQty& uq = m.qtys[reg_qty[ureg]];
+            if (may_save_copy && !uq.phys_copy_sugg.TestBit(sreg)) {
+              uq.phys_copy_sugg.SetBit(sreg);
+              ++uq.num_copy_sugg;
+            } else if (!may_save_copy && !uq.phys_sugg.TestBit(sreg)) {
+              uq.phys_sugg.SetBit(sreg);
+              ++uq.num_sugg;
+            }
+            continue;
+          }
+          if (reg_qty[sreg] >= -1) {
+            continue;
+          }
+          bool has_dead = false;
+          for (const RtlRegNote& n : pn.reg_notes) {
+            if (n.kind == RtlMachineMode::kRegDead && n.datum.op == RtlOp::kReg &&
+                !n.datum.IsArgPointerReg() && n.datum.RegNo() == ureg) {
+              has_dead = true;
+              break;
+            }
+          }
+          if (has_dead && RegClassRelatedP(pref_class[sreg], m.qtys[reg_qty[ureg]].min_class)) {
+            const int sqty = reg_qty[ureg];
+            LocalBlockQty& sq = m.qtys[sqty];
+            reg_qty[sreg] = sqty;
+            reg_offset[sreg] = reg_offset[ureg] + offset;
+            sq.member_regs.push_back(sreg);
+            sq.member_offsets.push_back(reg_offset[sreg]);
+            if (RegClassSubsetP(pref_class[sreg], sq.min_class)) {
+              sq.min_class = pref_class[sreg];
+            }
+            if (RegClassSubsetP(alt_class[sreg], sq.alt_class)) {
+              sq.alt_class = alt_class[sreg];
+            }
+            if (auto cc_it = dst_out->sideband.reg_n_calls_crossed.find(sreg);
+                cc_it != dst_out->sideband.reg_n_calls_crossed.end()) {
+              sq.calls_crossed += cc_it->second;
+            }
+            sq.n_refs += dst_out->sideband.reg_n_refs.at(sreg);
+            if (usize < ssize) {
+              for (size_t k = 0; k < sq.member_regs.size(); ++k) {
+                reg_offset[sq.member_regs[k]] -= offset;
+                sq.member_offsets[k] -= offset;
+              }
+              sq.size = ssize;
+              sq.mode = smode;
+            }
+            combined_regno = ureg;
+            break;
+          }
+        }
+      }
+    }
+
+    auto wipe_dead_reg = [&](const RtlExpr& reg, bool output_p) {
+      if (reg.op != RtlOp::kReg) {
+        return;
+      }
+      const int regno = reg.IsArgPointerReg() ? kArgPointerRegnum : reg.RegNo();
+      if (pn.pattern.op == RtlOp::kParallel && primary_set == nullptr) {
+        for (int idx = static_cast<int>(pn.pattern.children.size()) - 1; idx >= 0; --idx) {
+          const RtlExpr& sub = pn.pattern.children[idx];
+          if (sub.op == RtlOp::kSet && !sub.children.empty() && sub.children[0].op != RtlOp::kReg &&
+              reg != sub.children[0] && RegOverlapMentionedP(reg, sub.children[0], mips_cfg)) {
+            output_p = true;
+          }
+        }
+      }
+      if (regno < kFirstPseudoRegister) {
+        mark_life(regno, {reg.mode, reg.raw_mode}, false);
+        if (output_p) {
+          post_mark_base(regno, {reg.mode, reg.raw_mode}, 2 * insn_number, 2 * insn_number + 1);
+        }
+      } else if (regno < max_regno && reg_qty[regno] >= 0) {
+        m.qtys[reg_qty[regno]].death = 2 * insn_number + (output_p ? 1 : 0);
+      }
+    };
+
+    for (const RtlRegNote& note : pn.reg_notes) {
+      if (note.kind == RtlMachineMode::kRegDead && note.datum.op == RtlOp::kReg) {
+        const int r = note.datum.IsArgPointerReg() ? kArgPointerRegnum : note.datum.RegNo();
+        if (r != combined_regno) {
+          wipe_dead_reg(note.datum, false);
+        }
+      }
+    }
+
+    std::vector<bool> scratch_store_consumed(insn_scratches.size(), false);
+    NoteStores(pn.pattern, [&](const RtlExpr& dest, const RtlExpr& setter) {
+      if (setter.op == RtlOp::kClobber && dest.op == RtlOp::kReg && !dest.IsArgPointerReg()) {
+        for (size_t si = 0; si < insn_scratches.size(); ++si) {
+          if (!scratch_store_consumed[si] && insn_scratches[si].first == dest.RegNo() &&
+              insn_scratches[si].second.mode == dest.mode) {
+            scratch_store_consumed[si] = true;
+            return;
+          }
+        }
+      }
+      reg_is_born(dest, 2 * insn_number - (setter.op == RtlOp::kClobber ? 1 : 0), insn_number);
+    });
+
+    std::vector<bool> scratch_note_consumed(insn_scratches.size(), false);
+    for (const RtlRegNote& note : pn.reg_notes) {
+      if (note.kind == RtlMachineMode::kRegUnused && note.datum.op == RtlOp::kReg) {
+        bool was_scratch = false;
+        if (!note.datum.IsArgPointerReg()) {
+          for (size_t si = 0; si < insn_scratches.size(); ++si) {
+            if (!scratch_note_consumed[si] && insn_scratches[si].first == note.datum.RegNo() &&
+                insn_scratches[si].second.mode == note.datum.mode) {
+              scratch_note_consumed[si] = true;
+              was_scratch = true;
+              break;
+            }
+          }
+        }
+        if (!was_scratch) {
+          wipe_dead_reg(note.datum, true);
+        }
+      }
+    }
+
+    for (const auto& [scr_hr, scr_mode] : insn_scratches) {
+      LocalBlockQty sq;
+      sq.qty_id = static_cast<int>(m.qtys.size());
+      sq.first_reg = -1;
+      sq.mode = scr_mode;
+      sq.size = ModeByteSize(scr_mode);
+      sq.birth = 2 * insn_number - 1;
+      sq.death = 2 * insn_number + 1;
+      sq.min_class = RegNoRegClass(scr_hr);
+      sq.alt_class = MipsRegClass::kNoRegs;
+      sq.n_refs = 1;
+      m.qtys.push_back(std::move(sq));
+    }
+
+    m.base_regs_live_at[2 * insn_number].Ior(regs_live);
+    m.base_regs_live_at[2 * insn_number + 1].Ior(regs_live);
+  }
+
+  for (const LocalBlockQty& q : m.qtys) {
+    if (q.birth < 0 || q.death < q.birth) {
+      return std::nullopt;
+    }
+  }
+  return m;
+}
+
+void EnforceBlockAllocQuantityAtomicity(
+    RtlControlFlowGraph* dst_out, const RtlControlFlowGraph& liveness_cfg,
+    const MipsTargetConfig& mips_cfg, const absl::flat_hash_set<int>& live_at_any_block_start,
+    const absl::flat_hash_map<int, PseudoLivenessSummary>& pseudo_summaries,
+    const absl::flat_hash_map<int, RegModeInfo>& pseudo_modes,
+    const absl::flat_hash_set<int>& fp_op_pseudos,
+    const absl::flat_hash_set<int>& gr_or_mem_op_pseudos, HardRegSet* erased_global_hard_regs,
+    absl::flat_hash_set<int>* atomicity_erased_pseudos) {
+  for (size_t b = 0; b < dst_out->rpo_blocks.size(); ++b) {
+    std::optional<LocalBlockAllocModel> model = BuildSingleBlockLocalAllocModel(
+        b, dst_out, liveness_cfg, mips_cfg, live_at_any_block_start, pseudo_summaries, pseudo_modes,
+        fp_op_pseudos, gr_or_mem_op_pseudos, /*bump_caller_saves_refs=*/false);
+    if (!model.has_value()) {
+      continue;
+    }
+    for (const LocalBlockQty& q : model->qtys) {
+      if (q.first_reg < kFirstPseudoRegister || q.member_regs.empty()) {
+        continue;
+      }
+      int base_hr = -2;
+      bool invalid_local_qty = false;
+      for (size_t mi = 0; mi < q.member_regs.size(); ++mi) {
+        const int p = q.member_regs[mi];
+        const int off = q.member_offsets[mi];
+        const int thr = model->target_hr_by_pseudo.at(p);
+        const int cand_base = (thr >= 0) ? (thr - off) : -1;
+        if (mi == 0) {
+          base_hr = cand_base;
+        } else if (cand_base != base_hr) {
+          invalid_local_qty = true;
+          break;
+        }
+      }
+      if (!invalid_local_qty && base_hr >= 0) {
+        if (base_hr >= kFirstPseudoRegister || !HardRegnoModeOk(base_hr, q.mode, mips_cfg)) {
+          invalid_local_qty = true;
+        } else {
+          HardRegSet allowed_cls = RegClassContents(q.min_class);
+          allowed_cls.Ior(RegClassContents(q.alt_class));
+          const int nregs = HardRegnoNregs(base_hr, q.mode, mips_cfg);
+          for (int k = 0; k < nregs; ++k) {
+            const int r = base_hr + k;
+            if (r >= kFirstPseudoRegister || !allowed_cls.TestBit(r) ||
+                model->fixed_regs.TestBit(r) || r == kArgPointerRegnum ||
+                r == kFramePointerRegnum ||
+                (q.calls_crossed > 0 && !mips_cfg.caller_saves &&
+                 model->call_used_regs.TestBit(r))) {
+              invalid_local_qty = true;
+              break;
+            }
+          }
+        }
+      }
+      if (invalid_local_qty) {
+        for (int p : q.member_regs) {
+          if (auto ren_it = dst_out->sideband.reg_renumber.find(p);
+              ren_it != dst_out->sideband.reg_renumber.end() && ren_it->second >= 0 &&
+              ren_it->second < kFirstPseudoRegister) {
+            const int hr = ren_it->second;
+            const auto m_it = pseudo_modes.find(p);
+            const RegModeInfo pmode =
+                (m_it != pseudo_modes.end()) ? m_it->second : RegModeInfo{RtlMachineMode::kSi, ""};
+            const int nregs = HardRegnoNregs(hr, pmode, mips_cfg);
+            for (int k = hr; k < hr + nregs && k < kFirstPseudoRegister; ++k) {
+              erased_global_hard_regs->SetBit(k);
+            }
+            if (atomicity_erased_pseudos != nullptr) {
+              atomicity_erased_pseudos->insert(p);
+            }
+          }
+          dst_out->sideband.reg_renumber.erase(p);
+        }
+      }
+    }
+  }
+}
+
+void ReconcileSingleBlockLocalPriorities(
+    size_t b, RtlControlFlowGraph* dst_out, const RtlControlFlowGraph& liveness_cfg,
+    const MipsTargetConfig& mips_cfg, const absl::flat_hash_set<int>& live_at_any_block_start,
+    const absl::flat_hash_map<int, PseudoLivenessSummary>& pseudo_summaries,
+    const absl::flat_hash_map<int, RegModeInfo>& pseudo_modes,
+    const absl::flat_hash_set<int>& fp_op_pseudos,
+    const absl::flat_hash_set<int>& gr_or_mem_op_pseudos) {
+  std::optional<LocalBlockAllocModel> model = BuildSingleBlockLocalAllocModel(
+      b, dst_out, liveness_cfg, mips_cfg, live_at_any_block_start, pseudo_summaries, pseudo_modes,
+      fp_op_pseudos, gr_or_mem_op_pseudos, /*bump_caller_saves_refs=*/true);
+  if (!model.has_value() || model->eligible_pseudos.size() < 2) {
+    return;
+  }
+  const LocalBlockAllocModel& m = *model;
+  const auto& reg_offset = m.reg_offset;
+  const HardRegSet& call_used = m.call_used_regs;
+
+  const int init_mismatches = SimulateLocalBlockAlloc(m, nullptr);
+  if (init_mismatches == 0 || m.qtys.size() <= 1) {
+    return;
+  }
+
+  const int nq = static_cast<int>(m.qtys.size());
+  auto qty_pri = [&](const LocalBlockAllocModel& mod, int q) {
+    return ComputeLocalQtyPriority(mod.qtys[q].n_refs, mod.qtys[q].death - mod.qtys[q].birth,
+                                   mod.qtys[q].size);
+  };
+  auto sort_pass2 = [&](const LocalBlockAllocModel& mod) {
+    std::vector<int> ord(nq);
+    for (int i = 0; i < nq; ++i) {
+      ord[i] = i;
+    }
+    std::sort(ord.begin(), ord.end(), [&](int q1, int q2) {
+      const int p1 = qty_pri(mod, q1);
+      const int p2 = qty_pri(mod, q2);
+      return (p1 != p2) ? (p1 > p2) : (q1 < q2);
+    });
+    return ord;
+  };
+
+  const std::vector<int> initial_order = sort_pass2(m);
+  std::vector<int> initial_pos(nq, 0);
+  for (int idx = 0; idx < nq; ++idx) {
+    initial_pos[initial_order[idx]] = idx;
+  }
+
+  auto qty_target_hr = [&](int q) -> int {
+    if (m.qtys[q].first_reg < kFirstPseudoRegister) {
+      return -2;
+    }
+    const int p0 = m.qtys[q].first_reg;
+    const int thr = m.target_hr_by_pseudo.at(p0);
+    return (thr >= 0) ? (thr - reg_offset[p0]) : -1;
+  };
+
+  // Realize an ordering `ord` via monotone right-to-left `qty_n_refs`
+  // assignment on pseudo quantities (`first_reg >= kFirstPseudoRegister`).
+  auto realize_local_order =
+      [&](const std::vector<int>& ord) -> std::pair<LocalBlockAllocModel, int> {
+    LocalBlockAllocModel work_m = m;
+    for (int k = nq - 1; k >= 0; --k) {
+      const int q = ord[k];
+      int min_req_pri = 0;
+      for (int r = k + 1; r < nq; ++r) {
+        const int tail_q = ord[r];
+        min_req_pri = std::max(min_req_pri, qty_pri(work_m, tail_q) + ((q > tail_q) ? 1 : 0));
+      }
+      if (work_m.qtys[q].first_reg < kFirstPseudoRegister) {
+        continue;
+      }
+      const int span = std::max(1, work_m.qtys[q].death - work_m.qtys[q].birth);
+      const int min_refs = std::max(1, static_cast<int>(work_m.qtys[q].member_regs.size()));
+      const int thr = qty_target_hr(q);
+      int max_refs = 4096;
+      if (thr == -1 && mips_cfg.caller_saves && work_m.qtys[q].calls_crossed > 0) {
+        max_refs = std::max(min_refs, 4 * work_m.qtys[q].calls_crossed);
+      }
+      int lo_r = min_refs;
+      if (thr >= 0 && mips_cfg.caller_saves && work_m.qtys[q].calls_crossed > 0 &&
+          call_used.TestBit(thr)) {
+        lo_r = std::max(lo_r, 4 * work_m.qtys[q].calls_crossed + 1);
+      }
+      const int hi_r = std::max(lo_r, max_refs);
+      const int orig_r = m.qtys[q].n_refs;
+      if (orig_r >= lo_r && orig_r <= hi_r &&
+          ComputeLocalQtyPriority(orig_r, span, work_m.qtys[q].size) >= min_req_pri &&
+          (k == 0 || ComputeLocalQtyPriority(orig_r, span, work_m.qtys[q].size) <=
+                         qty_pri(m, ord[k - 1]) - ((ord[k - 1] > q) ? 1 : 0))) {
+        work_m.qtys[q].n_refs = orig_r;
+        continue;
+      }
+      int chosen_r = (thr == -1) ? lo_r : hi_r;
+      if (ComputeLocalQtyPriority(hi_r, span, work_m.qtys[q].size) >= min_req_pri) {
+        int l = lo_r;
+        int h = hi_r;
+        while (l < h) {
+          const int mid = l + (h - l) / 2;
+          if (ComputeLocalQtyPriority(mid, span, work_m.qtys[q].size) >= min_req_pri) {
+            h = mid;
+          } else {
+            l = mid + 1;
+          }
+        }
+        chosen_r = l;
+      }
+      work_m.qtys[q].n_refs = chosen_r;
+    }
+    const int realized_mis = SimulateLocalBlockAlloc(work_m, nullptr);
+    return {std::move(work_m), realized_mis};
+  };
+
+  std::vector<int> target_seed = initial_order;
+  std::sort(target_seed.begin(), target_seed.end(), [&](int a, int b) {
+    const int ta = qty_target_hr(a);
+    const int tb = qty_target_hr(b);
+    const int tier_a = (ta >= 0) ? 0 : (ta == -1 ? 1 : 2);
+    const int tier_b = (tb >= 0) ? 0 : (tb == -1 ? 1 : 2);
+    if (tier_a != tier_b) {
+      return tier_a < tier_b;
+    }
+    if (ta >= 0 && tb >= 0) {
+      const bool cs_a = (m.qtys[a].calls_crossed > 0 && call_used.TestBit(ta));
+      const bool cs_b = (m.qtys[b].calls_crossed > 0 && call_used.TestBit(tb));
+      if (cs_a != cs_b) {
+        return !cs_a && cs_b;
+      }
+      if (ta != tb) {
+        return ta < tb;
+      }
+    }
+    return initial_pos[a] < initial_pos[b];
+  });
+
+  LocalBlockAllocModel best_work_m = m;
+  int best_mismatches = init_mismatches;
+  {
+    auto [seed_work_m, seed_mis] = realize_local_order(target_seed);
+    if (seed_mis < best_mismatches) {
+      best_mismatches = seed_mis;
+      best_work_m = std::move(seed_work_m);
+    }
+  }
+
+  auto build_conflict_qty_mask = [&](const LocalBlockAllocModel& mod) {
+    if (nq <= 3) {
+      return std::vector<bool>(nq, true);
+    }
+    absl::flat_hash_map<int, int> sim_hr;
+    SimulateLocalBlockAlloc(mod, nullptr, &sim_hr);
+    std::vector<bool> mismatched_q(nq, false);
+    HardRegSet conflict_hrs;
+    for (int q = 0; q < nq; ++q) {
+      if (mod.qtys[q].first_reg < kFirstPseudoRegister) {
+        continue;
+      }
+      for (int p : mod.qtys[q].member_regs) {
+        const int got = sim_hr[p];
+        const int exp = mod.target_hr_by_pseudo.at(p);
+        if (got != exp) {
+          mismatched_q[q] = true;
+          const auto m_it = pseudo_modes.find(p);
+          const RegModeInfo pm =
+              (m_it != pseudo_modes.end()) ? m_it->second : RegModeInfo{RtlMachineMode::kSi, ""};
+          if (got >= 0) {
+            const int nregs = HardRegnoNregs(got, pm, mips_cfg);
+            for (int r = got; r < got + nregs && r < kFirstPseudoRegister; ++r) {
+              conflict_hrs.SetBit(r);
+            }
+          }
+          if (exp >= 0) {
+            const int nregs = HardRegnoNregs(exp, pm, mips_cfg);
+            for (int r = exp; r < exp + nregs && r < kFirstPseudoRegister; ++r) {
+              conflict_hrs.SetBit(r);
+            }
+          }
+        }
+      }
+    }
+    std::vector<bool> active_q = mismatched_q;
+    for (int q = 0; q < nq; ++q) {
+      if (active_q[q] || mod.qtys[q].first_reg < kFirstPseudoRegister) {
+        continue;
+      }
+      for (int p : mod.qtys[q].member_regs) {
+        const auto m_it = pseudo_modes.find(p);
+        const RegModeInfo pm =
+            (m_it != pseudo_modes.end()) ? m_it->second : RegModeInfo{RtlMachineMode::kSi, ""};
+        for (int hr : {sim_hr[p], mod.target_hr_by_pseudo.at(p)}) {
+          if (hr >= 0) {
+            const int nregs = HardRegnoNregs(hr, pm, mips_cfg);
+            for (int r = hr; r < hr + nregs && r < kFirstPseudoRegister; ++r) {
+              if (conflict_hrs.TestBit(r)) {
+                active_q[q] = true;
+                break;
+              }
+            }
+          }
+        }
+        if (active_q[q]) {
+          break;
+        }
+      }
+    }
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      for (int q = 0; q < nq; ++q) {
+        if (active_q[q] || mod.qtys[q].first_reg < kFirstPseudoRegister) {
+          continue;
+        }
+        for (int a = 0; a < nq; ++a) {
+          if (!active_q[a] || !ModesTieableForLocalAlloc(mod.qtys[q].mode, mod.qtys[a].mode)) {
+            continue;
+          }
+          if (std::max(mod.qtys[q].birth, mod.qtys[a].birth) <
+              std::min(mod.qtys[q].death, mod.qtys[a].death)) {
+            active_q[q] = true;
+            changed = true;
+            break;
+          }
+        }
+      }
+    }
+    return active_q;
+  };
+
+  auto climb_local = [&](std::vector<int> cur_order) {
+    auto [cur_work_m, cur_mis] = realize_local_order(cur_order);
+    int cur_ideal_mis = SimulateLocalBlockAlloc(m, &cur_order);
+    for (int iter = 0; iter < 64 && cur_mis > 0; ++iter) {
+      const std::vector<bool> active_q = build_conflict_qty_mask(cur_work_m);
+      bool improved = false;
+      std::vector<int> step_order = cur_order;
+      LocalBlockAllocModel step_work_m = cur_work_m;
+      int step_mis = cur_mis;
+      int step_ideal_mis = cur_ideal_mis;
+      for (int from = 0; from < nq; ++from) {
+        const int q_from = cur_order[from];
+        if (m.qtys[q_from].first_reg < kFirstPseudoRegister || !active_q[q_from]) {
+          continue;
+        }
+        for (int to = 0; to < nq; ++to) {
+          if (from == to) {
+            continue;
+          }
+          std::vector<int> cand = cur_order;
+          const int val = cand[from];
+          cand.erase(cand.begin() + from);
+          cand.insert(cand.begin() + to, val);
+          const int ideal_mis = SimulateLocalBlockAlloc(m, &cand);
+          if (ideal_mis > step_mis && ideal_mis >= step_ideal_mis) {
+            continue;
+          }
+          auto [cand_work_m, real_mis] = realize_local_order(cand);
+          if (real_mis < step_mis || (real_mis == step_mis && ideal_mis < step_ideal_mis)) {
+            step_mis = real_mis;
+            step_ideal_mis = ideal_mis;
+            step_work_m = std::move(cand_work_m);
+            step_order = std::move(cand);
+            improved = true;
+          }
+        }
+      }
+      if (!improved) {
+        break;
+      }
+      cur_order = std::move(step_order);
+      cur_work_m = std::move(step_work_m);
+      cur_mis = step_mis;
+      cur_ideal_mis = step_ideal_mis;
+    }
+    if (cur_mis < best_mismatches) {
+      best_mismatches = cur_mis;
+      best_work_m = std::move(cur_work_m);
+    }
+  };
+
+  if (best_mismatches > 0) {
+    climb_local(initial_order);
+  }
+  if (best_mismatches > 0) {
+    climb_local(target_seed);
+  }
+  if (best_mismatches < init_mismatches) {
+    for (int q = 0; q < nq; ++q) {
+      const int p0 = best_work_m.qtys[q].first_reg;
+      if (p0 >= kFirstPseudoRegister && best_work_m.qtys[q].n_refs != m.qtys[q].n_refs &&
+          !best_work_m.qtys[q].member_regs.empty()) {
+        const auto& members = best_work_m.qtys[q].member_regs;
+        if (members.size() == 1) {
+          dst_out->sideband.reg_n_refs[members[0]] = std::max(1, best_work_m.qtys[q].n_refs);
+        } else {
+          int tail_sum = 0;
+          for (size_t mi = 1; mi < members.size(); ++mi) {
+            dst_out->sideband.reg_n_refs[members[mi]] = 1;
+            ++tail_sum;
+          }
+          dst_out->sideband.reg_n_refs[members[0]] =
+              std::max(1, best_work_m.qtys[q].n_refs - tail_sum);
+        }
+      }
+    }
+  }
+}
+
+void ReconcileLocalBlockAllocPriorities(
+    RtlControlFlowGraph* dst_out, const RtlControlFlowGraph& liveness_cfg,
+    const MipsTargetConfig& mips_cfg, const absl::flat_hash_set<int>& live_at_any_block_start,
+    const absl::flat_hash_map<int, PseudoLivenessSummary>& pseudo_summaries,
+    const absl::flat_hash_map<int, RegModeInfo>& pseudo_modes,
+    const absl::flat_hash_set<int>& fp_op_pseudos,
+    const absl::flat_hash_set<int>& gr_or_mem_op_pseudos) {
+  for (size_t b = 0; b < dst_out->rpo_blocks.size(); ++b) {
+    ReconcileSingleBlockLocalPriorities(b, dst_out, liveness_cfg, mips_cfg, live_at_any_block_start,
+                                        pseudo_summaries, pseudo_modes, fp_op_pseudos,
+                                        gr_or_mem_op_pseudos);
+  }
 }
 
 void RunOptimizingGlobalAllocInverseOnce(const RtlControlFlowGraph& base_greg_cfg,
@@ -2936,6 +4127,11 @@ void RunOptimizingGlobalAllocInverseOnce(const RtlControlFlowGraph& base_greg_cf
     dst_out->sideband.reg_renumber.erase(regno);
   }
 
+  EnforceBlockAllocQuantityAtomicity(dst_out, liveness_cfg, mips_cfg, live_at_any_block_start,
+                                     pseudo_summaries, pseudo_modes, fp_op_pseudos,
+                                     gr_or_mem_op_pseudos, &erased_global_hard_regs,
+                                     /*atomicity_erased_pseudos=*/nullptr);
+
   // Prune post-reload `mark_home_live` callee-saved registers (`16..23, 30`
   // and `52..63`) that belonged solely to lifted global-alloc pseudos so
   // pre-`global_alloc` `regs_ever_live` matches `flow` (`saved_gpr_regnos` /
@@ -3089,9 +4285,12 @@ void RunOptimizingGlobalAllocInverseOnce(const RtlControlFlowGraph& base_greg_cf
     }
   }
 
-  ReconcileGlobalAllocPriorities(dst_out, liveness_cfg, base_greg_cfg, mips_cfg, pseudo_summaries,
-                                 pseudo_modes, fp_op_pseudos, gr_or_mem_op_pseudos,
-                                 scratch_hard_regs);
+  ReconcileLocalBlockAllocPriorities(dst_out, liveness_cfg, mips_cfg, live_at_any_block_start,
+                                     pseudo_summaries, pseudo_modes, fp_op_pseudos,
+                                     gr_or_mem_op_pseudos);
+  ReconcileGlobalAllocPriorities(dst_out, liveness_cfg, base_greg_cfg, mips_cfg,
+                                 live_at_any_block_start, pseudo_summaries, pseudo_modes,
+                                 fp_op_pseudos, gr_or_mem_op_pseudos, scratch_hard_regs);
 }
 
 }  // namespace

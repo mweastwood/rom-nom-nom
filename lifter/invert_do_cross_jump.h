@@ -28,11 +28,6 @@ RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& jump2_cfg_x);
 RtlControlFlowGraph InvertDoCrossJump(const RtlControlFlowGraph& jump2_cfg_x,
                                       const CompilationProfile& profile);
 
-// Restores post-reload noop self-moves `(set r r)` deleted at the start of
-// `sched2` (`sched.c:4806-4818`: `insn != basic_block_end[b]`) prior to
-// `schedule_block` when `flags.RunsSched2()` is active.
-void RestoreSched2DeletedNoopMoves(RtlControlFlowGraph* cfg, const CompilationProfile& profile);
-
 }  // namespace rom_nom_nom::lifter
 
 namespace rom_nom_nom {

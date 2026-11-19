@@ -10,20 +10,24 @@ namespace rom_nom_nom::lifter {
 // (`SubfunctionId::kUpdateEquivRegs`).
 //
 // Given the post-`update_equiv_regs` `RtlControlFlowGraph`
-// (`RtlPassKind::kLreg`), reconstructs a pre-`update_equiv_regs`
-// `RtlControlFlowGraph` (`RtlPassKind::kSched`) by:
-//   1. Demoting `REG_EQUIV` notes with constant payloads (`CONSTANT_P`) on
-//      single-set pseudo-register definitions back to `REG_EQUAL` notes and
-//      halving their doubled `sideband.reg_live_length[regno]` entries.
-//   2. Stripping block-local `REG_EQUIV (mem ...)` notes attached by
-//      `update_equiv_regs` to single-set pseudo-register definitions (and
-//      halving `sideband.reg_live_length[regno]` when the `REG_EQUIV` note was
-//      present at line 1058 of `update_equiv_regs` rather than added by a
-//      subsequent store instruction).
-//   3. Reversing intra-block `optimize_reg_copy_1` register-copy propagations
-//      and restoring `REG_DEAD` notes and sideband live-length / reference
-//      counts, such that replaying `SubfunctionId::kUpdateEquivRegs` reproduces
-//      `lreg_cfg` identically.
+// (`RtlPassKind::kLreg`) and active `CompilationProfile`, reconstructs a
+// pre-`update_equiv_regs` `RtlControlFlowGraph` (`RtlPassKind::kSched`) by:
+//   1. Restoring cross-block single-set / single-use `reg_equiv_init_insn`
+//      definitions deleted by `update_equiv_regs` (`local-alloc.c:1079-1116`),
+//      substituting the pseudo register and its `REG_DEAD` note back into the
+//      using instruction, and restoring `sideband` reference, death, and
+//      pre-doubled live-length counts.
+//   2. Reversing intra-block `optimize_reg_copy_2` and `optimize_reg_copy_1`
+//      register-copy propagations (`local-alloc.c:700-936`) when
+//      `flag_expensive_optimizations` is active.
+//   3. Demoting `REG_EQUIV <const>` notes (`CONSTANT_P`) back to `REG_EQUAL`
+//      notes, stripping block-local `REG_EQUIV (mem ...)` notes attached by
+//      `update_equiv_regs`, and halving doubled `sideband.reg_live_length`
+//      entries, such that replaying `SubfunctionId::kUpdateEquivRegs`
+//      reproduces `lreg_cfg` identically.
+absl::StatusOr<RtlControlFlowGraph> InvertUpdateEquivRegs(const RtlControlFlowGraph& lreg_cfg,
+                                                          const CompilationProfile& profile);
+
 absl::StatusOr<RtlControlFlowGraph> InvertUpdateEquivRegs(const RtlControlFlowGraph& lreg_cfg);
 
 }  // namespace rom_nom_nom::lifter
