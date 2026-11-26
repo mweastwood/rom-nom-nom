@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_join.h"
 #include "absl/types/span.h"
 #include "core/round_trip_test_cases.h"
@@ -13,6 +14,7 @@
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
 #include "gcc_harness/right_inverse_verifier.h"
+#include "gcc_harness/shared_corpus_trace_loader.h"
 #include "gcc_harness/subfunction_inverse_provider.h"
 #include "gtest/gtest.h"
 #include "lifter/invert_gas_mips_ip.h"
@@ -564,7 +566,14 @@ gcc_harness::RightInverseVerifier* InvertGasAppendInsnRoundTripCorpusTest::verif
 
 TEST_P(InvertGasAppendInsnRoundTripCorpusTest, VerifiesKGasAppendInsnBoundaryAndFinalMachineWords) {
   const RoundTripTestCase& tc = GetParam();
-  const gcc_harness::FunctionCompilationTrace trace = hooks->TraceForwardCompilation(tc);
+  const absl::StatusOr<const gcc_harness::FunctionCompilationTrace*> cached_trace =
+      gcc_harness::GetCachedSharedCorpusTrace(tc.test_name);
+  ASSERT_TRUE(cached_trace.ok()) << tc.test_name << ": " << cached_trace.status();
+  const gcc_harness::FunctionCompilationTrace& trace = **cached_trace;
+
+  ctx->BeginFunction("harness_func");
+  hooks->ApplyCompilationProfile(trace.stage0_input.profile);
+  regclass_init();
 
   bool found_append_insn_snap = false;
   for (const auto& snap : trace.subfunction_snapshots) {

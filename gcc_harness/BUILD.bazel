@@ -1,8 +1,20 @@
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+load(":coverage_flag.bzl", "bool_flag")
+load(":shared_corpus_traces.bzl", "shared_corpus_trace_shards")
 
 package(
     default_testonly = True,
     default_visibility = ["//visibility:public"],
+)
+
+bool_flag(
+    name = "coverage",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "gcc_harness_coverage_enabled",
+    flag_values = {":coverage": "true"},
 )
 
 cc_library(
@@ -16,14 +28,16 @@ cc_library(
         "-Wl,--wrap=immed_real_const_1",
         "-Wl,--wrap=force_const_mem",
         "-Wl,--wrap=reload",
-    ],
+    ] + select({
+        ":gcc_harness_coverage_enabled": ["-lgcov"],
+        "//conditions:default": [],
+    }),
     deps = [
         "//core:c_ast",
         "//core:rtl_cfg",
         "//core:rtl_expr",
         "//core:rtl_sexpr_utils",
         "//toolchain:gas26_harness_lib",
-        "//toolchain:gcc272_harness_lib",
         "@abseil-cpp//absl/base",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
@@ -31,7 +45,10 @@ cc_library(
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
-    ],
+    ] + select({
+        ":gcc_harness_coverage_enabled": ["//toolchain:gcc272_harness_cov_lib"],
+        "//conditions:default": ["//toolchain:gcc272_harness_lib"],
+    }),
 )
 
 cc_library(
@@ -47,7 +64,6 @@ cc_library(
         "//core:rtl_expr",
         "//core:rtl_sexpr_utils",
         "//toolchain:gas26_harness_lib",
-        "//toolchain:gcc272_harness_lib",
         "@abseil-cpp//absl/base",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
@@ -56,7 +72,10 @@ cc_library(
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/types:span",
-    ],
+    ] + select({
+        ":gcc_harness_coverage_enabled": ["//toolchain:gcc272_harness_cov_lib"],
+        "//conditions:default": ["//toolchain:gcc272_harness_lib"],
+    }),
 )
 
 cc_library(
@@ -163,3 +182,85 @@ cc_test(
         "@googletest//:gtest_main",
     ],
 )
+
+cc_library(
+    name = "trace_serializer",
+    testonly = True,
+    srcs = ["trace_serializer.cc"],
+    hdrs = ["trace_serializer.h"],
+    deps = [
+        ":function_hooks",
+        "//core:mips",
+        "//core:round_trip_test_cases",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_binary(
+    name = "shared_corpus_trace_generator",
+    testonly = True,
+    srcs = ["shared_corpus_trace_generator.cc"],
+    linkstatic = True,
+    deps = [
+        ":function_hooks",
+        ":gcc_context",
+        ":trace_serializer",
+        "//core:round_trip_test_cases",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+shared_corpus_trace_shards(
+    name = "shared_corpus_traces",
+    num_shards = 32,
+)
+
+cc_library(
+    name = "shared_corpus_trace_loader",
+    testonly = True,
+    srcs = ["shared_corpus_trace_loader.cc"],
+    hdrs = ["shared_corpus_trace_loader.h"],
+    data = [":shared_corpus_traces"],
+    deps = [
+        ":function_hooks",
+        ":trace_serializer",
+        "//core:round_trip_test_cases",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_test(
+    name = "trace_serializer_test",
+    size = "medium",
+    testonly = True,
+    srcs = ["trace_serializer_test.cc"],
+    linkstatic = True,
+    deps = [
+        ":function_hooks",
+        ":gcc_context",
+        ":shared_corpus_trace_loader",
+        ":trace_serializer",
+        "//core:mips",
+        "//core:round_trip_test_cases",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/status:statusor",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+

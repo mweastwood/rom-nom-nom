@@ -49,7 +49,6 @@ extern int rtx_equal_function_value_matters;
 extern int cse_jumps_altered;
 void restore_reg_data(rtx_def* first);
 void reg_scan(rtx_def* f, int nregs, int repeat);
-void regclass_init();
 void regclass(rtx_def* f, int nregs);
 void stupid_life_analysis(rtx_def* f, int nregs, FILE* file);
 void delete_dead_from_cse(rtx_def* insns, int nregs);
@@ -140,7 +139,7 @@ void CollectPatternRegReadsAndFullDefs(const RtlExpr& expr, absl::flat_hash_set<
       const int word_bytes = (target_flags & kMipsMask64Bit) != 0 ? 8 : 4;
       const int outer_bytes = RtlExprModeByteSize(lhs);
       const int inner_bytes = RtlExprModeByteSize(lhs.children[0]);
-      if (!(inner_bytes > word_bytes && inner_bytes > outer_bytes)) {
+      if (inner_bytes <= word_bytes || inner_bytes <= outer_bytes) {
         full_defs->insert(lhs.children[0].RegNo());
       }
     } else {
@@ -1589,11 +1588,36 @@ RightInverseResult RightInverseVerifier::VerifySuffixRightInverse(
     y.pass = RtlPassKind::kRtl;
   }
 
-  // Reset `fresh_ctx` and replay forward passes $F_{0..s}(y_s)$ strictly under
-  // `effective_profile`.
+  return VerifySuffixRightInverse(target_pass, input_x, y);
+}
+
+RightInverseResult RightInverseVerifier::VerifySuffixRightInverse(
+    RtlPassKind target_pass, const Stage0FunctionInput& input_x,
+    const RtlControlFlowGraph& lifted_preimage_y) const {
+  RightInverseResult fail_result;
+  fail_result.expected_words = input_x.machine_words;
+  fail_result.expected_summary = FormatWordsSummary(fail_result.expected_words);
+
+  if (input_x.machine_words.empty()) {
+    fail_result.matches = false;
+    fail_result.diff_detail = "VerifySuffixRightInverse given empty machine_words";
+    return fail_result;
+  }
+  if (lifted_preimage_y.rpo_blocks.empty()) {
+    fail_result.matches = false;
+    fail_result.diff_detail = "VerifySuffixRightInverse given empty lifted_preimage_y";
+    return fail_result;
+  }
+
+  // Instantiate a completely fresh `GccContext` and `FunctionHooks` configured
+  // solely from `effective_profile` so zero forward-compilation oracle state
+  // leaks from the caller's `ctx_` / `hooks_`.
+  const CompilationProfile effective_profile = BuildEffectiveStage0CompilationProfile(input_x);
+  GccContext fresh_ctx;
+  FunctionHooks fresh_hooks(&fresh_ctx);
   fresh_ctx.BeginFunction("harness_func");
   fresh_hooks.ApplyCompilationProfile(effective_profile);
-  fresh_ctx.MaterializeFromCfg(y);
+  fresh_ctx.MaterializeFromCfg(lifted_preimage_y);
   {
     std::string bad_insn;
     if (!fresh_hooks.ValidateMaterializedInsnsRecognizable(&bad_insn)) {
@@ -1604,7 +1628,7 @@ RightInverseResult RightInverseVerifier::VerifySuffixRightInverse(
     }
   }
 
-  RtlControlFlowGraph current_cfg = y;
+  RtlControlFlowGraph current_cfg = lifted_preimage_y;
   const auto all_subs = AllSubfunctionIds();
   const int start_sub_idx = FirstReplaySubfunctionIndexAfterPass(target_pass);
   int end_sub_idx = 0;
@@ -1614,6 +1638,7 @@ RightInverseResult RightInverseVerifier::VerifySuffixRightInverse(
       break;
     }
   }
+  const bool ran_rtl_passes = (start_sub_idx <= end_sub_idx);
   for (int idx = start_sub_idx; idx <= end_sub_idx; ++idx) {
     if (idx == start_sub_idx && all_subs[idx] == SubfunctionId::kGlobalAlloc) {
       regclass_init();
@@ -1626,9 +1651,9 @@ RightInverseResult RightInverseVerifier::VerifySuffixRightInverse(
                       .post_state;
   }
 
-  fresh_hooks.ApplyCompilationProfile(effective_profile);
-  fresh_ctx.MaterializeFromCfg(current_cfg);
-  {
+  if (ran_rtl_passes) {
+    fresh_hooks.ApplyCompilationProfile(effective_profile);
+    fresh_ctx.MaterializeFromCfg(current_cfg);
     std::string bad_insn;
     if (!fresh_hooks.ValidateMaterializedInsnsRecognizable(&bad_insn)) {
       fail_result.matches = false;
@@ -1642,7 +1667,7 @@ RightInverseResult RightInverseVerifier::VerifySuffixRightInverse(
   RightInverseResult res = CompareStage0FunctionInputs(input_x, actual_stage0, combined_asm);
   if (!res.matches) {
     absl::StrAppend(&res.diff_detail, "\nlifted y_s (", RtlPassExtension(target_pass), "):\n",
-                    y.FormatSummary());
+                    lifted_preimage_y.FormatSummary());
   }
   return res;
 }
@@ -1695,11 +1720,13 @@ RightInverseResult RightInverseVerifier::VerifyFillSimpleDelaySlotsRightInverse(
 RightInverseResult RightInverseVerifier::VerifyDbrStageRightInverse(
     const RtlControlFlowGraph& dbr_cfg_x) const {
   const CompilationProfile profile = hooks_->ActiveCompilationProfile();
+  return VerifyDbrStageRightInverse(dbr_cfg_x, inverses_->InvertDbrSchedule(dbr_cfg_x, profile));
+}
+
+RightInverseResult RightInverseVerifier::VerifyDbrStageRightInverse(
+    const RtlControlFlowGraph& dbr_cfg_x, const RtlControlFlowGraph& lifted_jump2) const {
   return VerifyRtlPassRightInverse(
-      dbr_cfg_x,
-      [this, &profile](const RtlControlFlowGraph& x) {
-        return inverses_->InvertDbrSchedule(x, profile);
-      },
+      dbr_cfg_x, [&lifted_jump2](const RtlControlFlowGraph&) { return lifted_jump2; },
       [](GccContext* /*ctx*/, FunctionHooks* hooks) { hooks->RunDbrSchedule(); },
       RtlPassKind::kDbr);
 }
@@ -1711,21 +1738,24 @@ RightInverseResult RightInverseVerifier::VerifyDbrStageRightInverse(
 RightInverseResult RightInverseVerifier::VerifyDoCrossJumpRightInverse(
     const RtlControlFlowGraph& jump2_cfg_x) const {
   const CompilationProfile profile = hooks_->ActiveCompilationProfile();
-  return VerifyRtlPassRightInverse(
-      jump2_cfg_x,
-      [this, &profile](const RtlControlFlowGraph& x) {
-        return inverses_->InvertDoCrossJump(x, profile);
-      },
-      [](GccContext* /*ctx*/, FunctionHooks* hooks) {
-        hooks->RunJumpOptimize(/*cross_jump=*/1, /*noop_moves=*/1,
-                               /*after_regscan=*/0);
-      },
-      RtlPassKind::kJump2);
+  return VerifyJump2CrossJumpStageRightInverse(jump2_cfg_x,
+                                               inverses_->InvertDoCrossJump(jump2_cfg_x, profile));
 }
 
 RightInverseResult RightInverseVerifier::VerifyJump2CrossJumpStageRightInverse(
     const RtlControlFlowGraph& jump2_cfg_x) const {
   return VerifyDoCrossJumpRightInverse(jump2_cfg_x);
+}
+
+RightInverseResult RightInverseVerifier::VerifyJump2CrossJumpStageRightInverse(
+    const RtlControlFlowGraph& jump2_cfg_x, const RtlControlFlowGraph& lifted_sched2) const {
+  return VerifyRtlPassRightInverse(
+      jump2_cfg_x, [&lifted_sched2](const RtlControlFlowGraph&) { return lifted_sched2; },
+      [](GccContext* /*ctx*/, FunctionHooks* hooks) {
+        hooks->RunJumpOptimize(/*cross_jump=*/1, /*noop_moves=*/1,
+                               /*after_regscan=*/0);
+      },
+      RtlPassKind::kJump2);
 }
 
 // -----------------------------------------------------------------------------
@@ -1763,11 +1793,14 @@ RightInverseResult RightInverseVerifier::VerifySched2StageRightInverse(
 RightInverseResult RightInverseVerifier::VerifySched1StageRightInverse(
     const RtlControlFlowGraph& sched1_cfg_x) const {
   const CompilationProfile profile = hooks_->ActiveCompilationProfile();
+  return VerifySched1StageRightInverse(sched1_cfg_x,
+                                       inverses_->InvertScheduleBlock(sched1_cfg_x, profile));
+}
+
+RightInverseResult RightInverseVerifier::VerifySched1StageRightInverse(
+    const RtlControlFlowGraph& sched1_cfg_x, const RtlControlFlowGraph& lifted_combine) const {
   return VerifyRtlPassRightInverse(
-      sched1_cfg_x,
-      [this, &profile](const RtlControlFlowGraph& x) {
-        return inverses_->InvertScheduleBlock(x, profile);
-      },
+      sched1_cfg_x, [&lifted_combine](const RtlControlFlowGraph&) { return lifted_combine; },
       [](GccContext* /*ctx*/, FunctionHooks* hooks) {
         if (optimize > 0 && flag_schedule_insns != 0) {
           hooks->RunScheduleInsns();
@@ -1915,23 +1948,25 @@ RightInverseResult RightInverseVerifier::VerifyGlobalAllocRightInverse(
 RightInverseResult RightInverseVerifier::VerifyGlobalReloadStageRightInverse(
     const RtlControlFlowGraph& greg_cfg_x) const {
   const CompilationProfile profile = hooks_->ActiveCompilationProfile();
-  bool local_caller_save_needed = false;
+  RtlControlFlowGraph pre_alter =
+      inverses_->InvertAlterReg(greg_cfg_x, profile, /*pseudo_regno=*/72);
+  if (!greg_cfg_x.rpo_blocks.empty() && pre_alter.rpo_blocks.empty()) {
+    return VerifyGlobalReloadStageRightInverse(greg_cfg_x, RtlControlFlowGraph{});
+  }
+  RtlControlFlowGraph pre_reload = inverses_->InvertReload(pre_alter, profile);
+  if (!pre_alter.rpo_blocks.empty() && pre_reload.rpo_blocks.empty()) {
+    return VerifyGlobalReloadStageRightInverse(greg_cfg_x, RtlControlFlowGraph{});
+  }
+  RtlControlFlowGraph pre_global = inverses_->InvertGlobalAlloc(pre_reload, profile);
+  return VerifyGlobalReloadStageRightInverse(greg_cfg_x, pre_global);
+}
+
+RightInverseResult RightInverseVerifier::VerifyGlobalReloadStageRightInverse(
+    const RtlControlFlowGraph& greg_cfg_x, const RtlControlFlowGraph& lifted_lreg) const {
+  const bool local_caller_save_needed = HasLocalCallerSaveNeeded(lifted_lreg);
   return VerifyRtlPassRightInverse(
-      greg_cfg_x,
-      [this, &profile, &local_caller_save_needed](const RtlControlFlowGraph& x) {
-        RtlControlFlowGraph pre_alter = inverses_->InvertAlterReg(x, profile, /*pseudo_regno=*/72);
-        if (!x.rpo_blocks.empty() && pre_alter.rpo_blocks.empty()) {
-          return RtlControlFlowGraph{};
-        }
-        RtlControlFlowGraph pre_reload = inverses_->InvertReload(pre_alter, profile);
-        if (!pre_alter.rpo_blocks.empty() && pre_reload.rpo_blocks.empty()) {
-          return RtlControlFlowGraph{};
-        }
-        RtlControlFlowGraph pre_global = inverses_->InvertGlobalAlloc(pre_reload, profile);
-        local_caller_save_needed = HasLocalCallerSaveNeeded(pre_global);
-        return pre_global;
-      },
-      [&local_caller_save_needed](GccContext* ctx, FunctionHooks* hooks) {
+      greg_cfg_x, [&lifted_lreg](const RtlControlFlowGraph&) { return lifted_lreg; },
+      [local_caller_save_needed](GccContext* ctx, FunctionHooks* hooks) {
         // Preserve `regno_pointer_flag` across harness-only `restore_reg_data`
         // calls inside `RunGlobalAlloc` / `-O0` `stupid_life_analysis` setup:
         // in real GCC (`toplev.c:3075-3084`), `global_alloc` and `reload` never
@@ -1973,26 +2008,31 @@ RightInverseResult RightInverseVerifier::VerifyGlobalReloadStageRightInverse(
 
 RightInverseResult RightInverseVerifier::VerifyBlockAllocRightInverse(
     const RtlControlFlowGraph& lreg_cfg_x) const {
+  const CompilationProfile profile = hooks_->ActiveCompilationProfile();
+  return VerifyBlockAllocRightInverse(lreg_cfg_x, inverses_->InvertBlockAlloc(lreg_cfg_x, profile));
+}
+
+RightInverseResult RightInverseVerifier::VerifyBlockAllocRightInverse(
+    const RtlControlFlowGraph& lreg_cfg_x, const RtlControlFlowGraph& lifted_pre_block) const {
   RightInverseResult result;
   result.expected_summary = lreg_cfg_x.FormatSummary();
 
   const CompilationProfile profile = hooks_->ActiveCompilationProfile();
-  const RtlControlFlowGraph lifted_y = inverses_->InvertBlockAlloc(lreg_cfg_x, profile);
-  if (!lreg_cfg_x.rpo_blocks.empty() && lifted_y.rpo_blocks.empty()) {
+  if (!lreg_cfg_x.rpo_blocks.empty() && lifted_pre_block.rpo_blocks.empty()) {
     result.matches = false;
     result.diff_detail = "Inverse returned empty RtlControlFlowGraph";
     return result;
   }
   {
     std::string fusage_err;
-    if (!VerifyCandidatePreservesExplicitCallFusage(lreg_cfg_x, lifted_y, &fusage_err)) {
+    if (!VerifyCandidatePreservesExplicitCallFusage(lreg_cfg_x, lifted_pre_block, &fusage_err)) {
       result.matches = false;
       result.diff_detail = std::move(fusage_err);
       return result;
     }
   }
   const SubfunctionBoundarySnapshot replayed = hooks_->ExecuteSubfunctionBoundary(
-      SubfunctionId::kBlockAlloc, lifted_y, {}, profile.optimize_level, profile.c_flags,
+      SubfunctionId::kBlockAlloc, lifted_pre_block, {}, profile.optimize_level, profile.c_flags,
       profile.gp_symbol_sizes);
   result.actual_summary = replayed.post_state.FormatSummary();
   result.cfg_comparison = replayed.post_state.CompareAgainst(lreg_cfg_x);
@@ -2023,11 +2063,14 @@ RightInverseResult RightInverseVerifier::VerifyBlockAllocRightInverse(
 RightInverseResult RightInverseVerifier::VerifyUpdateEquivRegsRightInverse(
     const RtlControlFlowGraph& equiv_cfg_x) const {
   const CompilationProfile profile = hooks_->ActiveCompilationProfile();
+  return VerifyUpdateEquivRegsRightInverse(equiv_cfg_x,
+                                           inverses_->InvertUpdateEquivRegs(equiv_cfg_x, profile));
+}
+
+RightInverseResult RightInverseVerifier::VerifyUpdateEquivRegsRightInverse(
+    const RtlControlFlowGraph& equiv_cfg_x, const RtlControlFlowGraph& lifted_sched) const {
   return VerifyRtlPassRightInverse(
-      equiv_cfg_x,
-      [this, &profile](const RtlControlFlowGraph& x) {
-        return inverses_->InvertUpdateEquivRegs(x, profile);
-      },
+      equiv_cfg_x, [&lifted_sched](const RtlControlFlowGraph&) { return lifted_sched; },
       [](GccContext* /*ctx*/, FunctionHooks* hooks) {
         if (optimize > 0) {
           hooks->RunUpdateEquivRegs();
@@ -2039,15 +2082,18 @@ RightInverseResult RightInverseVerifier::VerifyUpdateEquivRegsRightInverse(
 RightInverseResult RightInverseVerifier::VerifyLocalAllocStageRightInverse(
     const RtlControlFlowGraph& lreg_cfg_x) const {
   const CompilationProfile profile = hooks_->ActiveCompilationProfile();
+  RtlControlFlowGraph pre_block = inverses_->InvertBlockAlloc(lreg_cfg_x, profile);
+  if (!lreg_cfg_x.rpo_blocks.empty() && pre_block.rpo_blocks.empty()) {
+    return VerifyLocalAllocStageRightInverse(lreg_cfg_x, RtlControlFlowGraph{});
+  }
+  return VerifyLocalAllocStageRightInverse(lreg_cfg_x,
+                                           inverses_->InvertUpdateEquivRegs(pre_block, profile));
+}
+
+RightInverseResult RightInverseVerifier::VerifyLocalAllocStageRightInverse(
+    const RtlControlFlowGraph& lreg_cfg_x, const RtlControlFlowGraph& lifted_sched) const {
   return VerifyRtlPassRightInverse(
-      lreg_cfg_x,
-      [this, &profile](const RtlControlFlowGraph& x) {
-        RtlControlFlowGraph pre_block = inverses_->InvertBlockAlloc(x, profile);
-        if (!x.rpo_blocks.empty() && pre_block.rpo_blocks.empty()) {
-          return RtlControlFlowGraph{};
-        }
-        return inverses_->InvertUpdateEquivRegs(pre_block, profile);
-      },
+      lreg_cfg_x, [&lifted_sched](const RtlControlFlowGraph&) { return lifted_sched; },
       [](GccContext* /*ctx*/, FunctionHooks* hooks) {
         if (optimize > 0) {
           hooks->RunLocalAlloc();

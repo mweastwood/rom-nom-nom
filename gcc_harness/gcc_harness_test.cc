@@ -3518,5 +3518,138 @@ double df_arg_multiword_nsets(int a, int b, double x) {
   EXPECT_EQ(sched_cfg.sideband.reg_n_sets.at(7), flow_a3_n_sets);
 }
 
+TEST(GccHarnessTest, PreimageOverloadsVerifyValidAndRejectEmptyOrCorruptedPreimages) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  RightInverseVerifier verifier(&ctx, &hooks);
+  const std::vector<std::string> flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"};
+  const FunctionCompilationTrace trace = hooks.TraceForwardCompilation(
+      R"(
+int preimage_probe(int a, int b) {
+  int c = a + b;
+  if (c > 10) {
+    return c * 3 + 7;
+  }
+  return c - 5;
+}
+)",
+      "preimage_probe", flags, "preimage_overload_test");
+
+  ASSERT_FALSE(trace.stage0_input.machine_words.empty());
+  ASSERT_TRUE(trace.pass_snapshots.contains(RtlPassKind::kCombine));
+  ASSERT_TRUE(trace.pass_snapshots.contains(RtlPassKind::kSched));
+  ASSERT_TRUE(trace.pass_snapshots.contains(RtlPassKind::kLreg));
+  ASSERT_TRUE(trace.pass_snapshots.contains(RtlPassKind::kGreg));
+  ASSERT_TRUE(trace.pass_snapshots.contains(RtlPassKind::kSched2));
+  ASSERT_TRUE(trace.pass_snapshots.contains(RtlPassKind::kJump2));
+  ASSERT_TRUE(trace.pass_snapshots.contains(RtlPassKind::kDbr));
+
+  auto corrupt_cfg = [](RtlControlFlowGraph cfg) {
+    if (!cfg.rpo_blocks.empty()) {
+      cfg.rpo_blocks[0].instructions = {"(set (reg/i:SI 2 v0) (const_int 12345))",
+                                        "(use (reg/i:SI 2 v0))"};
+      cfg.rpo_blocks[0].successors.clear();
+      cfg.rpo_blocks.resize(1);
+      cfg.rpo_blocks[0].SyncRtlInsnsFromInstructions();
+    }
+    return cfg;
+  };
+  const RtlControlFlowGraph empty_cfg;
+
+  // 1. `VerifySuffixRightInverse` preimage overload on `kDbr` (`ran_rtl_passes == false`)
+  //    and `kCombine` (`ran_rtl_passes == true`).
+  const RtlControlFlowGraph& dbr_snap = trace.pass_snapshots.at(RtlPassKind::kDbr);
+  const RtlControlFlowGraph& combine_snap = trace.pass_snapshots.at(RtlPassKind::kCombine);
+  EXPECT_TRUE(
+      verifier.VerifySuffixRightInverse(RtlPassKind::kDbr, trace.stage0_input, dbr_snap).matches);
+  EXPECT_TRUE(
+      verifier.VerifySuffixRightInverse(RtlPassKind::kCombine, trace.stage0_input, combine_snap)
+          .matches);
+  EXPECT_FALSE(
+      verifier.VerifySuffixRightInverse(RtlPassKind::kDbr, trace.stage0_input, empty_cfg).matches);
+  EXPECT_FALSE(verifier.VerifySuffixRightInverse(RtlPassKind::kDbr, Stage0FunctionInput{}, dbr_snap)
+                   .matches);
+  EXPECT_FALSE(verifier
+                   .VerifySuffixRightInverse(RtlPassKind::kCombine, trace.stage0_input,
+                                             corrupt_cfg(combine_snap))
+                   .matches);
+
+  // 2. All 7 per-stage preimage overloads: positive on genuine trace pre-state,
+  //    negative on empty and corrupted preimages.
+  const CompilationProfile profile = trace.stage0_input.profile;
+  auto reset_ctx = [&]() {
+    ctx.BeginFunction("preimage_stage");
+    hooks.ApplyCompilationProfile(profile);
+    regclass_init();
+  };
+
+  const RtlControlFlowGraph& jump2_snap = trace.pass_snapshots.at(RtlPassKind::kJump2);
+  reset_ctx();
+  EXPECT_TRUE(verifier.VerifyDbrStageRightInverse(dbr_snap, jump2_snap).matches);
+  reset_ctx();
+  EXPECT_FALSE(verifier.VerifyDbrStageRightInverse(dbr_snap, empty_cfg).matches);
+  reset_ctx();
+  EXPECT_FALSE(verifier.VerifyDbrStageRightInverse(dbr_snap, corrupt_cfg(jump2_snap)).matches);
+
+  const RtlControlFlowGraph& sched2_snap = trace.pass_snapshots.at(RtlPassKind::kSched2);
+  reset_ctx();
+  EXPECT_TRUE(verifier.VerifyJump2CrossJumpStageRightInverse(jump2_snap, sched2_snap).matches);
+  reset_ctx();
+  EXPECT_FALSE(verifier.VerifyJump2CrossJumpStageRightInverse(jump2_snap, empty_cfg).matches);
+  reset_ctx();
+  EXPECT_FALSE(
+      verifier.VerifyJump2CrossJumpStageRightInverse(jump2_snap, corrupt_cfg(sched2_snap)).matches);
+
+  const RtlControlFlowGraph& greg_snap = trace.pass_snapshots.at(RtlPassKind::kGreg);
+  const RtlControlFlowGraph& lreg_snap = trace.pass_snapshots.at(RtlPassKind::kLreg);
+  reset_ctx();
+  EXPECT_TRUE(verifier.VerifyGlobalReloadStageRightInverse(greg_snap, lreg_snap).matches);
+  reset_ctx();
+  EXPECT_FALSE(verifier.VerifyGlobalReloadStageRightInverse(greg_snap, empty_cfg).matches);
+  reset_ctx();
+  EXPECT_FALSE(
+      verifier.VerifyGlobalReloadStageRightInverse(greg_snap, corrupt_cfg(lreg_snap)).matches);
+
+  const RtlControlFlowGraph& sched_snap = trace.pass_snapshots.at(RtlPassKind::kSched);
+  reset_ctx();
+  EXPECT_TRUE(verifier.VerifyLocalAllocStageRightInverse(lreg_snap, sched_snap).matches);
+  reset_ctx();
+  EXPECT_FALSE(verifier.VerifyLocalAllocStageRightInverse(lreg_snap, empty_cfg).matches);
+  reset_ctx();
+  EXPECT_FALSE(
+      verifier.VerifyLocalAllocStageRightInverse(lreg_snap, corrupt_cfg(sched_snap)).matches);
+
+  reset_ctx();
+  EXPECT_TRUE(verifier.VerifySched1StageRightInverse(sched_snap, combine_snap).matches);
+  reset_ctx();
+  EXPECT_FALSE(verifier.VerifySched1StageRightInverse(sched_snap, empty_cfg).matches);
+  reset_ctx();
+  EXPECT_FALSE(
+      verifier.VerifySched1StageRightInverse(sched_snap, corrupt_cfg(combine_snap)).matches);
+
+  for (const SubfunctionBoundarySnapshot& snap : trace.subfunction_snapshots) {
+    if (snap.subfunction_id == SubfunctionId::kBlockAlloc) {
+      reset_ctx();
+      EXPECT_TRUE(verifier.VerifyBlockAllocRightInverse(snap.post_state, snap.pre_state).matches);
+      reset_ctx();
+      EXPECT_FALSE(verifier.VerifyBlockAllocRightInverse(snap.post_state, empty_cfg).matches);
+      reset_ctx();
+      EXPECT_FALSE(
+          verifier.VerifyBlockAllocRightInverse(snap.post_state, corrupt_cfg(snap.pre_state))
+              .matches);
+    } else if (snap.subfunction_id == SubfunctionId::kUpdateEquivRegs) {
+      reset_ctx();
+      EXPECT_TRUE(
+          verifier.VerifyUpdateEquivRegsRightInverse(snap.post_state, snap.pre_state).matches);
+      reset_ctx();
+      EXPECT_FALSE(verifier.VerifyUpdateEquivRegsRightInverse(snap.post_state, empty_cfg).matches);
+      reset_ctx();
+      EXPECT_FALSE(
+          verifier.VerifyUpdateEquivRegsRightInverse(snap.post_state, corrupt_cfg(snap.pre_state))
+              .matches);
+    }
+  }
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::gcc_harness

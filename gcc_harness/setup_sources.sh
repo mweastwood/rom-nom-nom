@@ -604,6 +604,13 @@ cc_import(
 )
 
 cc_import(
+    name = "gcc272_harness_cov_lib",
+    testonly = True,
+    static_library = "libgcc272_harness_cov.a",
+    tags = ["manual"],
+)
+
+cc_import(
     name = "gas26_harness_lib",
     testonly = True,
     static_library = "libgas26_harness.a",

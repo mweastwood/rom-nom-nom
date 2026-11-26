@@ -6,12 +6,14 @@
 #include <vector>
 
 #include "absl/container/flat_hash_set.h"
+#include "absl/status/statusor.h"
 #include "core/compiler_flags.h"
 #include "core/round_trip_test_cases.h"
 #include "core/rtl_cfg.h"
 #include "core/rtl_expr.h"
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
+#include "gcc_harness/shared_corpus_trace_loader.h"
 #include "gtest/gtest.h"
 #include "lifter/reconstruct_hard_reg_liveness.h"
 
@@ -292,8 +294,15 @@ gcc_harness::FunctionHooks* RtlLivenessRoundTripTest::hooks = nullptr;
 
 TEST_P(RtlLivenessRoundTripTest, RoundTrip4172Cases) {
   const RoundTripTestCase& tc = GetParam();
-  const gcc_harness::FunctionCompilationTrace trace = hooks->TraceForwardCompilation(tc);
+  const absl::StatusOr<const gcc_harness::FunctionCompilationTrace*> cached_trace =
+      gcc_harness::GetCachedSharedCorpusTrace(tc.test_name);
+  ASSERT_TRUE(cached_trace.ok()) << tc.test_name << ": " << cached_trace.status();
+  const gcc_harness::FunctionCompilationTrace& trace = **cached_trace;
   const CompilationProfile& profile = trace.stage0_input.profile;
+
+  ctx->BeginFunction("harness_func");
+  hooks->ApplyCompilationProfile(profile);
+  regclass_init();
 
   // 1. Pre-reload `.05.flow` exact comparison (notes + live sets + flow stats).
   ASSERT_TRUE(trace.pass_snapshots.contains(RtlPassKind::kFlow)) << tc.test_name;

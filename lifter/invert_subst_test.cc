@@ -12,6 +12,7 @@
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
 #include "gcc_harness/right_inverse_verifier.h"
+#include "gcc_harness/shared_corpus_trace_loader.h"
 #include "gcc_harness/subfunction_inverse_provider.h"
 #include "gtest/gtest.h"
 
@@ -361,7 +362,14 @@ class InvertSubstRoundTripTest : public InvertSubstTest,
 
 TEST_P(InvertSubstRoundTripTest, RoundTrip2480Cases) {
   const RoundTripTestCase& tc = GetParam();
-  FunctionCompilationTrace trace = hooks->TraceForwardCompilation(tc);
+  const absl::StatusOr<const FunctionCompilationTrace*> cached_trace =
+      gcc_harness::GetCachedSharedCorpusTrace(tc.test_name);
+  ASSERT_TRUE(cached_trace.ok()) << tc.test_name << ": " << cached_trace.status();
+  const FunctionCompilationTrace& trace = **cached_trace;
+
+  ctx->BeginFunction("harness_func");
+  hooks->ApplyCompilationProfile(trace.stage0_input.profile);
+  regclass_init();
 
   SubstOnlyInverseProvider provider;
   RightInverseVerifier verifier(ctx, hooks, &provider);

@@ -8,6 +8,7 @@
 
 #include "absl/container/btree_map.h"
 #include "absl/container/btree_set.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "core/compiler_flags.h"
 #include "core/round_trip_test_cases.h"
@@ -15,11 +16,11 @@
 #include "core/rtl_expr.h"
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
+#include "gcc_harness/shared_corpus_trace_loader.h"
 #include "gtest/gtest.h"
 #include "lifter/rtl_liveness.h"
 
 extern "C" {
-void regclass_init();                         // NOLINT(readability-identifier-naming)
 extern int rtx_equal_function_value_matters;  // NOLINT(readability-identifier-naming)
 }
 
@@ -4295,8 +4296,6 @@ TEST(SchedModelTest,
 class SchedModelDifferentialTest : public ::testing::TestWithParam<RoundTripTestCase> {
  protected:
   static void SetUpTestSuite() {
-    trace_ctx = new GccContext();
-    trace_hooks = new FunctionHooks(trace_ctx);
     verify_ctx = new GccContext();
     verify_hooks = new FunctionHooks(verify_ctx);
   }
@@ -4306,20 +4305,12 @@ class SchedModelDifferentialTest : public ::testing::TestWithParam<RoundTripTest
     verify_hooks = nullptr;
     delete verify_ctx;
     verify_ctx = nullptr;
-    delete trace_hooks;
-    trace_hooks = nullptr;
-    delete trace_ctx;
-    trace_ctx = nullptr;
   }
 
-  static GccContext* trace_ctx;
-  static FunctionHooks* trace_hooks;
   static GccContext* verify_ctx;
   static FunctionHooks* verify_hooks;
 };
 
-GccContext* SchedModelDifferentialTest::trace_ctx = nullptr;
-FunctionHooks* SchedModelDifferentialTest::trace_hooks = nullptr;
 GccContext* SchedModelDifferentialTest::verify_ctx = nullptr;
 FunctionHooks* SchedModelDifferentialTest::verify_hooks = nullptr;
 
@@ -4474,11 +4465,15 @@ void VerifyCorpusCfgInvertibility(const RtlControlFlowGraph& scheduled_cfg,
 
 TEST_P(SchedModelDifferentialTest, MatchesRealGccRunScheduleInsnsOnSched1AndSched2) {
   const RoundTripTestCase& tc = GetParam();
-  trace_ctx->BeginFunction("harness_init");
-  trace_hooks->ApplyCompilationProfile({2, tc.options.c_flags, {}});
-  regclass_init();
-  const FunctionCompilationTrace trace = trace_hooks->TraceForwardCompilation(tc);
+  const absl::StatusOr<const FunctionCompilationTrace*> cached_trace =
+      gcc_harness::GetCachedSharedCorpusTrace(tc.test_name);
+  ASSERT_TRUE(cached_trace.ok()) << tc.test_name << ": " << cached_trace.status();
+  const FunctionCompilationTrace& trace = **cached_trace;
   const CompilationProfile& profile = trace.stage0_input.profile;
+
+  verify_ctx->BeginFunction("harness_func");
+  verify_hooks->ApplyCompilationProfile(profile);
+  regclass_init();
 
   std::vector<std::string> eff_flags;
   eff_flags.push_back("-O" + std::to_string(profile.optimize_level));
@@ -4489,6 +4484,7 @@ TEST_P(SchedModelDifferentialTest, MatchesRealGccRunScheduleInsnsOnSched1AndSche
     if (snap.subfunction_id == SubfunctionId::kScheduleBlockSched1 && flags.RunsSched1()) {
       verify_ctx->BeginFunction("diff_sched1");
       verify_hooks->ApplyCompilationProfile(profile);
+      regclass_init();
       verify_ctx->MaterializeFromCfg(snap.pre_state);
       // Mirrors `toplev.c:2779` & `right_inverse_verifier.cc:341`: after RTL generation,
       // `rtx_equal_function_value_matters` is 0.
@@ -4534,6 +4530,7 @@ TEST_P(SchedModelDifferentialTest, MatchesRealGccRunScheduleInsnsOnSched1AndSche
     } else if (snap.subfunction_id == SubfunctionId::kScheduleBlockSched2 && flags.RunsSched2()) {
       verify_ctx->BeginFunction("diff_sched2");
       verify_hooks->ApplyCompilationProfile(profile);
+      regclass_init();
       verify_ctx->MaterializeFromCfg(snap.pre_state);
       rtx_equal_function_value_matters = 0;
       verify_hooks->RunScheduleInsns();

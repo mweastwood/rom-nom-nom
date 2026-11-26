@@ -18,6 +18,7 @@
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
 #include "gcc_harness/right_inverse_verifier.h"
+#include "gcc_harness/shared_corpus_trace_loader.h"
 #include "gcc_harness/subfunction_inverse_provider.h"
 #include "gtest/gtest.h"
 #include "lifter/invert_alter_reg.h"
@@ -25,8 +26,6 @@
 #include "lifter/pass01_dbr_schedule.h"
 #include "lifter/pass02_jump2_cross_jump.h"
 #include "lifter/pass03_sched2_post_reload.h"
-
-extern "C" void regclass_init();  // NOLINT(readability-identifier-naming)
 
 namespace rom_nom_nom::lifter {
 namespace {
@@ -1677,7 +1676,7 @@ TEST_F(InvertReloadTest,
         if (dst.op != RtlOp::kReg || dst.RegNo() < 68) {
           continue;
         }
-        const int regno = static_cast<int>(dst.RegNo());
+        const int regno = dst.RegNo();
         if (src.IsMem()) {
           pseudo_rmw_ops_mask[regno] |= 1;
         } else if (src.op == RtlOp::kAnd) {
@@ -2329,10 +2328,14 @@ class InvertReloadCorpusTest : public InvertReloadTest,
 
 TEST_P(InvertReloadCorpusTest, All4172CasesSatisfyBoundaryAndFreshPreReloadRightInverse) {
   const RoundTripTestCase& tc = GetParam();
-  ctx->BeginFunction("harness_init");
-  hooks->ApplyCompilationProfile({2, tc.options.c_flags, {}});
+  const absl::StatusOr<const FunctionCompilationTrace*> cached_trace =
+      gcc_harness::GetCachedSharedCorpusTrace(tc.test_name);
+  ASSERT_TRUE(cached_trace.ok()) << tc.test_name << ": " << cached_trace.status();
+  const FunctionCompilationTrace& trace = **cached_trace;
+
+  ctx->BeginFunction("harness_func");
+  hooks->ApplyCompilationProfile(trace.stage0_input.profile);
   regclass_init();
-  const FunctionCompilationTrace trace = hooks->TraceForwardCompilation(tc);
   ASSERT_FALSE(trace.subfunction_snapshots.empty())
       << "Failed to capture snapshots for " << tc.test_name;
 

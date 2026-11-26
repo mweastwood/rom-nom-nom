@@ -9,6 +9,7 @@
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
 #include "gcc_harness/right_inverse_verifier.h"
+#include "gcc_harness/shared_corpus_trace_loader.h"
 #include "gcc_harness/subfunction_inverse_provider.h"
 #include "gtest/gtest.h"
 #include "lifter/pass00_final_and_gas.h"
@@ -16,8 +17,6 @@
 #include "lifter/pass02_jump2_cross_jump.h"
 #include "lifter/pass03_sched2_post_reload.h"
 #include "lifter/pass04_greg_reload.h"
-
-extern "C" void regclass_init();  // NOLINT(readability-identifier-naming)
 
 namespace rom_nom_nom::lifter {
 namespace {
@@ -467,11 +466,15 @@ class InvertBlockAllocRoundTripTest : public InvertBlockAllocTest,
 
 TEST_P(InvertBlockAllocRoundTripTest, StandaloneAndFreshStage0To4AcrossAll4172Cases) {
   const RoundTripTestCase& tc = GetParam();
-  ctx->BeginFunction("harness_init");
-  hooks->ApplyCompilationProfile({2, tc.options.c_flags, {}});
-  regclass_init();
-  const FunctionCompilationTrace trace = hooks->TraceForwardCompilation(tc);
+  const absl::StatusOr<const FunctionCompilationTrace*> cached_trace =
+      gcc_harness::GetCachedSharedCorpusTrace(tc.test_name);
+  ASSERT_TRUE(cached_trace.ok()) << tc.test_name << ": " << cached_trace.status();
+  const FunctionCompilationTrace& trace = **cached_trace;
   ASSERT_FALSE(trace.stage0_input.machine_words.empty()) << tc.test_name;
+
+  ctx->BeginFunction("harness_func");
+  hooks->ApplyCompilationProfile(trace.stage0_input.profile);
+  regclass_init();
 
   BlockAllocOnlyInverseProvider provider;
   RightInverseVerifier verifier(ctx, hooks, &provider);
@@ -502,6 +505,7 @@ TEST_P(InvertBlockAllocRoundTripTest, StandaloneAndFreshStage0To4AcrossAll4172Ca
 
   ctx->BeginFunction("harness_fresh_block_alloc");
   hooks->ApplyCompilationProfile(trace.stage0_input.profile);
+  regclass_init();
   const RightInverseResult fresh_res = verifier.VerifyBlockAllocRightInverse(p4);
   EXPECT_TRUE(fresh_res.matches) << "Fresh kBlockAlloc right-inverse failed for " << tc.test_name
                                  << ":\n"

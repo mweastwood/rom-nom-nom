@@ -205,6 +205,7 @@ int max_label_num();
 int get_max_uid();
 void print_rtl(FILE* outf, rtx_def* rtx_first);
 void print_rtx(rtx_def* in_rtx);
+void regclass_init();
 
 }  // extern "C"
 // NOLINTEND(readability-identifier-naming)

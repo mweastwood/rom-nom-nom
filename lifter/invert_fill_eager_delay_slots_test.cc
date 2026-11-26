@@ -6,11 +6,13 @@
 #include <utility>
 #include <vector>
 
+#include "absl/status/statusor.h"
 #include "core/round_trip_test_cases.h"
 #include "core/rtl_cfg.h"
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
 #include "gcc_harness/right_inverse_verifier.h"
+#include "gcc_harness/shared_corpus_trace_loader.h"
 #include "gcc_harness/subfunction_inverse_provider.h"
 #include "gtest/gtest.h"
 
@@ -62,7 +64,14 @@ RightInverseVerifier* FillEagerDelaySlotsCorpusTest::verifier = nullptr;
 
 TEST_P(FillEagerDelaySlotsCorpusTest, RoundTrip2480Cases) {
   const RoundTripTestCase& tc = GetParam();
-  const auto trace = hooks->TraceForwardCompilation(tc);
+  const absl::StatusOr<const gcc_harness::FunctionCompilationTrace*> cached_trace =
+      gcc_harness::GetCachedSharedCorpusTrace(tc.test_name);
+  ASSERT_TRUE(cached_trace.ok()) << tc.test_name << ": " << cached_trace.status();
+  const gcc_harness::FunctionCompilationTrace& trace = **cached_trace;
+
+  ctx->BeginFunction("harness_func");
+  hooks->ApplyCompilationProfile(trace.stage0_input.profile);
+  regclass_init();
 
   bool found_snapshot = false;
   for (const SubfunctionBoundarySnapshot& snap : trace.subfunction_snapshots) {

@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include "absl/status/statusor.h"
 #include "core/compiler_flags.h"
 #include "core/round_trip_test_cases.h"
 #include "core/rtl_cfg.h"
@@ -11,6 +12,7 @@
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
 #include "gcc_harness/right_inverse_verifier.h"
+#include "gcc_harness/shared_corpus_trace_loader.h"
 #include "gcc_harness/subfunction_inverse_provider.h"
 #include "gtest/gtest.h"
 #include "lifter/invert_update_flow_info.h"
@@ -4007,7 +4009,14 @@ class InvertScheduleBlockCorpusTest : public ::testing::TestWithParam<RoundTripT
 
 TEST_P(InvertScheduleBlockCorpusTest, Sched1AndSched2BoundaryRightInverseMatchesOnCorpusCase) {
   const RoundTripTestCase& tc = GetParam();
-  const gcc_harness::FunctionCompilationTrace trace = hooks_.TraceForwardCompilation(tc);
+  const absl::StatusOr<const gcc_harness::FunctionCompilationTrace*> cached_trace =
+      gcc_harness::GetCachedSharedCorpusTrace(tc.test_name);
+  ASSERT_TRUE(cached_trace.ok()) << tc.test_name << ": " << cached_trace.status();
+  const gcc_harness::FunctionCompilationTrace& trace = **cached_trace;
+
+  ctx_.BeginFunction("harness_func");
+  hooks_.ApplyCompilationProfile(trace.stage0_input.profile);
+  regclass_init();
 
   bool found_sched1 = false;
   bool found_sched2 = false;
@@ -4025,7 +4034,9 @@ TEST_P(InvertScheduleBlockCorpusTest, Sched1AndSched2BoundaryRightInverseMatches
       EXPECT_TRUE(res.matches) << "kScheduleBlockSched2 failed for " << tc.test_name << ": "
                                << res.diff_detail;
       if (ParseCompilationProfileFlags(trace.stage0_input.profile).RunsSched2()) {
+        ctx_.BeginFunction("harness_sched2_stage");
         hooks_.ApplyCompilationProfile(trace.stage0_input.profile);
+        regclass_init();
         const gcc_harness::RightInverseResult sched_only_res =
             verifier_.VerifySched2StageRightInverse(snap.post_state);
         EXPECT_TRUE(sched_only_res.matches) << "VerifySched2StageRightInverse failed for "
