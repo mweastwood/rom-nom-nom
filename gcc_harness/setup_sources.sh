@@ -24,7 +24,8 @@ GCC_SHA256="7cd8bce5c3aeec59a72ecc2d3d5123864a817b14cdbd0680b1a969c3bccc5da5"
 BINUTILS_URL="https://ftp.gnu.org/old-gnu/binutils/binutils-2.6.tar.gz"
 BINUTILS_SHA256="ee5f5ef22688c8fb45c2784b26c443a9a97c0e97f14b3cb1ca39d1325c46f097"
 KMC_BINUTILS_URL="https://github.com/decompals/mips-binutils-2.6/archive/refs/tags/v0.3.tar.gz"
-KMC_BINUTILS_SHA256="ffd30d2200a6a1f258c8144f89ba2ed6513512477f20eb1fc3e995d5cbdba34a"
+KMC_BINUTILS_SHA256="411fa536bf4d78c5d527a17a9dac30cce39b2637b4d54080c2df2cb19f4e9d63"
+KMC_BINUTILS_LEGACY_SHA256="ffd30d2200a6a1f258c8144f89ba2ed6513512477f20eb1fc3e995d5cbdba34a"
 
 HARNESS_CFLAGS="-O1 -fno-inline -fno-inline-functions -fno-inline-small-functions -fno-inline-functions-called-once -fgnu89-inline -fcommon -w"
 CC_CMD="gcc -std=gnu89"
@@ -48,7 +49,12 @@ if [[ ! -d "${BINUTILS_SRC}" ]]; then
   echo "[gcc_harness] Downloading Binutils 2.6 source archive..."
   TMP_BINUTILS_TAR="$(mktemp /tmp/binutils-2.6.XXXXXX.tar.gz)"
   if curl -fsSL "${KMC_BINUTILS_URL}" -o "${TMP_BINUTILS_TAR}"; then
-    echo "${KMC_BINUTILS_SHA256}  ${TMP_BINUTILS_TAR}" | sha256sum -c -
+    ACTUAL_SHA256="$(sha256sum "${TMP_BINUTILS_TAR}" | awk '{print $1}')"
+    if [[ "${ACTUAL_SHA256}" != "${KMC_BINUTILS_SHA256}" && "${ACTUAL_SHA256}" != "${KMC_BINUTILS_LEGACY_SHA256}" ]]; then
+      echo "[gcc_harness] Unexpected SHA-256 for ${KMC_BINUTILS_URL}: ${ACTUAL_SHA256}" >&2
+      rm -f "${TMP_BINUTILS_TAR}"
+      exit 1
+    fi
   else
     curl -fSL "${BINUTILS_URL}" -o "${TMP_BINUTILS_TAR}"
     echo "${BINUTILS_SHA256}  ${TMP_BINUTILS_TAR}" | sha256sum -c -
@@ -57,6 +63,9 @@ if [[ ! -d "${BINUTILS_SRC}" ]]; then
   tar -xzf "${TMP_BINUTILS_TAR}" --strip-components=1 -C "${BINUTILS_SRC}"
   rm -f "${TMP_BINUTILS_TAR}"
 fi
+
+# Ensure extracted files (some of which ship read-only in GNU tarballs) are writable.
+chmod -R u+w "${GCC_SRC}" "${BINUTILS_SRC}"
 
 # Patch obstack.h lvalue casts for modern GCC in both source trees.
 python3 - "${GCC_SRC}/obstack.h" "${BINUTILS_SRC}/include/obstack.h" << 'PYEOF'
@@ -570,6 +579,37 @@ done
 
 rm -f "${TOOLCHAIN_DIR}/libgas26_harness.a"
 (cd "${GAS_STAGE_DIR}" && ar rcs "${TOOLCHAIN_DIR}/libgas26_harness.a" *.o)
+
+if [[ ! -f "${TOOLCHAIN_DIR}/BUILD.bazel" ]]; then
+  cat << 'EOF' > "${TOOLCHAIN_DIR}/BUILD.bazel"
+load("@rules_cc//cc:defs.bzl", "cc_import")
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "all_files",
+    srcs = glob(
+        [
+            "gcc-2.7.2/**",
+            "binutils-2.6/**",
+        ],
+        allow_empty = True,
+    ),
+)
+
+cc_import(
+    name = "gcc272_harness_lib",
+    testonly = True,
+    static_library = "libgcc272_harness.a",
+)
+
+cc_import(
+    name = "gas26_harness_lib",
+    testonly = True,
+    static_library = "libgas26_harness.a",
+)
+EOF
+fi
 
 echo "[gcc_harness] Successfully built:"
 echo "  - ${TOOLCHAIN_DIR}/libgcc272_harness.a"

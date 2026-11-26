@@ -1,0 +1,3 @@
+{
+  "install": "bash tools/setup_cloud_env.sh"
+}
