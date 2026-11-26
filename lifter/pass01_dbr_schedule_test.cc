@@ -7,12 +7,14 @@
 #include <utility>
 #include <vector>
 
+#include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "core/round_trip_test_cases.h"
 #include "core/rtl_cfg.h"
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
 #include "gcc_harness/right_inverse_verifier.h"
+#include "gcc_harness/shared_corpus_trace_loader.h"
 #include "gcc_harness/subfunction_inverse_provider.h"
 #include "gtest/gtest.h"
 #include "lifter/invert_fill_eager_delay_slots.h"
@@ -400,7 +402,13 @@ RightInverseVerifier* Pass01DbrScheduleRoundTripTest::verifier = nullptr;
 
 TEST_P(Pass01DbrScheduleRoundTripTest, RoundTrip2480Cases) {
   const RoundTripTestCase& tc = GetParam();
-  const auto trace = hooks->TraceForwardCompilation(tc);
+  const auto cached_trace = gcc_harness::GetCachedSharedCorpusTrace(tc.test_name);
+  ASSERT_TRUE(cached_trace.ok()) << tc.test_name << ": " << cached_trace.status();
+  const gcc_harness::FunctionCompilationTrace& trace = **cached_trace;
+
+  ctx->BeginFunction("harness_func");
+  hooks->ApplyCompilationProfile(trace.stage0_input.profile);
+  regclass_init();
 
   auto dbr_it = trace.pass_snapshots.find(RtlPassKind::kDbr);
   ASSERT_NE(dbr_it, trace.pass_snapshots.end()) << "Missing .12.dbr for " << tc.test_name;
@@ -456,16 +464,19 @@ TEST_P(Pass01DbrScheduleRoundTripTest, RoundTrip2480Cases) {
       << pre_dbr.FormatSummary();
 
   // 3. Full fresh-context `VerifySuffixRightInverse` ($F_{0..1}(G_{1..0}(x_0)) = x_0$)
-  //    across all 2,480 corpus cases.
+  //    lifting `p0 -> p1` once and replaying live through `dbr_schedule` -> `final` -> `gas`.
   ASSERT_FALSE(trace.stage0_input.machine_words.empty()) << "Test case: " << tc.test_name;
 
-  const RightInverseResult stage0_res =
-      verifier->VerifyFinalAndGasStageRightInverse(trace.stage0_input);
-  EXPECT_TRUE(stage0_res.matches) << "Stage 0 right-inverse mismatch for " << tc.test_name << ":\n"
-                                  << stage0_res.diff_detail;
+  const RtlControlFlowGraph p0 = InvertFinalAndGasFunction(trace.stage0_input);
+  ASSERT_FALSE(p0.rpo_blocks.empty()) << "Empty Pass00 output for " << tc.test_name;
+  RtlControlFlowGraph p1 = (trace.stage0_input.profile.optimize_level > 0)
+                               ? InvertPass01DbrSchedule(p0, trace.stage0_input.profile)
+                               : p0;
+  ASSERT_FALSE(p1.rpo_blocks.empty()) << "Empty Pass01 output for " << tc.test_name;
+  p1.pass = RtlPassKind::kJump2;
 
   const RightInverseResult suffix_res =
-      verifier->VerifySuffixRightInverse(RtlPassKind::kJump2, trace.stage0_input);
+      verifier->VerifySuffixRightInverse(RtlPassKind::kJump2, trace.stage0_input, p1);
   EXPECT_TRUE(suffix_res.matches) << "Stage 0..1 suffix right-inverse mismatch for " << tc.test_name
                                   << ":\n"
                                   << suffix_res.diff_detail << "\nexpected:\n"

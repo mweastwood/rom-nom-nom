@@ -87,6 +87,14 @@ class RightInverseVerifier {
   RightInverseResult VerifySuffixRightInverse(RtlPassKind target_pass,
                                               const Stage0FunctionInput& input_x) const;
 
+  // Replays forward $F_{0..s}(\text{lifted\_preimage\_y}) == \text{input\_x}$
+  // on a fresh `GccContext` + `FunctionHooks` configured solely from
+  // `input_x.profile`, reusing an already-lifted preimage `lifted_preimage_y`
+  // with identical recognizability, pass-replay, and Stage 0 comparison checks.
+  RightInverseResult VerifySuffixRightInverse(RtlPassKind target_pass,
+                                              const Stage0FunctionInput& input_x,
+                                              const RtlControlFlowGraph& lifted_preimage_y) const;
+
   // ---------------------------------------------------------------------------
   // Stage 1: Delayed-Branch Scheduling (`reorg.c`)
   // ---------------------------------------------------------------------------
@@ -109,6 +117,8 @@ class RightInverseVerifier {
 
   // 10. `reorg.c:dbr_schedule` right-inverse.
   RightInverseResult VerifyDbrStageRightInverse(const RtlControlFlowGraph& dbr_cfg_x) const;
+  RightInverseResult VerifyDbrStageRightInverse(const RtlControlFlowGraph& dbr_cfg_x,
+                                                const RtlControlFlowGraph& lifted_jump2) const;
 
   // ---------------------------------------------------------------------------
   // Stage 2: Post-Reload Jump Optimization & Cross-Jumping (`jump.c`)
@@ -118,6 +128,8 @@ class RightInverseVerifier {
   RightInverseResult VerifyDoCrossJumpRightInverse(const RtlControlFlowGraph& jump2_cfg_x) const;
   RightInverseResult VerifyJump2CrossJumpStageRightInverse(
       const RtlControlFlowGraph& jump2_cfg_x) const;
+  RightInverseResult VerifyJump2CrossJumpStageRightInverse(
+      const RtlControlFlowGraph& jump2_cfg_x, const RtlControlFlowGraph& lifted_sched2) const;
 
   // ---------------------------------------------------------------------------
   // Stage 3 & Stage 6: Instruction Scheduling (`sched.c`)
@@ -128,6 +140,8 @@ class RightInverseVerifier {
       const RtlControlFlowGraph& scheduled_cfg_x) const;
   RightInverseResult VerifySched2StageRightInverse(const RtlControlFlowGraph& sched2_cfg_x) const;
   RightInverseResult VerifySched1StageRightInverse(const RtlControlFlowGraph& sched1_cfg_x) const;
+  RightInverseResult VerifySched1StageRightInverse(const RtlControlFlowGraph& sched1_cfg_x,
+                                                   const RtlControlFlowGraph& lifted_combine) const;
   RightInverseResult VerifySchedStageRightInverse(const RtlControlFlowGraph& scheduled_cfg_x) const;
 
   // ---------------------------------------------------------------------------
@@ -142,14 +156,22 @@ class RightInverseVerifier {
   RightInverseResult VerifyGlobalAllocRightInverse(const RtlControlFlowGraph& greg_cfg_x) const;
   RightInverseResult VerifyGlobalReloadStageRightInverse(
       const RtlControlFlowGraph& greg_cfg_x) const;
+  RightInverseResult VerifyGlobalReloadStageRightInverse(
+      const RtlControlFlowGraph& greg_cfg_x, const RtlControlFlowGraph& lifted_lreg) const;
 
   // 14. `local-alloc.c:block_alloc` right-inverse.
   RightInverseResult VerifyBlockAllocRightInverse(const RtlControlFlowGraph& lreg_cfg_x) const;
+  RightInverseResult VerifyBlockAllocRightInverse(
+      const RtlControlFlowGraph& lreg_cfg_x, const RtlControlFlowGraph& lifted_pre_block) const;
 
   // 15. `local-alloc.c:update_equiv_regs` right-inverse.
   RightInverseResult VerifyUpdateEquivRegsRightInverse(
       const RtlControlFlowGraph& equiv_cfg_x) const;
+  RightInverseResult VerifyUpdateEquivRegsRightInverse(
+      const RtlControlFlowGraph& equiv_cfg_x, const RtlControlFlowGraph& lifted_sched) const;
   RightInverseResult VerifyLocalAllocStageRightInverse(const RtlControlFlowGraph& lreg_cfg_x) const;
+  RightInverseResult VerifyLocalAllocStageRightInverse(
+      const RtlControlFlowGraph& lreg_cfg_x, const RtlControlFlowGraph& lifted_sched) const;
 
   // ---------------------------------------------------------------------------
   // Stage 7: Instruction Combination (`combine.c`)

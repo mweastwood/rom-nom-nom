@@ -5,6 +5,7 @@
 #include <string_view>
 #include <vector>
 
+#include "absl/status/statusor.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_join.h"
@@ -13,6 +14,7 @@
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
 #include "gcc_harness/right_inverse_verifier.h"
+#include "gcc_harness/shared_corpus_trace_loader.h"
 #include "gcc_harness/subfunction_inverse_provider.h"
 #include "gtest/gtest.h"
 
@@ -501,7 +503,14 @@ RightInverseVerifier* InvertFunctionPrologueEpilogueRoundTripCorpusTest::verifie
 TEST_P(InvertFunctionPrologueEpilogueRoundTripCorpusTest,
        FunctionPrologueEpilogueBoundaryRoundTripsBitExact) {
   const RoundTripTestCase& tc = GetParam();
-  const FunctionCompilationTrace trace = hooks->TraceForwardCompilation(tc);
+  const absl::StatusOr<const FunctionCompilationTrace*> cached_trace =
+      gcc_harness::GetCachedSharedCorpusTrace(tc.test_name);
+  ASSERT_TRUE(cached_trace.ok()) << tc.test_name << ": " << cached_trace.status();
+  const FunctionCompilationTrace& trace = **cached_trace;
+
+  ctx->BeginFunction(trace.function_name);
+  hooks->ApplyCompilationProfile(trace.stage0_input.profile);
+  regclass_init();
 
   bool found_prologue_epilogue_snap = false;
   for (const auto& snap : trace.subfunction_snapshots) {

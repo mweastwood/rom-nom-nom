@@ -11,6 +11,7 @@
 
 #include "absl/container/btree_map.h"
 #include "absl/container/btree_set.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
@@ -21,6 +22,7 @@
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
 #include "gcc_harness/right_inverse_verifier.h"
+#include "gcc_harness/shared_corpus_trace_loader.h"
 #include "gcc_harness/subfunction_inverse_provider.h"
 #include "gtest/gtest.h"
 #include "lifter/invert_schedule_block.h"
@@ -567,21 +569,37 @@ const CachedSeedSnapshot& GetCachedSeedSnapshot(int pool_idx, GccContext* trace_
     return it->second;
   }
 
-  const RoundTripTestCase* tc = nullptr;
+  FunctionCompilationTrace live_trace;
+  const FunctionCompilationTrace* trace_ptr = nullptr;
+  std::string seed_name;
   if (pool_idx < kNumMicroKernels) {
-    tc = &GetSyntheticMicroKernels()[static_cast<size_t>(pool_idx)];
+    const RoundTripTestCase& tc = GetSyntheticMicroKernels()[static_cast<size_t>(pool_idx)];
+    seed_name = tc.test_name;
+    trace_ctx->BeginFunction("fuzz_seed_trace");
+    trace_hooks->ApplyCompilationProfile({2, tc.options.c_flags, {}});
+    regclass_init();
+    live_trace = trace_hooks->TraceForwardCompilation(tc);
+    trace_ptr = &live_trace;
   } else {
     const auto& corpus_indices = GetStratifiedCorpusCaseIndices();
     const size_t c_idx = corpus_indices[static_cast<size_t>(pool_idx - kNumMicroKernels)];
-    tc = &GetSharedRoundTripTestCases()[c_idx];
+    seed_name = GetSharedRoundTripTestCases()[c_idx].test_name;
+    const absl::StatusOr<const FunctionCompilationTrace*> cached_trace =
+        gcc_harness::GetCachedSharedCorpusTraceByIndex(c_idx);
+    EXPECT_TRUE(cached_trace.ok()) << seed_name << ": " << cached_trace.status();
+    if (!cached_trace.ok()) {
+      CachedSeedSnapshot invalid;
+      invalid.name = std::move(seed_name);
+      invalid.valid = false;
+      auto [it, _] = k_cache->emplace(pool_idx, std::move(invalid));
+      return it->second;
+    }
+    trace_ptr = *cached_trace;
   }
-
-  trace_ctx->BeginFunction("fuzz_seed_trace");
-  trace_hooks->ApplyCompilationProfile({2, tc->options.c_flags, {}});
-  const FunctionCompilationTrace trace = trace_hooks->TraceForwardCompilation(*tc);
+  const FunctionCompilationTrace& trace = *trace_ptr;
 
   CachedSeedSnapshot snap;
-  snap.name = tc->test_name;
+  snap.name = std::move(seed_name);
   snap.base_profile = trace.stage0_input.profile;
 
   for (const SubfunctionBoundarySnapshot& s : trace.subfunction_snapshots) {
@@ -2616,6 +2634,7 @@ TEST_P(SchedModelFuzzTest, SeededDifferentialAndRightInverseFuzz) {
   // Validate legality via real GCC `recog` before invoking oracles.
   verify_ctx->BeginFunction("fuzz_recog_check");
   verify_hooks->ApplyCompilationProfile(outcome.mutated_profile);
+  regclass_init();
   verify_ctx->MaterializeFromCfg(outcome.mutated_cfg);
   std::string bad_insn;
   ASSERT_TRUE(verify_hooks->ValidateMaterializedInsnsRecognizable(&bad_insn))
@@ -2636,6 +2655,7 @@ TEST_P(SchedModelFuzzTest, SeededDifferentialAndRightInverseFuzz) {
                                [&](const RtlControlFlowGraph& cand) {
                                  verify_ctx->BeginFunction("fuzz_shrink_check");
                                  verify_hooks->ApplyCompilationProfile(outcome.mutated_profile);
+                                 regclass_init();
                                  verify_ctx->MaterializeFromCfg(cand);
                                  if (!verify_hooks->ValidateMaterializedInsnsRecognizable()) {
                                    return false;

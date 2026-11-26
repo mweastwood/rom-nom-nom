@@ -6,6 +6,7 @@
 #include <string_view>
 #include <vector>
 
+#include "absl/status/statusor.h"
 #include "core/compiler_flags.h"
 #include "core/round_trip_test_cases.h"
 #include "core/rtl_cfg.h"
@@ -13,14 +14,13 @@
 #include "gcc_harness/function_hooks.h"
 #include "gcc_harness/gcc_context.h"
 #include "gcc_harness/right_inverse_verifier.h"
+#include "gcc_harness/shared_corpus_trace_loader.h"
 #include "gcc_harness/subfunction_inverse_provider.h"
 #include "gtest/gtest.h"
 #include "lifter/pass00_final_and_gas.h"
 #include "lifter/pass01_dbr_schedule.h"
 #include "lifter/pass02_jump2_cross_jump.h"
 #include "lifter/pass03_sched2_post_reload.h"
-
-extern "C" void regclass_init();  // NOLINT(readability-identifier-naming)
 
 namespace rom_nom_nom::lifter {
 namespace {
@@ -261,8 +261,8 @@ void VerifySinglePatternEntryArgReadsAndStep(const RtlExpr& fresh_pat, const Rtl
       }
     }
   } else if (fresh_pat.op != RtlOp::kClobber &&
-             !(fresh_pat.op == RtlOp::kUse && !fresh_pat.children.empty() &&
-               !fresh_pat.children[0].flags.integrated)) {
+             (fresh_pat.op != RtlOp::kUse || fresh_pat.children.empty() ||
+              fresh_pat.children[0].flags.integrated)) {
     VerifyExprUpwardExposedEntryArgReads(fresh_pat, lifted_pat, *killed, test_name);
   }
 
@@ -4161,10 +4161,14 @@ RightInverseVerifier* InvertAlterRegCorpusTest::verifier = nullptr;
 
 TEST_P(InvertAlterRegCorpusTest, All4172CasesSatisfyBoundaryAndFreshGregRightInverse) {
   const RoundTripTestCase& tc = GetParam();
-  ctx->BeginFunction("harness_init");
-  hooks->ApplyCompilationProfile({2, tc.options.c_flags, {}});
+  const absl::StatusOr<const FunctionCompilationTrace*> cached_trace =
+      gcc_harness::GetCachedSharedCorpusTrace(tc.test_name);
+  ASSERT_TRUE(cached_trace.ok()) << tc.test_name << ": " << cached_trace.status();
+  const FunctionCompilationTrace& trace = **cached_trace;
+
+  ctx->BeginFunction("harness_func");
+  hooks->ApplyCompilationProfile(trace.stage0_input.profile);
   regclass_init();
-  const FunctionCompilationTrace trace = hooks->TraceForwardCompilation(tc);
   ASSERT_FALSE(trace.subfunction_snapshots.empty())
       << "Failed to capture snapshots for " << tc.test_name;
 
