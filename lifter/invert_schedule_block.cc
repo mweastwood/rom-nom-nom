@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/btree_map.h"
+#include "absl/container/btree_set.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/types/span.h"
@@ -21,6 +23,7 @@
 #include "lifter/post_reload_noop_moves.h"
 #include "lifter/reconstruct_hard_reg_liveness.h"
 #include "lifter/rtl_liveness.h"
+#include "lifter/sched_model.h"
 
 namespace rom_nom_nom::lifter {
 namespace {
@@ -70,6 +73,9 @@ bool IsReturnInternalExpr(const RtlExpr& pat) {
 bool ContainsUnknownOrMalformedOp(const RtlExpr& expr, size_t num_blocks,
                                   bool allow_return = false) {
   if (expr.op == RtlOp::kUnknown) {
+    return true;
+  }
+  if (expr.op == RtlOp::kReg && expr.RegNo() < 0) {
     return true;
   }
   if (expr.op == RtlOp::kReturn && !allow_return) {
@@ -147,6 +153,63 @@ bool ValidateScheduledCfg(const RtlControlFlowGraph& cfg) {
           return false;
         }
       }
+      for (const RtlExpr& fu : parsed_or->call_fusage) {
+        if (ContainsUnknownOrMalformedOp(fu, n_blocks)) {
+          return false;
+        }
+      }
+    }
+    for (const RtlInsn& insn : blk.rtl_insns) {
+      for (const RtlExpr& fu : insn.call_fusage) {
+        if (ContainsUnknownOrMalformedOp(fu, n_blocks)) {
+          return false;
+        }
+      }
+    }
+  }
+  for (const auto& [regno, hr] : cfg.sideband.reg_renumber) {
+    if (regno < kMipsFirstPseudoRegister || hr < -1 || hr >= kMipsFirstPseudoRegister) {
+      return false;
+    }
+  }
+  for (const auto& [regno, _] : cfg.sideband.reg_n_refs) {
+    if (regno < 0) return false;
+  }
+  for (const auto& [regno, _] : cfg.sideband.reg_n_sets) {
+    if (regno < 0) return false;
+  }
+  for (const auto& [regno, _] : cfg.sideband.reg_n_deaths) {
+    if (regno < 0) return false;
+  }
+  for (const auto& [regno, _] : cfg.sideband.reg_live_length) {
+    if (regno < 0) return false;
+  }
+  for (const auto& [regno, _] : cfg.sideband.reg_n_calls_crossed) {
+    if (regno < 0) return false;
+  }
+  for (const auto& [b_idx, live_set] : cfg.sideband.basic_block_live_at_start) {
+    if (b_idx < 0 || static_cast<size_t>(b_idx) >= n_blocks) {
+      return false;
+    }
+    for (int r : live_set) {
+      if (r < 0) {
+        return false;
+      }
+    }
+  }
+  for (int r : cfg.sideband.pointer_regnos) {
+    if (r < 0) {
+      return false;
+    }
+  }
+  for (int r : cfg.sideband.saved_gpr_regnos) {
+    if (r < 0 || r >= kMipsFirstPseudoRegister) {
+      return false;
+    }
+  }
+  for (int r : cfg.sideband.saved_fpr_regnos) {
+    if (r < 0 || r >= kMipsFirstPseudoRegister) {
+      return false;
     }
   }
   return true;
@@ -2068,48 +2131,6 @@ void UnscheduleBlockInstructions(RtlBasicBlock* blk, bool gp64, bool fp64, bool 
   }
 }
 
-bool MatchSplitLargeIntPair(const RtlPatternAndNotes& first, const RtlPatternAndNotes& second,
-                            RtlExpr* out_dest_reg, int64_t* out_combined_val) {
-  // Match `first`: `(set (reg:SI R) (const_int HI))`
-  if (first.pattern.op != RtlOp::kSet || first.pattern.children.size() != 2) {
-    return false;
-  }
-  const RtlExpr& dst1 = first.pattern.children[0];
-  const RtlExpr& src1 = first.pattern.children[1];
-  if (dst1.op != RtlOp::kReg || dst1.mode != RtlMachineMode::kSi || src1.op != RtlOp::kConstInt) {
-    return false;
-  }
-
-  // Match `second`: `(set (reg:SI R) (ior:SI (reg:SI R) (const_int LO)))`
-  if (second.pattern.op != RtlOp::kSet || second.pattern.children.size() != 2) {
-    return false;
-  }
-  const RtlExpr& dst2 = second.pattern.children[0];
-  const RtlExpr& src2 = second.pattern.children[1];
-  if (dst2.op != RtlOp::kReg || dst2.mode != RtlMachineMode::kSi || dst2.RegNo() != dst1.RegNo() ||
-      src2.op != RtlOp::kIor || src2.mode != RtlMachineMode::kSi || src2.children.size() != 2) {
-    return false;
-  }
-  if (src2.children[0].op != RtlOp::kReg || src2.children[0].RegNo() != dst1.RegNo() ||
-      src2.children[1].op != RtlOp::kConstInt) {
-    return false;
-  }
-
-  const uint32_t hi_u32 = static_cast<uint32_t>(src1.int_val);
-  const uint32_t lo_u32 = static_cast<uint32_t>(src2.children[1].int_val);
-  if ((hi_u32 & 0x0000ffffu) != 0u || (lo_u32 & 0xffff0000u) != 0u) {
-    return false;
-  }
-  const int64_t combined = static_cast<int32_t>(hi_u32 | lo_u32);
-  if (!IsMipsLargeInt(combined)) {
-    return false;
-  }
-
-  *out_dest_reg = dst2;
-  *out_combined_val = combined;
-  return true;
-}
-
 bool IsPrologueSpDecrement(const RtlExpr& pat, int* out_tsize) {
   if (pat.op != RtlOp::kSet || pat.children.size() != 2) {
     return false;
@@ -2294,8 +2315,9 @@ bool MatchPrologueRegPlusSp(const RtlExpr& pat, int dst_regno, int other_regno) 
   return (r0 == other_regno && r1 == kMipsSpRegno) || (r0 == kMipsSpRegno && r1 == other_regno);
 }
 
-bool MatchPrologueSaveStoreWithBase(const RtlExpr& pat, std::optional<int> active_base13_offset,
-                                    int tsize, int* out_saved_regno, int* out_save_offset) {
+bool MatchPrologueSaveStoreWithBase(const RtlExpr& pat, bool has_active_base13_offset,
+                                    int active_base13_offset, int tsize, int* out_saved_regno,
+                                    int* out_save_offset) {
   if (pat.op != RtlOp::kSet || pat.children.size() != 2) {
     return false;
   }
@@ -2321,10 +2343,10 @@ bool MatchPrologueSaveStoreWithBase(const RtlExpr& pat, std::optional<int> activ
       *out_save_offset = 0;
       return true;
     }
-    if (addr.RegNo() == kMipsTemp2Regno && active_base13_offset.has_value() &&
-        *active_base13_offset >= 0 && *active_base13_offset < tsize) {
+    if (addr.RegNo() == kMipsTemp2Regno && has_active_base13_offset && active_base13_offset >= 0 &&
+        active_base13_offset < tsize) {
       *out_saved_regno = regno;
-      *out_save_offset = *active_base13_offset;
+      *out_save_offset = active_base13_offset;
       return true;
     }
     return false;
@@ -2338,8 +2360,8 @@ bool MatchPrologueSaveStoreWithBase(const RtlExpr& pat, std::optional<int> activ
       *out_save_offset = disp;
       return true;
     }
-    if (base_reg == kMipsTemp2Regno && active_base13_offset.has_value()) {
-      const int eff_offset = *active_base13_offset + disp;
+    if (base_reg == kMipsTemp2Regno && has_active_base13_offset) {
+      const int eff_offset = active_base13_offset + disp;
       if (eff_offset >= 0 && eff_offset < tsize) {
         *out_saved_regno = regno;
         *out_save_offset = eff_offset;
@@ -2514,6 +2536,31 @@ void RestoreInheritedSpillSlotDeadNotes(RtlControlFlowGraph* cfg, bool gp64, boo
     }
   }
 
+  // Per `global.c:find_reg` (`lines 1060-1210`) and `reload1.c:2352`
+  // (`alter_reg`), GCC allocates callee-saved registers before spilling a
+  // pseudo to a stack slot. A call-free function that uses no callee-saved
+  // GPRs (`$16..$23`) cannot have an `alter_reg` GPR spill slot (stack stores
+  // there are user locals/aggregates, not spilled pseudos).
+  bool has_any_call = false;
+  bool uses_callee_saved_gpr = false;
+  for (const auto& insns : block_insns) {
+    for (const ParsedBlockInsn& insn : insns) {
+      if (IsCallExpr(insn.parsed.pattern)) {
+        has_any_call = true;
+      }
+      for (int r : insn.write_regs) {
+        if (r >= 16 && r <= 23) {
+          uses_callee_saved_gpr = true;
+        }
+      }
+      for (int r : insn.read_regs) {
+        if (r >= 16 && r <= 23) {
+          uses_callee_saved_gpr = true;
+        }
+      }
+    }
+  }
+
   for (size_t b_idx = 0; b_idx < cfg->rpo_blocks.size(); ++b_idx) {
     RtlBasicBlock& blk = cfg->rpo_blocks[b_idx];
     if (!blk.successors.empty()) {
@@ -2526,11 +2573,16 @@ void RestoreInheritedSpillSlotDeadNotes(RtlControlFlowGraph* cfg, bool gp64, boo
       int base = -1;
       int64_t off = 0;
       int64_t sz = 0;
+      // `function.c:667-735` (`assign_stack_local`) + `reload1.c:2352`
+      // (`alter_reg`): compiler-allocated spill slots never carry
+      // `MEM_IN_STRUCT_P` (`mem/s`) or `MEM_VOLATILE_P` (`mem/v`).
       if (pat.op == RtlOp::kSet && pat.children.size() == 2 && pat.children[1].op == RtlOp::kReg &&
+          !pat.children[0].flags.in_struct && !pat.children[0].flags.volatil &&
           ExtractStackBaseDispMem(pat.children[0], &base, &off, &sz)) {
         const int src_reg = pat.children[1].RegNo();
         if (src_reg >= 1 && src_reg < kMipsHiRegno && src_reg != kMipsSpRegno &&
             src_reg != kMipsFpRegno && src_reg != kMipsRaRegno &&
+            (src_reg >= kMipsFirstFpr || has_any_call || uses_callee_saved_gpr) &&
             defined_in_block.contains(src_reg)) {
           bool call_or_stack_read = false;
           for (size_t k = i + 1; k < insns.size(); ++k) {
@@ -3197,7 +3249,9 @@ void IdentifySched2CallerSaveAndSpillOffsets(
     }
   }
 
-  int64_t min_caller_save_bucket = (min_prologue_save_off / 8) * 8;
+  const int64_t prologue_bucket = (min_prologue_save_off / 8) * 8;
+  int64_t min_caller_save_bucket = prologue_bucket;
+  int64_t max_caller_save_bucket = -1;
   for (auto& [bk, offs] : bucket_offsets) {
     if (invalidated_buckets.contains(bk) || offs.empty()) {
       continue;
@@ -3219,36 +3273,54 @@ void IdentifySched2CallerSaveAndSpillOffsets(
         caller_save_offsets->insert(o);
       }
       min_caller_save_bucket = std::min(min_caller_save_bucket, bk);
+      max_caller_save_bucket = std::max(max_caller_save_bucket, bk);
     }
   }
 
-  const int64_t min_spill_bucket =
-      ((std::max<int64_t>(0, cfg.sideband.outgoing_args_size) + 7) / 8) * 8;
-  for (int64_t bk = min_caller_save_bucket - 8; bk >= min_spill_bucket; bk -= 8) {
+  auto try_add_spill_bucket = [&](int64_t bk) -> bool {
     if (invalidated_buckets.contains(bk)) {
-      break;
+      return false;
     }
     const auto bit = bucket_offsets.find(bk);
     if (bit == bucket_offsets.end()) {
-      if (!all_saved_gprs_used && !all_saved_fprs_used && !all_saved_gprs_16_23) {
-        break;
-      }
-      continue;
+      return all_saved_gprs_used || all_saved_fprs_used || all_saved_gprs_16_23;
     }
     if (bit->second.size() != 1) {
-      break;
+      return false;
     }
     const int64_t off = bit->second[0];
     const SpOffSummary& sum = off_map.at(off);
     if (!sum.all_reg_moves || sum.n_stores < 1 || sum.n_loads < 1 || off != bk + (8 - sum.sz)) {
-      break;
+      return false;
     }
     const bool is_fp = (sum.mode == RtlMachineMode::kSf || sum.mode == RtlMachineMode::kDf);
     const bool is_di_gpr = (!gp64 && sum.mode == RtlMachineMode::kDi);
     if (is_fp ? !all_saved_fprs_used : (is_di_gpr ? !all_saved_gprs_16_23 : !all_saved_gprs_used)) {
-      break;
+      return false;
     }
     proven_reload_spill_offsets->insert(off);
+    return true;
+  };
+
+  // Zone 1 (`reload1.c:658, 879, 2352`): pre-`setup_save_areas` `alter_reg`
+  // spill slots (`align = -1` -> 8-byte bucket, big-endian `bk + (8 - sz)`).
+  const int64_t min_spill_bucket =
+      ((std::max<int64_t>(0, cfg.sideband.outgoing_args_size) + 7) / 8) * 8;
+  for (int64_t bk = min_caller_save_bucket - 8; bk >= min_spill_bucket; bk -= 8) {
+    if (!try_add_spill_bucket(bk)) {
+      break;
+    }
+  }
+
+  // Zone 3 (`reload1.c:1446, 3499, 2352`): post-`setup_save_areas` reload-loop
+  // `spill_hard_reg` -> `alter_reg` spill slots allocated above the caller-save
+  // region and below the prologue register-save area.
+  if (max_caller_save_bucket >= 0) {
+    for (int64_t bk = max_caller_save_bucket + 8; bk < prologue_bucket; bk += 8) {
+      if (!try_add_spill_bucket(bk)) {
+        break;
+      }
+    }
   }
 }
 
@@ -3467,7 +3539,7 @@ bool NormalizeSpillOutputReloadRegNotesInBlock(
                 dying_pseudo = true;
               }
             }
-            if (dying_pseudo) {
+            if (dying_pseudo && !HasRegDeadNoteFor(insns[pi], scr)) {
               insns[pi].parsed.reg_notes.insert(
                   insns[pi].parsed.reg_notes.begin(),
                   RtlRegNote{
@@ -3531,9 +3603,6 @@ bool CanonicalizeAdjacentSpillInputReloadPairs(
     const RtlControlFlowGraph& cfg, size_t b, bool gp64, bool fp64,
     const absl::flat_hash_set<int64_t>& proven_reload_spill_offsets,
     const absl::flat_hash_set<int>& use_pinned_regs, std::vector<ParsedBlockInsn>* block_ptr) {
-  if (proven_reload_spill_offsets.empty()) {
-    return false;
-  }
   auto& insns = *block_ptr;
   bool changed = false;
   auto extract_spill_load = [&](size_t idx, int64_t* out_off, int* out_reg,
@@ -3586,12 +3655,48 @@ bool CanonicalizeAdjacentSpillInputReloadPairs(
     }
     return true;
   };
+  auto extract_mtc1_load = [&](size_t idx, int* out_reg, RtlMachineMode* out_mode) {
+    const RtlExpr& pat = insns[idx].parsed.pattern;
+    if (!pat.IsSet() || !pat.SetDest().IsHardReg() || pat.SetDest().flags.integrated ||
+        (pat.SetDest().mode != RtlMachineMode::kSf && pat.SetDest().mode != RtlMachineMode::kDf) ||
+        pat.SetDest().RegNo() < 32 || pat.SetDest().RegNo() >= 64 || !pat.SetSrc().IsHardReg() ||
+        pat.SetSrc().mode != pat.SetDest().mode || !insns[idx].parsed.reg_notes.empty() ||
+        use_pinned_regs.contains(pat.SetDest().RegNo())) {
+      return false;
+    }
+    const int src_r = pat.SetSrc().RegNo();
+    if (!((src_r >= 16 && src_r <= 23) || src_r == 30)) {
+      return false;
+    }
+    *out_reg = pat.SetDest().RegNo();
+    *out_mode = pat.SetDest().mode;
+    return true;
+  };
+  auto extract_cd_load = [&](size_t idx, int* out_reg, RtlMachineMode* out_mode) {
+    const RtlExpr& pat = insns[idx].parsed.pattern;
+    if (!pat.IsSet() || !pat.SetDest().IsHardReg() || pat.SetDest().flags.integrated ||
+        (pat.SetDest().mode != RtlMachineMode::kSf && pat.SetDest().mode != RtlMachineMode::kDf) ||
+        pat.SetDest().RegNo() < 32 || pat.SetDest().RegNo() >= 64 ||
+        pat.SetSrc().op != RtlOp::kConstDouble || !insns[idx].parsed.reg_notes.empty() ||
+        use_pinned_regs.contains(pat.SetDest().RegNo())) {
+      return false;
+    }
+    *out_reg = pat.SetDest().RegNo();
+    *out_mode = pat.SetDest().mode;
+    return true;
+  };
   for (size_t i = 0; i + 2 < insns.size(); ++i) {
     int64_t off0 = 0, off1 = 0;
     int r0 = -1, r1 = -1;
     RtlMachineMode m0 = RtlMachineMode::kNone, m1 = RtlMachineMode::kNone;
-    if (!extract_spill_load(i, &off0, &r0, &m0) || !extract_spill_load(i + 1, &off1, &r1, &m1) ||
-        off0 == off1) {
+    const bool both_spill = extract_spill_load(i, &off0, &r0, &m0) &&
+                            extract_spill_load(i + 1, &off1, &r1, &m1) && off0 != off1;
+    const bool both_mtc1 =
+        !both_spill && extract_mtc1_load(i, &r0, &m0) && extract_mtc1_load(i + 1, &r1, &m1);
+    const bool spill_then_cd = !both_spill && !both_mtc1 &&
+                               extract_spill_load(i, &off0, &r0, &m0) &&
+                               extract_cd_load(i + 1, &r1, &m1);
+    if (!both_spill && !both_mtc1 && !spill_then_cd) {
       continue;
     }
     absl::flat_hash_set<int> w0, w1;
@@ -3603,9 +3708,34 @@ bool CanonicalizeAdjacentSpillInputReloadPairs(
     const RtlExpr& cpat = insns[i + 2].parsed.pattern;
     if (IsCallExpr(cpat) || IsJumpOrReturnExpr(cpat) || cpat.op == RtlOp::kUse ||
         cpat.op == RtlOp::kClobber || SetsAreDisjoint(insns[i + 2].read_regs, w0) ||
-        SetsAreDisjoint(insns[i + 2].read_regs, w1) || !is_dead_after(i + 2, w0) ||
-        !is_dead_after(i + 2, w1) || HasStrictInsnOrderHazard(insns[i], insns[i + 1], gp64, fp64)) {
+        SetsAreDisjoint(insns[i + 2].read_regs, w1) ||
+        HasStrictInsnOrderHazard(insns[i], insns[i + 1], gp64, fp64)) {
       continue;
+    }
+    if (spill_then_cd) {
+      // `reload1.c:6239-6300` (`emit_reload_insns`): when a `const_double`
+      // input reload shares `cpat`'s output reload register (`op0`), it is
+      // emitted ahead of a non-output-sharing spill-slot input reload (`op1`).
+      if (!HasRegDeadNoteFor(insns[i + 2], r1) && !SetsAreDisjoint(insns[i + 2].write_regs, w1) &&
+          SetsAreDisjoint(insns[i + 2].write_regs, w0)) {
+        std::swap(insns[i], insns[i + 1]);
+        changed = true;
+      }
+      continue;
+    }
+    if (both_spill) {
+      if (!is_dead_after(i + 2, w0) || !is_dead_after(i + 2, w1)) {
+        continue;
+      }
+    } else {
+      // `reload1.c:6239-6300` (`emit_reload_insns`): adjacent cross-bank `mtc1`
+      // input reloads feeding `cpat` (even when one is inherited into a later
+      // insn) are emitted in left-to-right operand order (`ord0 < ord1`),
+      // unless `w0` is also the output reload register of `cpat`.
+      if (HasRegDeadNoteFor(insns[i + 2], r0) || HasRegDeadNoteFor(insns[i + 2], r1) ||
+          !SetsAreDisjoint(insns[i + 2].write_regs, w0)) {
+        continue;
+      }
     }
     const int ord0 = FirstReadRegPreorderIndex(cpat, w0);
     const int ord1 = FirstReadRegPreorderIndex(cpat, w1);
@@ -4056,6 +4186,1090 @@ bool HoistSched2SunkMdOutputReloadsInBlock(
   return changed;
 }
 
+// Re-adjoins cross-bank `"=f"` FPR->GPR (`mfc1`) output reloads
+// `(set (reg:SF|DF dst_gpr) (reg:SF|DF fpr))` (carrying no `REG_DEAD fpr`,
+// emitted immediately after the producing FP arithmetic insn by
+// `reload1.c:5186-5249, 5641, 6239-6285` `choose_reload_regs` +
+// `emit_reload_insns`) when `sched2` interleaved independent instructions,
+// reload-inheriting pure FP readers, or block-0 prologue callee-save stores
+// (`toplev.c:3103`, `mips.c:expand_prologue`) into the FP latency shadow.
+// Re-adjoins `sched2`-sunk output-reload spill stores `(set [sp/fp+off] r)`
+// back immediately after their producing instruction (`reload1.c:6631`:
+// `emit_reload_insns`). If every intervening blocker in `(prod_idx, i)` is an
+// independent non-`/u` load with no hazard against `[prod_idx, k)`, hoist those
+// loads ahead of `prod_idx` (`sched.c:3144`) so `insns[i]` can re-adjoin
+// without requiring a speculative `/u` flag on the loads.
+template <typename MatchMoveFn, typename DeadAfterFn>
+bool ReadjoinSunkSpillStoresInBlock(const absl::flat_hash_set<int64_t>& proven_reload_spill_offsets,
+                                    const absl::flat_hash_set<int>& use_pinned_regs,
+                                    const MatchMoveFn& match_sp_off_reg_move,
+                                    const DeadAfterFn& is_dead_after_consumer, bool gp64, bool fp64,
+                                    std::vector<ParsedBlockInsn>* insns_ptr) {
+  if (proven_reload_spill_offsets.empty()) {
+    return false;
+  }
+  auto& insns = *insns_ptr;
+  bool modified = false;
+  for (size_t i = 2; i < insns.size(); ++i) {
+    int64_t off = 0;
+    int src_r = -1;
+    if (!match_sp_off_reg_move(insns[i], /*want_store=*/true, &off, &src_r) ||
+        !proven_reload_spill_offsets.contains(off) || src_r < 2 || src_r >= 64 ||
+        use_pinned_regs.contains(src_r)) {
+      continue;
+    }
+    bool has_dead_note = false;
+    for (const RtlRegNote& n : insns[i].parsed.reg_notes) {
+      if (n.kind == RtlMachineMode::kRegDead && n.datum.op == RtlOp::kReg &&
+          n.datum.RegNo() == src_r) {
+        has_dead_note = true;
+        break;
+      }
+    }
+    if (has_dead_note) {
+      continue;
+    }
+    const RtlMachineMode rel_mode = insns[i].parsed.pattern.SetSrc().mode;
+    absl::flat_hash_set<int> rel_words;
+    InsertRegSpan(src_r, rel_mode, gp64, fp64, &rel_words);
+    size_t prod_idx = insns.size();
+    bool valid_prod = true;
+    bool saw_read_between = false;
+    for (size_t rev = i; rev > 0; --rev) {
+      const size_t k = rev - 1;
+      if (!SetsAreDisjoint(insns[k].write_regs, rel_words)) {
+        prod_idx = k;
+        break;
+      }
+      if (!SetsAreDisjoint(insns[k].read_regs, rel_words)) {
+        saw_read_between = true;
+      }
+      if (IsCallExpr(insns[k].parsed.pattern) || IsJumpOrReturnExpr(insns[k].parsed.pattern)) {
+        valid_prod = false;
+        break;
+      }
+    }
+    if (!valid_prod || prod_idx >= insns.size() || prod_idx + 1 >= i) {
+      continue;
+    }
+    const RtlExpr& ppat = insns[prod_idx].parsed.pattern;
+    if (!ppat.IsSet() || ppat.SetSrc().IsReg() || IsCallExpr(ppat) || IsJumpOrReturnExpr(ppat)) {
+      continue;
+    }
+
+    bool can_hoist_store = true;
+    std::vector<size_t> hoistable_loads;
+    for (size_t k = prod_idx + 1; k < i && can_hoist_store; ++k) {
+      if (!HasStrictInsnOrderHazard(insns[k], insns[i], gp64, fp64)) {
+        continue;
+      }
+      const RtlExpr& kpat = insns[k].parsed.pattern;
+      if (!insns[k].reads_mem || insns[k].writes_mem || insns[k].has_side_effects ||
+          !kpat.IsSet() || !kpat.SetSrc().IsMem() || kpat.SetSrc().flags.unchanging) {
+        can_hoist_store = false;
+        break;
+      }
+      bool can_hoist_before_prod = true;
+      for (size_t j = prod_idx; j < k; ++j) {
+        if (HasStrictInsnOrderHazard(insns[j], insns[k], gp64, fp64)) {
+          can_hoist_before_prod = false;
+          break;
+        }
+      }
+      if (!can_hoist_before_prod) {
+        can_hoist_store = false;
+        break;
+      }
+      hoistable_loads.push_back(k);
+    }
+    if (can_hoist_store) {
+      size_t cur_prod = prod_idx;
+      for (size_t k : hoistable_loads) {
+        std::rotate(insns.begin() + static_cast<ptrdiff_t>(cur_prod),
+                    insns.begin() + static_cast<ptrdiff_t>(k),
+                    insns.begin() + static_cast<ptrdiff_t>(k + 1));
+        ++cur_prod;
+      }
+      std::rotate(insns.begin() + static_cast<ptrdiff_t>(cur_prod + 1),
+                  insns.begin() + static_cast<ptrdiff_t>(i),
+                  insns.begin() + static_cast<ptrdiff_t>(i + 1));
+      modified = true;
+      continue;
+    }
+
+    bool can_sink_prod = !saw_read_between && is_dead_after_consumer(i, rel_words) &&
+                         !insns[prod_idx].reads_mem && !insns[prod_idx].writes_mem;
+    for (size_t k = prod_idx + 1; k < i && can_sink_prod; ++k) {
+      if (HasStrictInsnOrderHazard(insns[prod_idx], insns[k], gp64, fp64)) {
+        can_sink_prod = false;
+      }
+    }
+    if (can_sink_prod) {
+      std::rotate(insns.begin() + static_cast<ptrdiff_t>(prod_idx),
+                  insns.begin() + static_cast<ptrdiff_t>(prod_idx + 1),
+                  insns.begin() + static_cast<ptrdiff_t>(i));
+      modified = true;
+    }
+  }
+  return modified;
+}
+
+template <typename DeadAfterFn>
+bool ReadjoinCrossBankFprOutputReloads(const absl::flat_hash_set<int>& use_pinned_regs,
+                                       const DeadAfterFn& is_dead_after_consumer,
+                                       int b0_min_prologue_save_off,
+                                       const absl::flat_hash_set<int64_t>& caller_save_offsets,
+                                       const absl::flat_hash_set<int64_t>& proven_reload_spill_offs,
+                                       bool gp64, bool fp64,
+                                       std::vector<ParsedBlockInsn>* insns_ptr) {
+  auto& insns = *insns_ptr;
+  bool modified = false;
+  for (size_t i = 2; i < insns.size(); ++i) {
+    const RtlExpr& mv = insns[i].parsed.pattern;
+    if (!mv.IsSet() || mv.children.size() != 2 || !mv.SetDest().IsHardReg() ||
+        mv.SetDest().flags.integrated || !mv.SetSrc().IsHardReg() ||
+        mv.SetSrc().mode != mv.SetDest().mode ||
+        (mv.SetDest().mode != RtlMachineMode::kSf && mv.SetDest().mode != RtlMachineMode::kDf)) {
+      continue;
+    }
+    const int dst_gpr = mv.SetDest().RegNo();
+    const int src_fpr = mv.SetSrc().RegNo();
+    if (dst_gpr < 2 || dst_gpr >= 32 || src_fpr < 32 || src_fpr >= 64) {
+      continue;
+    }
+    bool has_dead_or_equiv = false;
+    for (const RtlRegNote& n : insns[i].parsed.reg_notes) {
+      if (n.kind == RtlMachineMode::kRegEquiv || n.kind == RtlMachineMode::kRegEqual ||
+          (n.kind == RtlMachineMode::kRegDead && n.datum.op == RtlOp::kReg &&
+           n.datum.RegNo() == src_fpr)) {
+        has_dead_or_equiv = true;
+        break;
+      }
+    }
+    if (has_dead_or_equiv) {
+      continue;
+    }
+    absl::flat_hash_set<int> fpr_words;
+    InsertRegSpan(src_fpr, mv.SetSrc().mode, gp64, fp64, &fpr_words);
+    if (!is_dead_after_consumer(i, fpr_words)) {
+      continue;
+    }
+    absl::flat_hash_set<int> dst_words;
+    InsertRegSpan(dst_gpr, mv.SetDest().mode, gp64, fp64, &dst_words);
+    size_t prod_idx = insns.size();
+    bool valid_prod = true;
+    for (size_t rev = i; rev > 0; --rev) {
+      const size_t k = rev - 1;
+      if (!SetsAreDisjoint(insns[k].write_regs, fpr_words)) {
+        prod_idx = k;
+        break;
+      }
+      if (IsCallExpr(insns[k].parsed.pattern) || IsJumpOrReturnExpr(insns[k].parsed.pattern)) {
+        valid_prod = false;
+        break;
+      }
+      if (!SetsAreDisjoint(insns[k].read_regs, fpr_words)) {
+        const RtlExpr& kpat = insns[k].parsed.pattern;
+        const bool is_inherited_fp_reader =
+            kpat.IsSet() && kpat.children.size() == 2 && kpat.SetSrc().op != RtlOp::kReg &&
+            kpat.SetSrc().op != RtlOp::kMem && kpat.SetSrc().op != RtlOp::kConstDouble &&
+            !HasRegDeadNoteFor(insns[k], src_fpr);
+        if (!is_inherited_fp_reader) {
+          valid_prod = false;
+          break;
+        }
+      }
+    }
+    if (!valid_prod || prod_idx >= insns.size() || prod_idx + 1 >= i) {
+      continue;
+    }
+    const RtlExpr& ppat = insns[prod_idx].parsed.pattern;
+    if (!ppat.IsSet() || !ppat.SetDest().IsHardReg() || ppat.SetDest().flags.integrated ||
+        ppat.SetDest().RegNo() != src_fpr || ppat.SetDest().mode != mv.SetSrc().mode ||
+        ppat.SetSrc().IsReg() || ppat.SetSrc().op == RtlOp::kMem ||
+        ppat.SetSrc().op == RtlOp::kConstDouble || IsCallExpr(ppat) || IsJumpOrReturnExpr(ppat)) {
+      continue;
+    }
+    bool can_hoist_mv = true;
+    std::vector<std::pair<size_t, int64_t>> blocking_prologue_saves;
+    auto is_b0_prologue_gpr_save = [&](size_t idx, int* saved_r_out, int64_t* off_out) {
+      if (b0_min_prologue_save_off <= 0) {
+        return false;
+      }
+      const RtlExpr& kpat = insns[idx].parsed.pattern;
+      int kbase = -1;
+      int64_t koff = 0, ksz = 0;
+      if (!kpat.IsSet() || kpat.children.size() != 2 || !kpat.SetSrc().IsHardReg() ||
+          kpat.SetSrc().flags.integrated) {
+        return false;
+      }
+      const int saved_r = kpat.SetSrc().RegNo();
+      if (!((saved_r >= 16 && saved_r <= 23) || saved_r == 30 || saved_r == kMipsRaRegno)) {
+        return false;
+      }
+      if (!ExtractStackBaseDispMem(kpat.SetDest(), &kbase, &koff, &ksz) || kbase != kMipsSpRegno ||
+          koff < b0_min_prologue_save_off || caller_save_offsets.contains(koff) ||
+          proven_reload_spill_offs.contains(koff)) {
+        return false;
+      }
+      for (size_t m = 0; m < idx; ++m) {
+        if (insns[m].write_regs.contains(saved_r)) {
+          return false;
+        }
+      }
+      *saved_r_out = saved_r;
+      *off_out = koff;
+      return true;
+    };
+    for (size_t k = prod_idx + 1; k < i && can_hoist_mv; ++k) {
+      if (!HasStrictInsnOrderHazard(insns[k], insns[i], gp64, fp64)) {
+        continue;
+      }
+      int saved_r = -1;
+      int64_t koff = 0;
+      bool is_hoistable_prologue_save = false;
+      if (is_b0_prologue_gpr_save(k, &saved_r, &koff) && dst_words.contains(saved_r)) {
+        bool save_hazard = false;
+        for (size_t m = prod_idx; m < k && !save_hazard; ++m) {
+          if (HasStrictInsnOrderHazard(insns[m], insns[k], gp64, fp64)) {
+            save_hazard = true;
+          }
+        }
+        is_hoistable_prologue_save = !save_hazard;
+      }
+      if (is_hoistable_prologue_save) {
+        blocking_prologue_saves.emplace_back(k, koff);
+      } else {
+        can_hoist_mv = false;
+      }
+    }
+    if (can_hoist_mv) {
+      // Preserve `mips.c:expand_prologue` descending-offset GPR save order
+      // (e.g. `sw $ra` ahead of `sw $s2`, `sw $s1`, `sw $s0`) when hoisting a
+      // blocking prologue save ahead of `prod_idx`.
+      std::vector<size_t> prologue_saves_to_hoist;
+      if (!blocking_prologue_saves.empty()) {
+        int64_t min_hoisted_off = blocking_prologue_saves[0].second;
+        size_t max_hoisted_idx = blocking_prologue_saves[0].first;
+        for (const auto& [ps_idx, ps_off] : blocking_prologue_saves) {
+          min_hoisted_off = std::min(min_hoisted_off, ps_off);
+          max_hoisted_idx = std::max(max_hoisted_idx, ps_idx);
+        }
+        for (size_t m = prod_idx + 1; m <= max_hoisted_idx; ++m) {
+          int sr = -1;
+          int64_t moff = 0;
+          if (!is_b0_prologue_gpr_save(m, &sr, &moff)) {
+            continue;
+          }
+          const bool is_blocking =
+              std::any_of(blocking_prologue_saves.begin(), blocking_prologue_saves.end(),
+                          [&](const auto& p) { return p.first == m; });
+          if (is_blocking) {
+            prologue_saves_to_hoist.push_back(m);
+          } else if (moff > min_hoisted_off) {
+            bool m_hazard = false;
+            for (size_t j = prod_idx; j < m && !m_hazard; ++j) {
+              if (HasStrictInsnOrderHazard(insns[j], insns[m], gp64, fp64)) {
+                m_hazard = true;
+              }
+            }
+            if (!m_hazard) {
+              prologue_saves_to_hoist.push_back(m);
+            }
+          }
+        }
+      }
+      size_t cur_prod = prod_idx;
+      for (size_t ps_idx : prologue_saves_to_hoist) {
+        std::rotate(insns.begin() + static_cast<ptrdiff_t>(cur_prod),
+                    insns.begin() + static_cast<ptrdiff_t>(ps_idx),
+                    insns.begin() + static_cast<ptrdiff_t>(ps_idx + 1));
+        ++cur_prod;
+      }
+      std::rotate(insns.begin() + static_cast<ptrdiff_t>(cur_prod + 1),
+                  insns.begin() + static_cast<ptrdiff_t>(i),
+                  insns.begin() + static_cast<ptrdiff_t>(i + 1));
+      modified = true;
+    }
+  }
+  return modified;
+}
+
+// Mirrors `reload1.c:702, 2229, 4758-4767` (`allocate_reload_reg`): `reload`
+// initializes `last_spill_reg = -1` and advances round-robin through
+// `spill_regs[]` (which orders tied call-used FP spill regs in ascending regno
+// order on MIPS). When `sched2` schedules two independent cross-bank FP reload
+// groups `[g1_start, g1_end)` (using `r1`) and `[g2_start, g2_end)` (using
+// `r2`) out of round-robin order (`r2 < r1`) before either spill reg has been
+// used earlier in the function, rotate `G2` ahead of `G1` when no strict order
+// hazard prevents it.
+bool RestoreRoundRobinFpReloadGroupOrder(bool gp64, bool fp64,
+                                         absl::flat_hash_set<int>* ever_used_fprs,
+                                         std::vector<ParsedBlockInsn>* insns_ptr) {
+  auto& insns = *insns_ptr;
+  auto match_cross_bank_fp_out_mv = [](const ParsedBlockInsn& insn, int* out_fpr) {
+    const RtlExpr& mv = insn.parsed.pattern;
+    if (!mv.IsSet() || mv.children.size() != 2 || !mv.SetDest().IsHardReg() ||
+        mv.SetDest().flags.integrated || !mv.SetSrc().IsHardReg() ||
+        mv.SetSrc().mode != mv.SetDest().mode ||
+        (mv.SetDest().mode != RtlMachineMode::kSf && mv.SetDest().mode != RtlMachineMode::kDf)) {
+      return false;
+    }
+    const int dst_gpr = mv.SetDest().RegNo();
+    const int src_fpr = mv.SetSrc().RegNo();
+    if (dst_gpr < 2 || dst_gpr >= 32 || src_fpr < 32 || src_fpr >= 52 ||
+        HasRegDeadNoteFor(insn, src_fpr)) {
+      return false;
+    }
+    *out_fpr = src_fpr;
+    return true;
+  };
+  auto is_cross_bank_fp_in_mv = [](const ParsedBlockInsn& insn, int fpr) {
+    const RtlExpr& mv = insn.parsed.pattern;
+    if (!mv.IsSet() || mv.children.size() != 2 || !mv.SetDest().IsHardReg() ||
+        mv.SetDest().flags.integrated || mv.SetDest().RegNo() != fpr || !mv.SetSrc().IsHardReg() ||
+        mv.SetSrc().mode != mv.SetDest().mode) {
+      return false;
+    }
+    const int src_gpr = mv.SetSrc().RegNo();
+    return src_gpr >= 2 && src_gpr < 32;
+  };
+  struct FpReloadGroup {
+    size_t start = 0;
+    size_t end = 0;
+    int fpr = -1;
+  };
+  auto is_any_prologue_gpr_save = [](const ParsedBlockInsn& insn, int* out_gpr = nullptr) {
+    const RtlExpr& pat = insn.parsed.pattern;
+    if (!pat.IsSet() || !pat.SetSrc().IsHardReg()) {
+      return false;
+    }
+    const int gpr = pat.SetSrc().RegNo();
+    if (!((gpr >= 16 && gpr <= 23) || gpr == 30)) {
+      return false;
+    }
+    int sbase = -1;
+    int64_t soff = 0;
+    int64_t ssz = 0;
+    if (!ExtractStackBaseDispMem(pat.SetDest(), &sbase, &soff, &ssz) || sbase != kMipsSpRegno) {
+      return false;
+    }
+    if (out_gpr != nullptr) {
+      *out_gpr = gpr;
+    }
+    return true;
+  };
+  auto find_group_at_out_mv = [&](size_t out_idx, FpReloadGroup* out_group) {
+    int fpr = -1;
+    if (out_idx == 0 || !match_cross_bank_fp_out_mv(insns[out_idx], &fpr)) {
+      return false;
+    }
+    size_t prod_idx = out_idx - 1;
+    while (prod_idx > 0 && is_any_prologue_gpr_save(insns[prod_idx])) {
+      --prod_idx;
+    }
+    const RtlExpr& prod = insns[prod_idx].parsed.pattern;
+    if (!prod.IsSet() || !prod.SetDest().IsHardReg() || prod.SetDest().flags.integrated ||
+        prod.SetDest().RegNo() != fpr || prod.SetSrc().IsReg() || prod.SetSrc().op == RtlOp::kMem ||
+        prod.SetSrc().op == RtlOp::kConstDouble || IsCallExpr(prod) || IsJumpOrReturnExpr(prod)) {
+      return false;
+    }
+    size_t start = prod_idx;
+    size_t scan = prod_idx;
+    while (scan > 0) {
+      if (is_cross_bank_fp_in_mv(insns[scan - 1], fpr)) {
+        --scan;
+        start = scan;
+      } else if (is_any_prologue_gpr_save(insns[scan - 1])) {
+        --scan;
+      } else {
+        break;
+      }
+    }
+    out_group->start = start;
+    out_group->end = out_idx + 1;
+    out_group->fpr = fpr;
+    return true;
+  };
+
+  bool modified = false;
+  std::vector<FpReloadGroup> groups;
+  for (size_t i = 1; i < insns.size(); ++i) {
+    FpReloadGroup g;
+    if (find_group_at_out_mv(i, &g)) {
+      if (groups.empty() || g.start >= groups.back().end) {
+        groups.push_back(g);
+      }
+    }
+  }
+  absl::flat_hash_set<int> used_before = *ever_used_fprs;
+  size_t scan_pos = 0;
+  for (size_t gi = 0; gi + 1 < groups.size(); ++gi) {
+    while (scan_pos < groups[gi].start) {
+      for (int r : insns[scan_pos].read_regs) {
+        if (r >= 32 && r < 64) used_before.insert(r);
+      }
+      for (int r : insns[scan_pos].write_regs) {
+        if (r >= 32 && r < 64) used_before.insert(r);
+      }
+      ++scan_pos;
+    }
+    const FpReloadGroup& g1 = groups[gi];
+    const FpReloadGroup& g2 = groups[gi + 1];
+    if (g2.fpr >= g1.fpr || used_before.contains(g1.fpr) || used_before.contains(g2.fpr)) {
+      continue;
+    }
+    const int g2_out_gpr = insns[g2.end - 1].parsed.pattern.SetDest().RegNo();
+    bool has_hazard = false;
+    std::vector<size_t> hoistable_saves;
+    for (size_t a = g1.start; a < g2.start && !has_hazard; ++a) {
+      bool conflicts_g2 = false;
+      for (size_t b = g2.start; b < g2.end; ++b) {
+        if (HasStrictInsnOrderHazard(insns[a], insns[b], gp64, fp64)) {
+          conflicts_g2 = true;
+          break;
+        }
+      }
+      if (!conflicts_g2) {
+        continue;
+      }
+      // A `B0` prologue save `(set (mem:SI (+ sp off)) (reg:SI g2_out_gpr))`
+      // interleaved inside `[g1.start, g2.start)` can be hoisted ahead of `G1`
+      // before rotating `G2` ahead of `G1` when it has no hazard against
+      // `[g1.start, a)`.
+      int saved_gpr = -1;
+      const bool is_g2_prologue_save =
+          is_any_prologue_gpr_save(insns[a], &saved_gpr) && saved_gpr == g2_out_gpr;
+      bool can_hoist_save = is_g2_prologue_save;
+      for (size_t m = g1.start; m < a && can_hoist_save; ++m) {
+        if (HasStrictInsnOrderHazard(insns[m], insns[a], gp64, fp64)) {
+          can_hoist_save = false;
+        }
+      }
+      if (can_hoist_save) {
+        hoistable_saves.push_back(a);
+      } else {
+        has_hazard = true;
+      }
+    }
+    if (!has_hazard) {
+      size_t cur_g1_start = g1.start;
+      for (size_t s_idx : hoistable_saves) {
+        std::rotate(insns.begin() + static_cast<ptrdiff_t>(cur_g1_start),
+                    insns.begin() + static_cast<ptrdiff_t>(s_idx),
+                    insns.begin() + static_cast<ptrdiff_t>(s_idx + 1));
+        ++cur_g1_start;
+      }
+      std::rotate(insns.begin() + static_cast<ptrdiff_t>(cur_g1_start),
+                  insns.begin() + static_cast<ptrdiff_t>(g2.start),
+                  insns.begin() + static_cast<ptrdiff_t>(g2.end));
+      modified = true;
+      break;
+    }
+  }
+  for (const ParsedBlockInsn& insn : insns) {
+    for (int r : insn.read_regs) {
+      if (r >= 32 && r < 64) ever_used_fprs->insert(r);
+    }
+    for (int r : insn.write_regs) {
+      if (r >= 32 && r < 64) ever_used_fprs->insert(r);
+    }
+  }
+  return modified;
+}
+
+// Collects `FP_REGS` hard registers proven to act as `reload` spill registers
+// in block `b` (`reload1.c:3445-3508` `spill_hard_reg`), via either a
+// `proven_reload_spill_offsets` FP load/store or a cross-bank `mtc1`/`mfc1`
+// reload in `insns`, excluding any FPR live-in or live-out of block `b`.
+absl::flat_hash_set<int> CollectBlockProvenFpSpillRegs(
+    const RtlControlFlowGraph& cfg, size_t b, const std::vector<ParsedBlockInsn>& insns,
+    const absl::flat_hash_set<int64_t>& proven_reload_spill_offsets,
+    const absl::flat_hash_set<int>& use_pinned_regs, bool gp64, bool fp64) {
+  absl::flat_hash_set<int> live_boundary;
+  if (auto it = cfg.sideband.basic_block_live_at_start.find(static_cast<int>(b));
+      it != cfg.sideband.basic_block_live_at_start.end()) {
+    live_boundary.insert(it->second.begin(), it->second.end());
+  }
+  for (size_t succ : cfg.rpo_blocks[b].successors) {
+    if (auto it = cfg.sideband.basic_block_live_at_start.find(static_cast<int>(succ));
+        it != cfg.sideband.basic_block_live_at_start.end()) {
+      live_boundary.insert(it->second.begin(), it->second.end());
+    }
+  }
+  if (cfg.rpo_blocks[b].successors.empty()) {
+    live_boundary.insert(32);
+    live_boundary.insert(33);
+  }
+  const int expected_base = cfg.sideband.frame_pointer_needed ? kMipsFpRegno : kMipsSpRegno;
+  absl::flat_hash_set<int> proven;
+  auto maybe_add = [&](int r, RtlMachineMode mode) {
+    if (r < 32 || r >= 64 || use_pinned_regs.contains(r)) {
+      return;
+    }
+    absl::flat_hash_set<int> words;
+    InsertRegSpan(r, mode, gp64, fp64, &words);
+    if (SetsAreDisjoint(words, live_boundary)) {
+      proven.insert(r);
+    }
+  };
+  for (const ParsedBlockInsn& insn : insns) {
+    const RtlExpr& pat = insn.parsed.pattern;
+    if (!pat.IsSet() || pat.children.size() != 2) {
+      continue;
+    }
+    const RtlExpr& dst = pat.SetDest();
+    const RtlExpr& src = pat.SetSrc();
+    int base = -1;
+    int64_t off = 0, sz = 0;
+    if (dst.IsHardReg() && !dst.flags.integrated && dst.RegNo() >= 32 && dst.RegNo() < 64 &&
+        (dst.mode == RtlMachineMode::kSf || dst.mode == RtlMachineMode::kDf)) {
+      if (src.IsHardReg() && src.mode == dst.mode &&
+          ((src.RegNo() >= 16 && src.RegNo() <= 23) || src.RegNo() == 30)) {
+        maybe_add(dst.RegNo(), dst.mode);
+      } else if (ExtractStackBaseDispMem(src, &base, &off, &sz) && base == expected_base &&
+                 proven_reload_spill_offsets.contains(off)) {
+        maybe_add(dst.RegNo(), dst.mode);
+      }
+    } else if (src.IsHardReg() && !src.flags.integrated && src.RegNo() >= 32 && src.RegNo() < 64 &&
+               (src.mode == RtlMachineMode::kSf || src.mode == RtlMachineMode::kDf)) {
+      // Do NOT add `src` from a stack spill store alone: `reload1.c:4712` may
+      // reuse a dying allocated pseudo's hard register for an output reload
+      // without spilling `src` via `spill_hard_reg`.
+      if (dst.IsHardReg() && !dst.flags.integrated && dst.mode == src.mode &&
+          ((dst.RegNo() >= 16 && dst.RegNo() <= 23) || dst.RegNo() == 30) &&
+          !HasRegDeadNoteFor(insn, src.RegNo())) {
+        maybe_add(src.RegNo(), src.mode);
+      }
+    }
+  }
+  return proven;
+}
+
+// Mirrors `reload1.c:4758-4767` (`choose_reload_regs`: `i = (last_spill_reg + 1) % n_spills`):
+// when a block uses exactly two proven `FP_REGS` spill registers `{r_a, r_b}`
+// and `sched2` reordered two independent single-spill-reg reload groups
+// `G1, G2` so that `G1.fpr == prev_fpr` and `G2.fpr != prev_fpr` (breaking strict
+// 2-register round-robin alternation), try rotating `G2` (with its minimal
+// backward dependency closure inside `[G1.end, G2.end)`) ahead of `G1` when
+// verified against exact `kSched2` forward replay.
+template <typename VerifyFn>
+bool RestoreRoundRobinTwoRegFpSpillOrder(const RtlControlFlowGraph& cfg, size_t b, bool gp64,
+                                         bool fp64,
+                                         const absl::flat_hash_set<int64_t>& proven_spill_offsets,
+                                         const VerifyFn& verify_cand,
+                                         std::vector<ParsedBlockInsn>* insns_ptr) {
+  auto& insns = *insns_ptr;
+  if (insns.size() < 4) {
+    return false;
+  }
+  absl::flat_hash_set<int> use_pinned_regs;
+  for (const ParsedBlockInsn& insn : insns) {
+    if (insn.parsed.pattern.op == RtlOp::kUse && insn.parsed.pattern.children.size() == 1 &&
+        insn.parsed.pattern.children[0].IsHardReg()) {
+      use_pinned_regs.insert(insn.parsed.pattern.children[0].RegNo());
+    }
+  }
+  const absl::flat_hash_set<int> fp_spills = CollectBlockProvenFpSpillRegs(
+      cfg, b, insns, proven_spill_offsets, use_pinned_regs, gp64, fp64);
+  if (fp_spills.size() != 2) {
+    return false;
+  }
+  const int expected_base = cfg.sideband.frame_pointer_needed ? kMipsFpRegno : kMipsSpRegno;
+  auto match_in_reload = [&](const ParsedBlockInsn& insn) -> int {
+    const RtlExpr& pat = insn.parsed.pattern;
+    if (!pat.IsSet() || !pat.SetDest().IsHardReg() || pat.SetDest().flags.integrated) {
+      return -1;
+    }
+    const int r = pat.SetDest().RegNo();
+    if (!fp_spills.contains(r)) {
+      return -1;
+    }
+    const RtlExpr& src = pat.SetSrc();
+    if (src.op == RtlOp::kConstDouble) {
+      return r;
+    }
+    if (src.IsHardReg() && src.RegNo() >= 2 && src.RegNo() < 32 && src.mode == pat.SetDest().mode) {
+      return r;
+    }
+    int base = -1;
+    int64_t off = 0, sz = 0;
+    if (ExtractStackBaseDispMem(src, &base, &off, &sz) && base == expected_base &&
+        proven_spill_offsets.contains(off)) {
+      return r;
+    }
+    return -1;
+  };
+  auto match_out_reload = [&](const ParsedBlockInsn& insn) -> int {
+    const RtlExpr& pat = insn.parsed.pattern;
+    if (!pat.IsSet() || !pat.SetSrc().IsHardReg() || pat.SetSrc().flags.integrated) {
+      return -1;
+    }
+    const int r = pat.SetSrc().RegNo();
+    if (!fp_spills.contains(r) || HasRegDeadNoteFor(insn, r)) {
+      return -1;
+    }
+    const RtlExpr& dst = pat.SetDest();
+    if (dst.IsHardReg() && dst.RegNo() >= 2 && dst.RegNo() < 32 && dst.mode == pat.SetSrc().mode) {
+      return r;
+    }
+    int base = -1;
+    int64_t off = 0, sz = 0;
+    if (ExtractStackBaseDispMem(dst, &base, &off, &sz) && base == expected_base &&
+        proven_spill_offsets.contains(off)) {
+      return r;
+    }
+    return -1;
+  };
+  auto touched_spill_regs = [&](const ParsedBlockInsn& insn) {
+    absl::flat_hash_set<int> s;
+    for (int r : fp_spills) {
+      if (insn.read_regs.contains(r) || insn.write_regs.contains(r)) {
+        s.insert(r);
+      }
+    }
+    return s;
+  };
+
+  struct ReloadGroup {
+    size_t start = 0;
+    size_t end = 0;
+    int fpr = -1;  // >= 0 iff single-spill-reg group; -2 if multi-spill-reg barrier.
+    int first_in_fpr = -1;
+    int last_out_fpr = -1;
+  };
+
+  bool any_modified = false;
+  for (int iter = 0; iter < 16; ++iter) {
+    std::vector<ReloadGroup> groups;
+    size_t idx = 0;
+    while (idx < insns.size()) {
+      if (IsCallExpr(insns[idx].parsed.pattern) || IsJumpOrReturnExpr(insns[idx].parsed.pattern)) {
+        groups.push_back(ReloadGroup{.start = idx, .end = idx + 1, .fpr = -2});
+        ++idx;
+        continue;
+      }
+      const int in_r = match_in_reload(insns[idx]);
+      if (in_r >= 0) {
+        size_t g_start = idx;
+        absl::flat_hash_set<int> used_regs;
+        used_regs.insert(in_r);
+        int first_r = in_r;
+        int last_r = in_r;
+        size_t cur = idx + 1;
+        while (cur < insns.size()) {
+          const int next_in = match_in_reload(insns[cur]);
+          if (next_in < 0 || used_regs.contains(next_in)) {
+            break;
+          }
+          used_regs.insert(next_in);
+          last_r = next_in;
+          ++cur;
+        }
+        if (cur < insns.size() && !IsCallExpr(insns[cur].parsed.pattern) &&
+            !IsJumpOrReturnExpr(insns[cur].parsed.pattern)) {
+          const size_t cons_pos = cur;
+          const auto c_regs = touched_spill_regs(insns[cons_pos]);
+          if (!c_regs.empty()) {
+            for (int r : c_regs) used_regs.insert(r);
+            int last_alloc_r = last_r;
+            if (used_regs.size() == 2) {
+              // `reload1.c:4758-4860`: for a 2-spill-reg consumer insn, `op1`
+              // is allocated before `op2`, so `last_spill_reg` ends on the
+              // spill reg with the larger left-to-right operand read index
+              // even if `emit_reload_insns` emitted an output-sharing `op2`
+              // reload ahead of `op1`.
+              int best_ord = -1;
+              for (int r : used_regs) {
+                absl::flat_hash_set<int> rw;
+                InsertRegSpan(r, RtlMachineMode::kSf, gp64, fp64, &rw);
+                const int ord = FirstReadRegPreorderIndex(insns[cons_pos].parsed.pattern, rw);
+                if (ord > best_ord) {
+                  best_ord = ord;
+                  last_alloc_r = r;
+                }
+              }
+            }
+            ++cur;
+            if (cur < insns.size()) {
+              const int out_r = match_out_reload(insns[cur]);
+              if (out_r >= 0 && used_regs.contains(out_r)) {
+                ++cur;
+              }
+            }
+            // Include any immediately following pure consumer inheriting a
+            // spill reg loaded by this 2-reg group (`reload1.c:5186-5258`).
+            while (used_regs.size() == 2 && cur < insns.size() && match_in_reload(insns[cur]) < 0 &&
+                   match_out_reload(insns[cur]) < 0 && !IsCallExpr(insns[cur].parsed.pattern) &&
+                   !IsJumpOrReturnExpr(insns[cur].parsed.pattern)) {
+              const auto next_t = touched_spill_regs(insns[cur]);
+              if (next_t.size() == 1 && used_regs.contains(*next_t.begin()) &&
+                  !insns[cur].write_regs.contains(*next_t.begin())) {
+                ++cur;
+              } else {
+                break;
+              }
+            }
+            groups.push_back(ReloadGroup{
+                .start = g_start,
+                .end = cur,
+                .fpr = (used_regs.size() == 1) ? *used_regs.begin() : -2,
+                .first_in_fpr = first_r,
+                .last_out_fpr = (used_regs.size() == 1) ? *used_regs.begin() : last_alloc_r,
+            });
+            idx = cur;
+            continue;
+          }
+        }
+        idx = g_start + 1;
+        continue;
+      }
+      const auto t_regs = touched_spill_regs(insns[idx]);
+      if (!t_regs.empty()) {
+        size_t g_start = idx;
+        size_t cur = idx + 1;
+        absl::flat_hash_set<int> used_regs = t_regs;
+        if (cur < insns.size()) {
+          const int out_r = match_out_reload(insns[cur]);
+          if (out_r >= 0 && used_regs.contains(out_r)) {
+            ++cur;
+          }
+        }
+        groups.push_back(ReloadGroup{
+            .start = g_start,
+            .end = cur,
+            .fpr = (used_regs.size() == 1) ? *used_regs.begin() : -2,
+            .first_in_fpr = (used_regs.size() == 1) ? *used_regs.begin() : -1,
+            .last_out_fpr = (used_regs.size() == 1) ? *used_regs.begin() : -1,
+        });
+        idx = cur;
+        continue;
+      }
+      ++idx;
+    }
+
+    bool applied = false;
+    int prev_fpr = -1;
+    for (size_t gi = 0; gi < groups.size(); ++gi) {
+      const ReloadGroup& g1 = groups[gi];
+      // `reload1.c:4758-4767, 5186-5258`: if a 2-reg group
+      // `[in0(r0), in1(r1), cons, inh_cons]` has `r0 == prev_fpr`, `r1 != prev_fpr`,
+      // and `inh_cons` only reads `r1` (inheriting `r1`), un-swap to
+      // `[in1(r1), inh_cons, in0(r0), cons]` when verified against exact `kSched2`.
+      if (g1.fpr == -2 && prev_fpr >= 0 && g1.first_in_fpr == prev_fpr && g1.end - g1.start == 4) {
+        const int r0 = match_in_reload(insns[g1.start]);
+        const int r1 = match_in_reload(insns[g1.start + 1]);
+        const auto inh_regs = touched_spill_regs(insns[g1.start + 3]);
+        if (r0 == prev_fpr && r1 >= 0 && r1 != prev_fpr && inh_regs.size() == 1 &&
+            inh_regs.contains(r1) && !insns[g1.start + 3].write_regs.contains(r1) &&
+            !HasStrictInsnOrderHazard(insns[g1.start], insns[g1.start + 1], gp64, fp64) &&
+            !HasStrictInsnOrderHazard(insns[g1.start], insns[g1.start + 3], gp64, fp64) &&
+            !HasStrictInsnOrderHazard(insns[g1.start + 2], insns[g1.start + 3], gp64, fp64)) {
+          std::vector<ParsedBlockInsn> cand = insns;
+          cand[g1.start] = insns[g1.start + 1];
+          cand[g1.start + 1] = insns[g1.start + 3];
+          cand[g1.start + 2] = insns[g1.start];
+          cand[g1.start + 3] = insns[g1.start + 2];
+          if (verify_cand(cand)) {
+            insns = std::move(cand);
+            any_modified = true;
+            applied = true;
+            break;
+          }
+        }
+      }
+      if (g1.fpr < 0) {
+        prev_fpr = g1.last_out_fpr;
+        continue;
+      }
+      if (gi + 1 >= groups.size()) {
+        break;
+      }
+      const ReloadGroup& g2 = groups[gi + 1];
+      const bool single_pair_violation =
+          (prev_fpr >= 0 && g1.fpr == prev_fpr && g2.fpr >= 0 && g2.fpr != prev_fpr);
+      const bool single_before_two_reg_violation =
+          (g2.fpr == -2 && g2.first_in_fpr == g1.fpr && g2.last_out_fpr >= 0 &&
+           g2.last_out_fpr != g1.fpr && (prev_fpr < 0 || prev_fpr != g2.first_in_fpr));
+      if (single_pair_violation || single_before_two_reg_violation) {
+        // Compute minimal backward dependency closure of `g2` inside `[g1.end, g2.end)`.
+        std::vector<bool> in_move(g2.end - g1.start, false);
+        for (size_t k = g2.start; k < g2.end; ++k) {
+          in_move[k - g1.start] = true;
+        }
+        for (size_t k = g2.start; k > g1.end; --k) {
+          const size_t pos = k - 1;
+          for (size_t m = pos + 1; m < g2.end; ++m) {
+            if (in_move[m - g1.start] &&
+                HasStrictInsnOrderHazard(insns[pos], insns[m], gp64, fp64)) {
+              in_move[pos - g1.start] = true;
+              break;
+            }
+          }
+        }
+        bool legal = true;
+        for (size_t a = g1.start; a < g2.end && legal; ++a) {
+          if (in_move[a - g1.start]) {
+            continue;
+          }
+          for (size_t m = a + 1; m < g2.end; ++m) {
+            if (in_move[m - g1.start] && HasStrictInsnOrderHazard(insns[a], insns[m], gp64, fp64)) {
+              legal = false;
+              break;
+            }
+          }
+        }
+        if (legal) {
+          std::vector<ParsedBlockInsn> cand = insns;
+          std::vector<ParsedBlockInsn> moved;
+          std::vector<ParsedBlockInsn> stayed;
+          for (size_t k = g1.start; k < g2.end; ++k) {
+            if (in_move[k - g1.start]) {
+              moved.push_back(cand[k]);
+            } else {
+              stayed.push_back(cand[k]);
+            }
+          }
+          size_t dst = g1.start;
+          for (auto& x : moved) cand[dst++] = std::move(x);
+          for (auto& x : stayed) cand[dst++] = std::move(x);
+          if (verify_cand(cand)) {
+            insns = std::move(cand);
+            any_modified = true;
+            applied = true;
+            break;
+          }
+        }
+      }
+      prev_fpr = g1.fpr;
+    }
+    if (!applied) {
+      break;
+    }
+  }
+  return any_modified;
+}
+
+// Mirrors `reload1.c:emit_reload_insns` (`reload1.c:6631`) and `sched.c`
+// (`mips.md` `imul` latency): `reload` emits a `DI`-mode output reload
+// `(set (reg:DI gpr) (reg:DI 64 hi))` immediately after its producing
+// `mulsidi3` / `umulsidi3` `PARALLEL`, and `sched2` schedules independent
+// instructions into the multiply latency shadow between them. Re-adjoin the
+// output reload immediately after `mult:DI` when no intervening instruction
+// conflicts with `{64, 65, gpr, gpr + 1}` and the block proves an output reload
+// (either another `mult:DI` in the same block or a non-adjacent consumer).
+bool ReadjoinMdDiOutputReloads(const RtlControlFlowGraph& cfg, int min_prologue_save_off,
+                               const absl::flat_hash_set<int>& use_pinned_regs, bool gp64,
+                               bool fp64, std::vector<ParsedBlockInsn>* insns) {
+  auto is_di_mult_to_hi = [](const RtlExpr& pat) {
+    return pat.op == RtlOp::kParallel && !pat.children.empty() && pat.children[0].IsSet() &&
+           pat.children[0].SetDest().IsHardReg() &&
+           pat.children[0].SetDest().mode == RtlMachineMode::kDi &&
+           pat.children[0].SetDest().RegNo() == 64 && pat.children[0].SetSrc().op == RtlOp::kMult;
+  };
+  bool modified = false;
+  int di_mult_count = 0;
+  for (const ParsedBlockInsn& insn : *insns) {
+    if (is_di_mult_to_hi(insn.parsed.pattern)) {
+      ++di_mult_count;
+    }
+  }
+  if (di_mult_count > 0) {
+    const int expected_base = cfg.sideband.frame_pointer_needed ? kMipsFpRegno : kMipsSpRegno;
+    for (size_t s1_idx = 1; s1_idx < insns->size(); ++s1_idx) {
+      const RtlExpr& s1 = (*insns)[s1_idx].parsed.pattern;
+      if (!s1.IsSet() || !s1.SetDest().IsHardReg() || s1.SetDest().flags.integrated ||
+          s1.SetDest().mode != RtlMachineMode::kDi || !s1.SetSrc().IsHardReg() ||
+          s1.SetSrc().mode != RtlMachineMode::kDi || s1.SetSrc().RegNo() != 64 ||
+          !(*insns)[s1_idx].parsed.reg_notes.empty()) {
+        continue;
+      }
+      const int dst_gpr = s1.SetDest().RegNo();
+      if (dst_gpr < 2 || dst_gpr > 24 || (dst_gpr % 2) != 0 || use_pinned_regs.contains(dst_gpr) ||
+          use_pinned_regs.contains(dst_gpr + 1)) {
+        continue;
+      }
+      const absl::flat_hash_set<int> dst_words = {dst_gpr, dst_gpr + 1};
+      const bool non_adjacent_consumer = (s1_idx + 1 < insns->size()) &&
+                                         SetsAreDisjoint((*insns)[s1_idx + 1].read_regs, dst_words);
+      if (di_mult_count < 2 && !non_adjacent_consumer) {
+        continue;
+      }
+      const absl::flat_hash_set<int> pair_words = {64, 65, dst_gpr, dst_gpr + 1};
+      size_t m_idx = insns->size();
+      bool ok_scan = true;
+      for (size_t rev = s1_idx; rev > 0; --rev) {
+        const size_t k = rev - 1;
+        const RtlExpr& kpat = (*insns)[k].parsed.pattern;
+        if (is_di_mult_to_hi(kpat)) {
+          m_idx = k;
+          break;
+        }
+        if (!SetsAreDisjoint((*insns)[k].read_regs, pair_words) ||
+            !SetsAreDisjoint((*insns)[k].write_regs, pair_words) || IsCallExpr(kpat) ||
+            IsJumpOrReturnExpr(kpat) ||
+            HasStrictInsnOrderHazard((*insns)[k], (*insns)[s1_idx], gp64, fp64)) {
+          ok_scan = false;
+          break;
+        }
+      }
+      if (!ok_scan || m_idx >= insns->size()) {
+        continue;
+      }
+      size_t cur_s1 = s1_idx;
+      if (m_idx + 1 < s1_idx) {
+        std::rotate(insns->begin() + static_cast<ptrdiff_t>(m_idx + 1),
+                    insns->begin() + static_cast<ptrdiff_t>(s1_idx),
+                    insns->begin() + static_cast<ptrdiff_t>(s1_idx + 1));
+        cur_s1 = m_idx + 1;
+        modified = true;
+      }
+      // Also re-adjoin a `sched2`-sunk secondary spill store
+      // `(set (mem:DI [sp/fp+off]) (reg:DI dst_gpr))` back immediately after `s1`
+      // (`reload1.c:6631`: `emit_reload_insns` emits `s1` and `s2` back-to-back).
+      for (size_t s2_idx = cur_s1 + 2; s2_idx < insns->size(); ++s2_idx) {
+        const RtlExpr& s2 = (*insns)[s2_idx].parsed.pattern;
+        int sbase = -1;
+        int64_t soff = 0;
+        int64_t ssz = 0;
+        if (s2.IsSet() && s2.SetDest().IsMem() && !s2.SetDest().flags.volatil &&
+            !s2.SetDest().flags.in_struct && s2.SetDest().mode == RtlMachineMode::kDi &&
+            s2.SetSrc().IsHardReg() && s2.SetSrc().mode == RtlMachineMode::kDi &&
+            s2.SetSrc().RegNo() == dst_gpr && !HasRegDeadNoteFor((*insns)[s2_idx], dst_gpr) &&
+            ExtractStackBaseDispMem(s2.SetDest(), &sbase, &soff, &ssz) && sbase == expected_base &&
+            soff >= std::max<int64_t>(0, cfg.sideband.outgoing_args_size) &&
+            (min_prologue_save_off <= 0 || soff < min_prologue_save_off) && (soff % 8) == 0) {
+          // `schedule_block` (`sched.c:3144`) can place an independent non-`/u`
+          // load into the `mult:DI` latency gap; after `s1` re-adjoins to
+          // `m_idx + 1`, that load sits in `(cur_s1, s2_idx)` and blocks `s2`
+          // via anti-dependence. If every blocker in `(cur_s1, s2_idx)` is an
+          // independent non-`/u` load with no hazard against `[m_idx, k)`,
+          // hoist those loads ahead of `m_idx` (preserving their anti-dependence
+          // against `s2` without a speculative `/u` flag) and then re-adjoin `s2`.
+          bool can_hoist_s2 = true;
+          std::vector<size_t> hoistable_loads;
+          for (size_t k = cur_s1 + 1; k < s2_idx; ++k) {
+            const RtlExpr& kpat = (*insns)[k].parsed.pattern;
+            if (!SetsAreDisjoint((*insns)[k].write_regs, dst_words) || IsCallExpr(kpat) ||
+                IsJumpOrReturnExpr(kpat)) {
+              can_hoist_s2 = false;
+              break;
+            }
+            if (!HasStrictInsnOrderHazard((*insns)[k], (*insns)[s2_idx], gp64, fp64)) {
+              continue;
+            }
+            if (!(*insns)[k].reads_mem || (*insns)[k].writes_mem || (*insns)[k].has_side_effects ||
+                !kpat.IsSet() || !kpat.SetSrc().IsMem() || kpat.SetSrc().flags.unchanging) {
+              can_hoist_s2 = false;
+              break;
+            }
+            bool can_hoist_before_m = true;
+            for (size_t j = m_idx; j < k; ++j) {
+              if (HasStrictInsnOrderHazard((*insns)[j], (*insns)[k], gp64, fp64)) {
+                can_hoist_before_m = false;
+                break;
+              }
+            }
+            if (!can_hoist_before_m) {
+              can_hoist_s2 = false;
+              break;
+            }
+            hoistable_loads.push_back(k);
+          }
+          if (can_hoist_s2) {
+            for (size_t k : hoistable_loads) {
+              std::rotate(insns->begin() + static_cast<ptrdiff_t>(m_idx),
+                          insns->begin() + static_cast<ptrdiff_t>(k),
+                          insns->begin() + static_cast<ptrdiff_t>(k + 1));
+              ++m_idx;
+              ++cur_s1;
+            }
+            std::rotate(insns->begin() + static_cast<ptrdiff_t>(cur_s1 + 1),
+                        insns->begin() + static_cast<ptrdiff_t>(s2_idx),
+                        insns->begin() + static_cast<ptrdiff_t>(s2_idx + 1));
+            modified = true;
+          }
+          break;
+        }
+        if (!SetsAreDisjoint((*insns)[s2_idx].write_regs, dst_words) || IsCallExpr(s2) ||
+            IsJumpOrReturnExpr(s2)) {
+          break;
+        }
+      }
+    }
+  }
+  // Also re-adjoin `sched2`-sunk `mflo` (`=l` output reload)
+  // `(set (reg:SI dst_gpr) (reg:SI 65 lo))` back immediately after its
+  // producing `(parallel [(set (reg:SI 65 lo) (mult:SI ...)) ...])`
+  // (`reload1.c:6583`, `config/mips/mips.md:848-858` `mulsi3_internal`).
+  auto is_si_mult_to_lo = [](const RtlExpr& pat) {
+    return pat.op == RtlOp::kParallel && !pat.children.empty() && pat.children[0].IsSet() &&
+           pat.children[0].SetDest().IsHardReg() &&
+           pat.children[0].SetDest().mode == RtlMachineMode::kSi &&
+           pat.children[0].SetDest().RegNo() == 65 && pat.children[0].SetSrc().op == RtlOp::kMult;
+  };
+  for (size_t s1_idx = 2; s1_idx < insns->size(); ++s1_idx) {
+    const RtlExpr& s1 = (*insns)[s1_idx].parsed.pattern;
+    if (!s1.IsSet() || !s1.SetDest().IsHardReg() || s1.SetDest().flags.integrated ||
+        s1.SetDest().mode != RtlMachineMode::kSi || !s1.SetSrc().IsHardReg() ||
+        s1.SetSrc().mode != RtlMachineMode::kSi || s1.SetSrc().RegNo() != 65 ||
+        !(*insns)[s1_idx].parsed.reg_notes.empty()) {
+      continue;
+    }
+    const int dst_gpr = s1.SetDest().RegNo();
+    if (dst_gpr < 2 || dst_gpr > 25) {
+      continue;
+    }
+    // If a subsequent instruction before the next write/clobber of `65 lo`
+    // carries `(REG_DEAD (reg:SI 65 lo))`, the pseudo was allocated to `65 lo`
+    // (`LO_REG`) and this `mflo` is an input reload (`reload1.c:emit_reload_insns`)
+    // anchored before its consumer rather than a `sched2`-sunk output reload.
+    bool is_lo_input_reload = false;
+    for (size_t j = s1_idx + 1; j < insns->size(); ++j) {
+      for (const RtlRegNote& note : (*insns)[j].parsed.reg_notes) {
+        if (note.kind == RtlMachineMode::kRegDead && note.datum.IsHardReg() &&
+            note.datum.RegNo() == 65) {
+          is_lo_input_reload = true;
+          break;
+        }
+      }
+      if (is_lo_input_reload || (*insns)[j].write_regs.contains(65) ||
+          IsCallExpr((*insns)[j].parsed.pattern) ||
+          IsJumpOrReturnExpr((*insns)[j].parsed.pattern)) {
+        break;
+      }
+    }
+    if (is_lo_input_reload) {
+      continue;
+    }
+    const absl::flat_hash_set<int> words = {65, dst_gpr};
+    size_t m_idx = insns->size();
+    bool ok_scan = true;
+    for (size_t rev = s1_idx; rev > 0; --rev) {
+      const size_t k = rev - 1;
+      const RtlExpr& kpat = (*insns)[k].parsed.pattern;
+      if (is_si_mult_to_lo(kpat)) {
+        m_idx = k;
+        break;
+      }
+      if (!SetsAreDisjoint((*insns)[k].read_regs, words) ||
+          !SetsAreDisjoint((*insns)[k].write_regs, words) || IsCallExpr(kpat) ||
+          IsJumpOrReturnExpr(kpat) ||
+          HasStrictInsnOrderHazard((*insns)[k], (*insns)[s1_idx], gp64, fp64)) {
+        ok_scan = false;
+        break;
+      }
+    }
+    if (ok_scan && m_idx < insns->size() && m_idx + 1 < s1_idx) {
+      std::rotate(insns->begin() + static_cast<ptrdiff_t>(m_idx + 1),
+                  insns->begin() + static_cast<ptrdiff_t>(s1_idx),
+                  insns->begin() + static_cast<ptrdiff_t>(s1_idx + 1));
+      modified = true;
+    }
+  }
+  return modified;
+}
+
 void UnscheduleSched2ReloadsAndCallerSaves(RtlControlFlowGraph* cfg, bool gp64, bool fp64) {
   if (cfg->rpo_blocks.empty()) {
     return;
@@ -4153,10 +5367,54 @@ void UnscheduleSched2ReloadsAndCallerSaves(RtlControlFlowGraph* cfg, bool gp64, 
         seg_start = call_idx + 1;
       }
 
-      // (b) Sink `caller-save` restores down immediately before their first post-call user,
-      // iterating backwards so rotating an earlier restore down does not skip its immediate
-      // successor, and preserving ascending `0..63` `caller-save.c` register order when
-      // multiple restores share the same stopper.
+      // (b1) Forward pass (`caller-save.c:559-646` `insert_restore` + `sched.c`):
+      // hoist each caller-save restore's non-memory first post-call user right
+      // after its restore in forward order so earlier restored chains (e.g.
+      // `lw $6; xor $6`, `lw $7; addu $7`) move ahead of later restores before
+      // dependent later users (`subu $8`, `xor $9`) are hoisted.
+      for (size_t i = 0; i < insns.size(); ++i) {
+        int64_t off = 0;
+        int cs_r = -1;
+        if (!match_sp_off_reg_move(insns[i], /*want_store=*/false, &off, &cs_r) ||
+            !caller_save_offsets.contains(off)) {
+          continue;
+        }
+        size_t first_stop = insns.size();
+        for (size_t k = i + 1; k < insns.size(); ++k) {
+          if (insns[k].read_regs.contains(cs_r) || insns[k].write_regs.contains(cs_r) ||
+              IsCallExpr(insns[k].parsed.pattern) || IsJumpOrReturnExpr(insns[k].parsed.pattern)) {
+            first_stop = k;
+            break;
+          }
+        }
+        if (first_stop <= i + 1 || first_stop >= insns.size() ||
+            IsCallExpr(insns[first_stop].parsed.pattern) ||
+            IsJumpOrReturnExpr(insns[first_stop].parsed.pattern) ||
+            insns[first_stop].parsed.pattern.op == RtlOp::kUse ||
+            insns[first_stop].parsed.pattern.op == RtlOp::kClobber || insns[first_stop].reads_mem ||
+            insns[first_stop].writes_mem) {
+          continue;
+        }
+        bool can_hoist_user = true;
+        for (size_t k = i + 1; k < first_stop; ++k) {
+          if (HasStrictInsnOrderHazard(insns[k], insns[first_stop], gp64, fp64)) {
+            can_hoist_user = false;
+            break;
+          }
+        }
+        if (can_hoist_user) {
+          std::rotate(insns.begin() + static_cast<ptrdiff_t>(i + 1),
+                      insns.begin() + static_cast<ptrdiff_t>(first_stop),
+                      insns.begin() + static_cast<ptrdiff_t>(first_stop + 1));
+          modified = true;
+        }
+      }
+
+      // (b2) Sink remaining `caller-save` restores down immediately before their
+      // first post-call user, iterating backwards so rotating an earlier restore
+      // down does not skip its immediate successor, and preserving ascending
+      // `0..63` `caller-save.c` register order when multiple restores share the
+      // same stopper.
       for (size_t rev = insns.size(); rev > 0; --rev) {
         const size_t i = rev - 1;
         int64_t off = 0;
@@ -4254,9 +5512,13 @@ void UnscheduleSched2ReloadsAndCallerSaves(RtlControlFlowGraph* cfg, bool gp64, 
       return true;
     };
 
-    auto match_single_use_input_reload = [&](size_t idx, bool* is_mtc1_out, int* rel_reg_out,
-                                             RtlMachineMode* rel_mode_out) {
+    const absl::flat_hash_set<int> block_proven_fp_spill_regs = CollectBlockProvenFpSpillRegs(
+        *cfg, b, insns, proven_reload_spill_offsets, use_pinned_regs, gp64, fp64);
+
+    auto match_single_use_input_reload = [&](size_t idx, bool* is_mtc1_out, bool* is_cd_out,
+                                             int* rel_reg_out, RtlMachineMode* rel_mode_out) {
       *is_mtc1_out = false;
+      *is_cd_out = false;
       *rel_reg_out = -1;
       *rel_mode_out = RtlMachineMode::kNone;
       const RtlExpr& pat = insns[idx].parsed.pattern;
@@ -4265,13 +5527,21 @@ void UnscheduleSched2ReloadsAndCallerSaves(RtlControlFlowGraph* cfg, bool gp64, 
           (pat.children[0].mode == RtlMachineMode::kSf ||
            pat.children[0].mode == RtlMachineMode::kDf) &&
           pat.children[0].RegNo() >= 32 && pat.children[0].RegNo() < 64 &&
-          pat.children[1].op == RtlOp::kReg && pat.children[1].mode == pat.children[0].mode &&
-          pat.children[1].RegNo() >= 2 && pat.children[1].RegNo() < 32 &&
           !use_pinned_regs.contains(pat.children[0].RegNo())) {
-        *is_mtc1_out = true;
-        *rel_reg_out = pat.children[0].RegNo();
-        *rel_mode_out = pat.children[0].mode;
-        return true;
+        if (pat.children[1].op == RtlOp::kReg && pat.children[1].mode == pat.children[0].mode &&
+            pat.children[1].RegNo() >= 2 && pat.children[1].RegNo() < 32) {
+          *is_mtc1_out = true;
+          *rel_reg_out = pat.children[0].RegNo();
+          *rel_mode_out = pat.children[0].mode;
+          return true;
+        }
+        if (pat.children[1].op == RtlOp::kConstDouble &&
+            block_proven_fp_spill_regs.contains(pat.children[0].RegNo())) {
+          *is_cd_out = true;
+          *rel_reg_out = pat.children[0].RegNo();
+          *rel_mode_out = pat.children[0].mode;
+          return true;
+        }
       }
       int64_t off = 0;
       int dst_r = -1;
@@ -4291,9 +5561,10 @@ void UnscheduleSched2ReloadsAndCallerSaves(RtlControlFlowGraph* cfg, bool gp64, 
         continue;
       }
       bool is_mtc1_reload = false;
+      bool is_cd_reload = false;
       int rel_reg = -1;
       RtlMachineMode rel_mode = RtlMachineMode::kNone;
-      if (!match_single_use_input_reload(i, &is_mtc1_reload, &rel_reg, &rel_mode)) {
+      if (!match_single_use_input_reload(i, &is_mtc1_reload, &is_cd_reload, &rel_reg, &rel_mode)) {
         continue;
       }
 
@@ -4321,16 +5592,27 @@ void UnscheduleSched2ReloadsAndCallerSaves(RtlControlFlowGraph* cfg, bool gp64, 
         continue;
       }
       const RtlExpr& cpat = insns[cons_idx].parsed.pattern;
-      if (IsCallExpr(cpat) || IsJumpOrReturnExpr(cpat) || cpat.op == RtlOp::kUse ||
-          cpat.op == RtlOp::kClobber || !is_dead_after_consumer(cons_idx, rel_words)) {
+      const bool cons_is_jump = IsJumpOrReturnExpr(cpat);
+      const bool dead_after_cons = is_dead_after_consumer(cons_idx, rel_words);
+      const int mtc1_src_r = is_mtc1_reload ? insns[i].parsed.pattern.children[1].RegNo() : -1;
+      const bool allow_inherited_mtc1_sink =
+          is_mtc1_reload && ((mtc1_src_r >= 16 && mtc1_src_r <= 23) || mtc1_src_r == 30) &&
+          !dead_after_cons && !HasRegDeadNoteFor(insns[cons_idx], rel_reg);
+      if (IsCallExpr(cpat) || (cons_is_jump && (is_mtc1_reload || is_cd_reload)) ||
+          cpat.op == RtlOp::kUse || cpat.op == RtlOp::kClobber ||
+          (!dead_after_cons && !allow_inherited_mtc1_sink)) {
         continue;
       }
-      if (is_mtc1_reload && cpat.op == RtlOp::kSet && cpat.children.size() == 2 &&
+      if (is_cd_reload && HasRegDeadNoteFor(insns[cons_idx], rel_reg)) {
+        continue;
+      }
+      if ((is_mtc1_reload || is_cd_reload) && cpat.op == RtlOp::kSet && cpat.children.size() == 2 &&
           cpat.children[1].op == RtlOp::kReg) {
         continue;
       }
 
-      bool can_hoist_cons = !insns[cons_idx].reads_mem && !insns[cons_idx].writes_mem;
+      bool can_hoist_cons = dead_after_cons && !cons_is_jump && !insns[cons_idx].reads_mem &&
+                            !insns[cons_idx].writes_mem;
       for (size_t k = i + 1; k < cons_idx && can_hoist_cons; ++k) {
         if (HasStrictInsnOrderHazard(insns[k], insns[cons_idx], gp64, fp64)) {
           can_hoist_cons = false;
@@ -4345,11 +5627,13 @@ void UnscheduleSched2ReloadsAndCallerSaves(RtlControlFlowGraph* cfg, bool gp64, 
       }
 
       size_t sink_end = cons_idx;
+      const int rel_ord = FirstReadRegPreorderIndex(cpat, rel_words);
       while (sink_end > i + 1) {
         bool sib_mtc1 = false;
+        bool sib_cd = false;
         int sib_reg = -1;
         RtlMachineMode sib_mode = RtlMachineMode::kNone;
-        if (!match_single_use_input_reload(sink_end - 1, &sib_mtc1, &sib_reg, &sib_mode)) {
+        if (!match_single_use_input_reload(sink_end - 1, &sib_mtc1, &sib_cd, &sib_reg, &sib_mode)) {
           break;
         }
         absl::flat_hash_set<int> sib_words;
@@ -4364,6 +5648,11 @@ void UnscheduleSched2ReloadsAndCallerSaves(RtlControlFlowGraph* cfg, bool gp64, 
         }
         if (touched_between || SetsAreDisjoint(insns[cons_idx].read_regs, sib_words) ||
             !is_dead_after_consumer(cons_idx, sib_words)) {
+          break;
+        }
+        const int sib_ord = FirstReadRegPreorderIndex(cpat, sib_words);
+        if (rel_ord > 0 && sib_ord > 0 && rel_ord > sib_ord &&
+            SetsAreDisjoint(insns[cons_idx].write_regs, rel_words)) {
           break;
         }
         --sink_end;
@@ -4401,83 +5690,16 @@ void UnscheduleSched2ReloadsAndCallerSaves(RtlControlFlowGraph* cfg, bool gp64, 
       modified = true;
     }
 
-    if (!proven_reload_spill_offsets.empty()) {
-      for (size_t i = 2; i < insns.size(); ++i) {
-        int64_t off = 0;
-        int src_r = -1;
-        if (!match_sp_off_reg_move(insns[i], /*want_store=*/true, &off, &src_r) ||
-            !proven_reload_spill_offsets.contains(off) || src_r < 2 || src_r >= 64 ||
-            use_pinned_regs.contains(src_r)) {
-          continue;
-        }
-        bool has_dead_note = false;
-        for (const RtlRegNote& n : insns[i].parsed.reg_notes) {
-          if (n.kind == RtlMachineMode::kRegDead && n.datum.op == RtlOp::kReg &&
-              n.datum.RegNo() == src_r) {
-            has_dead_note = true;
-            break;
-          }
-        }
-        if (has_dead_note) {
-          continue;
-        }
-        const RtlMachineMode rel_mode = insns[i].parsed.pattern.SetSrc().mode;
-        absl::flat_hash_set<int> rel_words;
-        InsertRegSpan(src_r, rel_mode, gp64, fp64, &rel_words);
-        size_t prod_idx = insns.size();
-        bool valid_prod = true;
-        bool saw_read_between = false;
-        for (size_t rev = i; rev > 0; --rev) {
-          const size_t k = rev - 1;
-          if (!SetsAreDisjoint(insns[k].write_regs, rel_words)) {
-            prod_idx = k;
-            break;
-          }
-          if (!SetsAreDisjoint(insns[k].read_regs, rel_words)) {
-            saw_read_between = true;
-          }
-          if (IsCallExpr(insns[k].parsed.pattern) || IsJumpOrReturnExpr(insns[k].parsed.pattern)) {
-            valid_prod = false;
-            break;
-          }
-        }
-        if (!valid_prod || prod_idx >= insns.size() || prod_idx + 1 >= i) {
-          continue;
-        }
-        const RtlExpr& ppat = insns[prod_idx].parsed.pattern;
-        if (!ppat.IsSet() || ppat.SetSrc().IsReg() || IsCallExpr(ppat) ||
-            IsJumpOrReturnExpr(ppat)) {
-          continue;
-        }
+    if (ReadjoinSunkSpillStoresInBlock(proven_reload_spill_offsets, use_pinned_regs,
+                                       match_sp_off_reg_move, is_dead_after_consumer, gp64, fp64,
+                                       &insns)) {
+      modified = true;
+    }
 
-        bool can_hoist_store = true;
-        for (size_t k = prod_idx + 1; k < i && can_hoist_store; ++k) {
-          if (HasStrictInsnOrderHazard(insns[k], insns[i], gp64, fp64)) {
-            can_hoist_store = false;
-          }
-        }
-        if (can_hoist_store) {
-          std::rotate(insns.begin() + static_cast<ptrdiff_t>(prod_idx + 1),
-                      insns.begin() + static_cast<ptrdiff_t>(i),
-                      insns.begin() + static_cast<ptrdiff_t>(i + 1));
-          modified = true;
-          continue;
-        }
-
-        bool can_sink_prod = !saw_read_between && is_dead_after_consumer(i, rel_words) &&
-                             !insns[prod_idx].reads_mem && !insns[prod_idx].writes_mem;
-        for (size_t k = prod_idx + 1; k < i && can_sink_prod; ++k) {
-          if (HasStrictInsnOrderHazard(insns[prod_idx], insns[k], gp64, fp64)) {
-            can_sink_prod = false;
-          }
-        }
-        if (can_sink_prod) {
-          std::rotate(insns.begin() + static_cast<ptrdiff_t>(prod_idx),
-                      insns.begin() + static_cast<ptrdiff_t>(prod_idx + 1),
-                      insns.begin() + static_cast<ptrdiff_t>(i));
-          modified = true;
-        }
-      }
+    if (ReadjoinCrossBankFprOutputReloads(use_pinned_regs, is_dead_after_consumer,
+                                          (b == 0) ? min_prologue_save_off : 0, caller_save_offsets,
+                                          proven_reload_spill_offsets, gp64, fp64, &insns)) {
+      modified = true;
     }
 
     // Re-adjoin `mulsidi3` / `umulsidi3` secondary output reload + spill store
@@ -4547,6 +5769,10 @@ void UnscheduleSched2ReloadsAndCallerSaves(RtlControlFlowGraph* cfg, bool gp64, 
                     insns.begin() + static_cast<ptrdiff_t>(s1_idx + 2));
         modified = true;
       }
+    }
+    if (ReadjoinMdDiOutputReloads(*cfg, (b == 0) ? min_prologue_save_off : 0, use_pinned_regs, gp64,
+                                  fp64, &insns)) {
+      modified = true;
     }
 
     // (c3) Re-adjoin `sched2`-separated single-use `"=f"` FPR->GPR output
@@ -4782,6 +6008,3457 @@ void UnscheduleSched2ReloadsAndCallerSaves(RtlControlFlowGraph* cfg, bool gp64, 
   }
 }
 
+// =============================================================================
+// Model-Guided Stage 6 (`kSched1`) Inversion & Stage 3 (`kSched2`) Selection
+// =============================================================================
+
+bool ExtractBasePseudoOrRegNo(const RtlExpr& x, int* out_regno) {
+  if (x.op == RtlOp::kReg) {
+    *out_regno = x.RegNo();
+    return true;
+  }
+  if (x.op == RtlOp::kSubreg && !x.children.empty() && x.children[0].op == RtlOp::kReg) {
+    *out_regno = x.children[0].RegNo();
+    return true;
+  }
+  return false;
+}
+
+bool IsMipsLargeIntForSched1Split(int64_t val) {
+  // Mirrors `config/mips/mips.c:416` (`large_int`): does not fit in signed
+  // 16-bit, unsigned 16-bit, or a bare upper 16-bit `lui` constant.
+  const uint32_t u32 = static_cast<uint32_t>(val);
+  return !(val >= -32768 && val <= 32767) && !(val >= 0 && val <= 65535) &&
+         ((u32 & 0x0000ffffu) != 0u);
+}
+
+// Finds split `large_int` `lui`/`ori` pairs (`mips.md:3208-3221`) in `block` so
+// `InvertBlockOrder(kSched1)` contracts them back into adjacent `lui; ori` pairs
+// for `InvertUpdateFlowInfo` whenever compatible with exact forward `sched1` replay.
+std::vector<sched_model::AdjacentPair> FindSplitLargeIntAdjacentPairs(
+    absl::Span<const sched_model::Insn> block) {
+  std::vector<sched_model::AdjacentPair> pairs;
+  const int n = static_cast<int>(block.size());
+  std::vector<bool> used(static_cast<size_t>(n), false);
+
+  auto is_barrier = [](const sched_model::Insn& insn) {
+    if (!insn.leading_loop_notes.empty()) {
+      return true;
+    }
+    bool barrier = false;
+    insn.pn.pattern.Visit([&](const RtlExpr& node) {
+      if (node.op == RtlOp::kAsmInput || (node.op == RtlOp::kAsmOperands && node.flags.volatil) ||
+          node.op == RtlOp::kUnspecVolatile ||
+          (node.op == RtlOp::kUnknown && node.raw_op == "trap_if")) {
+        barrier = true;
+      }
+    });
+    return barrier;
+  };
+
+  for (int i = 0; i < n; ++i) {
+    if (used[static_cast<size_t>(i)] ||
+        block[static_cast<size_t>(i)].kind != sched_model::Insn::Kind::kInsn) {
+      continue;
+    }
+    const RtlExpr& pat1 = block[static_cast<size_t>(i)].pn.pattern;
+    if (pat1.op != RtlOp::kSet || pat1.SetSrc().op != RtlOp::kConstInt) {
+      continue;
+    }
+    const RtlExpr& dst1 = pat1.SetDest();
+    if (dst1.mode != RtlMachineMode::kSi) {
+      continue;
+    }
+    int dest_regno = -1;
+    if (!ExtractBasePseudoOrRegNo(dst1, &dest_regno)) {
+      continue;
+    }
+    const uint32_t hi_u32 = static_cast<uint32_t>(pat1.SetSrc().int_val);
+    if ((hi_u32 & 0x0000ffffu) != 0u) {
+      continue;
+    }
+
+    for (int j = i + 1; j < n; ++j) {
+      if (is_barrier(block[static_cast<size_t>(j)])) {
+        break;
+      }
+      const RtlExpr& pat2 = block[static_cast<size_t>(j)].pn.pattern;
+      if (!used[static_cast<size_t>(j)] &&
+          block[static_cast<size_t>(j)].kind == sched_model::Insn::Kind::kInsn &&
+          pat2.op == RtlOp::kSet && pat2.children.size() >= 2 && pat2.SetDest() == dst1 &&
+          pat2.SetSrc().op == RtlOp::kIor && pat2.SetSrc().mode == RtlMachineMode::kSi &&
+          pat2.SetSrc().children.size() == 2 && pat2.SetSrc().children[0] == dst1 &&
+          pat2.SetSrc().children[1].op == RtlOp::kConstInt) {
+        const uint32_t lo_u32 = static_cast<uint32_t>(pat2.SetSrc().children[1].int_val);
+        if ((lo_u32 & 0xffff0000u) == 0u &&
+            IsMipsLargeIntForSched1Split(static_cast<int32_t>(hi_u32 | lo_u32))) {
+          pairs.push_back(sched_model::AdjacentPair{.first = i, .second = j});
+          used[static_cast<size_t>(i)] = true;
+          used[static_cast<size_t>(j)] = true;
+          break;
+        }
+      }
+      // Stop if an intervening instruction mentions `dest_regno`.
+      bool touches_reg = false;
+      pat2.Visit([&](const RtlExpr& node) {
+        if (node.op == RtlOp::kReg && node.RegNo() == dest_regno) {
+          touches_reg = true;
+        }
+      });
+      if (touches_reg) {
+        break;
+      }
+    }
+  }
+  return pairs;
+}
+
+void ApplyReorderedSchedRegion(RtlBasicBlock* blk, const sched_model::ParsedSchedRegion& region,
+                               absl::Span<const int> order_in_sched) {
+  const std::vector<std::string> orig_insns = blk->instructions;
+  const std::vector<RtlInsn> orig_rtl = blk->rtl_insns;
+  const bool has_synced_rtl = (orig_rtl.size() == orig_insns.size());
+
+  std::vector<std::string> new_insns;
+  std::vector<std::optional<std::vector<RtlExpr>>> new_fusage;
+  new_insns.reserve(orig_insns.size());
+  new_fusage.reserve(orig_insns.size());
+
+  auto push_orig = [&](size_t idx) {
+    new_insns.push_back(orig_insns[idx]);
+    if (has_synced_rtl && orig_rtl[idx].has_explicit_call_fusage) {
+      new_fusage.push_back(orig_rtl[idx].call_fusage);
+    } else {
+      new_fusage.push_back(std::nullopt);
+    }
+  };
+
+  for (size_t idx : region.prefix_orig_indices) {
+    push_orig(idx);
+  }
+  for (RtlLoopNoteKind nk : region.region_note_list) {
+    new_insns.push_back(std::string(RtlLoopNoteKindToSexpr(nk)));
+    new_fusage.push_back(std::nullopt);
+  }
+  for (int sched_idx : order_in_sched) {
+    const auto& insn = region.sched_block[static_cast<size_t>(sched_idx)];
+    for (RtlLoopNoteKind nk : insn.leading_loop_notes) {
+      new_insns.push_back(std::string(RtlLoopNoteKindToSexpr(nk)));
+      new_fusage.push_back(std::nullopt);
+    }
+    push_orig(region.sched_orig_indices[static_cast<size_t>(sched_idx)]);
+  }
+  for (size_t idx : region.suffix_orig_indices) {
+    push_orig(idx);
+  }
+
+  blk->instructions = std::move(new_insns);
+  blk->SyncRtlInsnsFromInstructions();
+  for (size_t i = 0; i < blk->rtl_insns.size() && i < new_fusage.size(); ++i) {
+    if (new_fusage[i].has_value() && !blk->rtl_insns[i].has_explicit_call_fusage) {
+      blk->rtl_insns[i].has_explicit_call_fusage = true;
+      blk->rtl_insns[i].call_fusage = std::move(*new_fusage[i]);
+    }
+  }
+}
+
+std::string BuildSchedModelPatternKey(const sched_model::Insn& insn) {
+  std::string key = insn.pn.pattern.ToGccPrintRtlString();
+  if (insn.pn.has_explicit_call_fusage) {
+    key.push_back('|');
+    for (const RtlExpr& fu : insn.pn.call_fusage) {
+      key.append(fu.ToGccPrintRtlString());
+      key.push_back(';');
+    }
+  }
+  return key;
+}
+
+void UnscheduleSched1WithModel(RtlControlFlowGraph* cfg, const CompilationProfile& profile,
+                               bool gp64, bool fp64) {
+  const sched_model::MachineModel mm = sched_model::MachineModel::FromProfile(profile);
+  const sched_model::RegFacts facts =
+      sched_model::RegFacts::FromCfg(*cfg, profile, sched_model::Phase::kSched1);
+  RtlControlFlowGraph live_cfg = *cfg;
+  ReconstructRtlLiveness(
+      &live_cfg, profile,
+      {.reload_completed = false, .update_reg_notes = false, .preserve_phantom_pseudos = false});
+
+  for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
+    RtlBasicBlock& blk = cfg->rpo_blocks[b];
+    const sched_model::ParsedSchedRegion region =
+        sched_model::ParseBlockForSchedModel(blk, b, sched_model::Phase::kSched1);
+    if (!region.valid || region.sched_block.size() <= 1) {
+      continue;
+    }
+
+    absl::btree_set<int> live_at_end;
+    for (int succ : blk.successors) {
+      if (const auto it = live_cfg.sideband.basic_block_live_at_start.find(succ);
+          it != live_cfg.sideband.basic_block_live_at_start.end()) {
+        live_at_end.insert(it->second.begin(), it->second.end());
+      }
+    }
+
+    const std::vector<sched_model::AdjacentPair> split_pairs =
+        FindSplitLargeIntAdjacentPairs(region.sched_block);
+
+    // Compute a canonical pre-`sched1` `.06.combine`-like preference using
+    // `UnscheduleBlockInstructions` on a scratch copy of `blk`. `InvertBlockOrder`
+    // strictly enforces exact `Schedule(Q, kSched1) == P` verification, so this acts
+    // purely as a soft tie-breaking preference among valid `F_sched1` preimages.
+    std::vector<int> preferred_order;
+    {
+      RtlBasicBlock scratch = blk;
+      UnscheduleBlockInstructions(&scratch, gp64, fp64, /*is_post_reload=*/false,
+                                  cfg->sideband.frame_pointer_needed, /*runs_sched1=*/true);
+      const sched_model::ParsedSchedRegion scratch_region =
+          sched_model::ParseBlockForSchedModel(scratch, b, sched_model::Phase::kSched1);
+      if (scratch_region.valid && scratch_region.sched_block.size() == region.sched_block.size()) {
+        absl::btree_map<std::string, std::vector<int>> target_buckets;
+        for (size_t t = 0; t < region.sched_block.size(); ++t) {
+          target_buckets[BuildSchedModelPatternKey(region.sched_block[t])].push_back(
+              static_cast<int>(t));
+        }
+        absl::btree_map<std::string, size_t> cursor;
+        std::vector<int> mapped;
+        mapped.reserve(region.sched_block.size());
+        bool ok = true;
+        for (const sched_model::Insn& insn : scratch_region.sched_block) {
+          const std::string key = BuildSchedModelPatternKey(insn);
+          const auto it = target_buckets.find(key);
+          if (it == target_buckets.end()) {
+            ok = false;
+            break;
+          }
+          size_t& cur = cursor[key];
+          if (cur >= it->second.size()) {
+            ok = false;
+            break;
+          }
+          mapped.push_back(it->second[cur++]);
+        }
+        if (ok && mapped.size() == region.sched_block.size()) {
+          // Ensure split `large_int` `ori` immediately follows its `lui` in `preferred_order`.
+          for (const sched_model::AdjacentPair& p : split_pairs) {
+            auto it_second = std::find(mapped.begin(), mapped.end(), p.second);
+            if (it_second != mapped.end()) {
+              mapped.erase(it_second);
+              auto it_first = std::find(mapped.begin(), mapped.end(), p.first);
+              if (it_first != mapped.end()) {
+                mapped.insert(it_first + 1, p.second);
+              }
+            }
+          }
+          preferred_order = std::move(mapped);
+        }
+      }
+    }
+
+    const std::optional<std::vector<int>> inv =
+        sched_model::InvertBlockOrder(region.sched_block, facts, mm, sched_model::Phase::kSched1,
+                                      live_at_end, preferred_order, split_pairs);
+    if (inv.has_value()) {
+      ApplyReorderedSchedRegion(&blk, region, *inv);
+    }
+  }
+}
+
+// Shared per-block inputs for Stage 3's 3-gate verified `kSched1`-achievable
+// `sched2` preimage search.
+struct Stage3Sched1PreimageContext {
+  const sched_model::ParsedSchedRegion& base_region;
+  const sched_model::ParsedSchedRegion& target_region;
+  size_t block_idx;
+  int n;
+  sched_model::PostReloadBodyBounds bounds;
+  const sched_model::MachineModel& mm;
+  const sched_model::RegFacts& facts_s2;
+  const sched_model::CfgSched1Context& cfg_ctx;
+  const sched_model::Sched1ProjectionContext& proj_ctx;
+  const absl::btree_set<int>& live_at_end_s2;
+  const std::vector<int>& base_to_target;
+  const std::vector<int>& target_to_base;
+  const std::vector<sched_model::AdjacentPair>& reload_adjacent;
+  bool allow_moved_store_load_equiv_invalidation = false;
+};
+
+bool LiftSched1ViewToPreferredTarget(const Stage3Sched1PreimageContext& ctx,
+                                     const std::vector<int>& cur_to_base,
+                                     const sched_model::Sched1ProjectionView& view,
+                                     const absl::btree_set<int>& excluded_prologue,
+                                     absl::Span<const int> extra_pinned_body_indices,
+                                     std::vector<int>* preferred_out,
+                                     absl::Span<const int> explicit_s1_order = {}) {
+  const int prologue_end = ctx.bounds.prologue_end;
+  const int epilogue_begin = ctx.bounds.epilogue_begin;
+  const int body_len = epilogue_begin - prologue_end;
+  const int num_core = static_cast<int>(view.core_insns.size());
+  std::vector<int> s1_order;
+  if (!explicit_s1_order.empty()) {
+    if (static_cast<int>(explicit_s1_order.size()) != num_core) {
+      return false;
+    }
+    s1_order.assign(explicit_s1_order.begin(), explicit_s1_order.end());
+  } else {
+    s1_order = sched_model::ScheduleSched1ViewCoreOrder(view, ctx.mm);
+    if (static_cast<int>(s1_order.size()) != num_core) {
+      return false;
+    }
+  }
+  std::vector<int> body_to_core(static_cast<size_t>(body_len), -1);
+  for (int ci = 0; ci < num_core; ++ci) {
+    body_to_core[static_cast<size_t>(view.core_to_orig_index[static_cast<size_t>(ci)])] = ci;
+  }
+  absl::btree_set<int> pinned_prefix_set(view.pinned_prefix_orig_indices.begin(),
+                                         view.pinned_prefix_orig_indices.end());
+  absl::btree_set<int> extra_pinned_core_set;
+  std::vector<int> extra_pinned_cores;
+  for (int rel : extra_pinned_body_indices) {
+    if (rel >= 0 && rel < body_len) {
+      const int ci = body_to_core[static_cast<size_t>(rel)];
+      if (ci >= 0 && extra_pinned_core_set.insert(ci).second) {
+        extra_pinned_cores.push_back(ci);
+      }
+    }
+  }
+  std::vector<int> interleaved_prologue_cur;
+  std::vector<int> pinned_prefix_cur;
+  std::vector<std::vector<int>> before_core(static_cast<size_t>(num_core));
+  std::vector<std::vector<int>> after_core(static_cast<size_t>(num_core));
+  std::vector<int> after_last_core;
+  for (int rel = 0; rel < body_len; ++rel) {
+    if (body_to_core[static_cast<size_t>(rel)] >= 0) {
+      continue;
+    }
+    const int cur_i = prologue_end + rel;
+    if (excluded_prologue.contains(rel)) {
+      interleaved_prologue_cur.push_back(cur_i);
+      continue;
+    }
+    if (pinned_prefix_set.contains(rel)) {
+      pinned_prefix_cur.push_back(cur_i);
+      continue;
+    }
+    if (const auto ait = view.output_reload_after_core.find(rel);
+        ait != view.output_reload_after_core.end() && ait->second >= 0 && ait->second < num_core) {
+      after_core[static_cast<size_t>(ait->second)].push_back(cur_i);
+      continue;
+    }
+    if (const auto bit = view.input_reload_before_core.find(rel);
+        bit != view.input_reload_before_core.end() && bit->second >= 0 && bit->second < num_core) {
+      before_core[static_cast<size_t>(bit->second)].push_back(cur_i);
+      continue;
+    }
+    int next_core = -1;
+    for (int k = rel + 1; k < body_len; ++k) {
+      if (body_to_core[static_cast<size_t>(k)] >= 0) {
+        next_core = body_to_core[static_cast<size_t>(k)];
+        break;
+      }
+    }
+    if (next_core >= 0) {
+      before_core[static_cast<size_t>(next_core)].push_back(cur_i);
+    } else {
+      after_last_core.push_back(cur_i);
+    }
+  }
+  preferred_out->clear();
+  preferred_out->reserve(static_cast<size_t>(ctx.n));
+  auto push_cur = [&](int cur_i) {
+    preferred_out->push_back(
+        ctx.base_to_target[static_cast<size_t>(cur_to_base[static_cast<size_t>(cur_i)])]);
+  };
+  for (int i = 0; i < prologue_end; ++i) {
+    push_cur(i);
+  }
+  for (int p_cur : interleaved_prologue_cur) {
+    push_cur(p_cur);
+  }
+  for (int pp_cur : pinned_prefix_cur) {
+    push_cur(pp_cur);
+  }
+  for (int ci : extra_pinned_cores) {
+    for (int aux_cur : before_core[static_cast<size_t>(ci)]) {
+      push_cur(aux_cur);
+    }
+    push_cur(prologue_end + view.core_to_orig_index[static_cast<size_t>(ci)]);
+    for (int aux_cur : after_core[static_cast<size_t>(ci)]) {
+      push_cur(aux_cur);
+    }
+  }
+  for (int ci : s1_order) {
+    if (extra_pinned_core_set.contains(ci)) {
+      continue;
+    }
+    for (int aux_cur : before_core[static_cast<size_t>(ci)]) {
+      push_cur(aux_cur);
+    }
+    push_cur(prologue_end + view.core_to_orig_index[static_cast<size_t>(ci)]);
+    for (int aux_cur : after_core[static_cast<size_t>(ci)]) {
+      push_cur(aux_cur);
+    }
+  }
+  for (int aux_cur : after_last_core) {
+    push_cur(aux_cur);
+  }
+  for (int i = epilogue_begin; i < ctx.n; ++i) {
+    push_cur(i);
+  }
+  return static_cast<int>(preferred_out->size()) == ctx.n;
+}
+
+bool TryCommitAchievableSched1Candidate(const Stage3Sched1PreimageContext& ctx,
+                                        const std::vector<int>& cand_in_base,
+                                        const std::vector<sched_model::Insn>& cand_seq,
+                                        bool cand_strict_safe, RtlBasicBlock* out_blk) {
+  const int prologue_end = ctx.bounds.prologue_end;
+  const int epilogue_begin = ctx.bounds.epilogue_begin;
+  const int body_len = epilogue_begin - prologue_end;
+  if (!sched_model::BuildInvertedRegDeadSeedOrderInBase(cand_seq, prologue_end, epilogue_begin,
+                                                        ctx.facts_s2, ctx.mm)
+           .has_value()) {
+    if (!cand_strict_safe) {
+      return false;
+    }
+    ApplyReorderedSchedRegion(out_blk, ctx.base_region, cand_in_base);
+    return true;
+  }
+  // `cand_seq` already achieves `kSched1` and replays `kSched2`, but retains a
+  // local `sched2`-inverted pure-reader `REG_DEAD` (`sched.c:2872-2906,
+  // 3415-3611`). Apply one bounded `kDeferAfterReaders` / `kPullBeforeDead`
+  // repair directly on `cand_seq` and re-verify all four gates.
+  for (const sched_model::InvertedRegDeadSeedMode mode :
+       {sched_model::InvertedRegDeadSeedMode::kDeferAfterReaders,
+        sched_model::InvertedRegDeadSeedMode::kPullBeforeDead}) {
+    const std::optional<std::vector<int>> fix_in_cand =
+        sched_model::BuildInvertedRegDeadSeedOrderInBase(cand_seq, prologue_end, epilogue_begin,
+                                                         ctx.facts_s2, ctx.mm, mode);
+    if (!fix_in_cand.has_value()) {
+      continue;
+    }
+    std::vector<int> fix_pref_target(static_cast<size_t>(ctx.n));
+    for (int pos = 0; pos < ctx.n; ++pos) {
+      fix_pref_target[static_cast<size_t>(pos)] = ctx.base_to_target[static_cast<size_t>(
+          cand_in_base[static_cast<size_t>((*fix_in_cand)[static_cast<size_t>(pos)])])];
+    }
+    const std::optional<std::vector<int>> rep_in_target = sched_model::InvertBlockOrder(
+        ctx.target_region.sched_block, ctx.facts_s2, ctx.mm, sched_model::Phase::kSched2,
+        ctx.live_at_end_s2, fix_pref_target, ctx.reload_adjacent);
+    if (!rep_in_target.has_value()) {
+      continue;
+    }
+    std::vector<int> rep_in_base(static_cast<size_t>(ctx.n));
+    for (int pos = 0; pos < ctx.n; ++pos) {
+      rep_in_base[static_cast<size_t>(pos)] =
+          ctx.target_to_base[static_cast<size_t>((*rep_in_target)[static_cast<size_t>(pos)])];
+    }
+    const bool rep_safe = sched_model::PreservesPostReloadOrderSafety(
+        ctx.base_region.sched_block, rep_in_base, prologue_end, epilogue_begin, ctx.live_at_end_s2,
+        ctx.cfg_ctx.cfg_copy_pairs, ctx.facts_s2, ctx.mm,
+        /*allow_pure_reader_reg_dead_transfer=*/false, ctx.cfg_ctx.stack_layout,
+        ctx.proj_ctx.excluded_prologue_body_indices, ctx.allow_moved_store_load_equiv_invalidation);
+    if (!rep_safe) {
+      continue;
+    }
+    std::vector<sched_model::Insn> rep_seq;
+    rep_seq.reserve(static_cast<size_t>(ctx.n));
+    for (int pos = 0; pos < ctx.n; ++pos) {
+      sched_model::Insn insn =
+          ctx.base_region.sched_block[static_cast<size_t>(rep_in_base[static_cast<size_t>(pos)])];
+      insn.luid = pos;
+      rep_seq.push_back(std::move(insn));
+    }
+    if (sched_model::BuildInvertedRegDeadSeedOrderInBase(rep_seq, prologue_end, epilogue_begin,
+                                                         ctx.facts_s2, ctx.mm)
+            .has_value()) {
+      continue;
+    }
+    std::vector<sched_model::Insn> rep_body;
+    rep_body.reserve(static_cast<size_t>(body_len));
+    for (int pos = prologue_end; pos < epilogue_begin; ++pos) {
+      sched_model::Insn insn = rep_seq[static_cast<size_t>(pos)];
+      insn.luid = pos - prologue_end;
+      rep_body.push_back(std::move(insn));
+    }
+    sched_model::Sched1ProjectionContext rep_ctx = ctx.proj_ctx;
+    rep_ctx.excluded_prologue_body_indices = sched_model::FindInterleavedPrologueSaveBodyIndices(
+        rep_seq, ctx.bounds, ctx.block_idx, ctx.mm);
+    const sched_model::Sched1ProjectionView rep_view =
+        sched_model::ProjectPostReloadBlockToSched1View(rep_body, ctx.mm, ctx.live_at_end_s2,
+                                                        rep_ctx);
+    const bool rep_ach =
+        rep_view.core_insns.size() > 1 &&
+        sched_model::IsAchievable(rep_view.core_insns, rep_view.facts_s1, ctx.mm,
+                                  sched_model::Phase::kSched1, rep_view.live_at_end_s1);
+    if (rep_ach) {
+      ApplyReorderedSchedRegion(out_blk, ctx.base_region, rep_in_base);
+      return true;
+    }
+    // `rep_seq` already replays `kSched2`, satisfies strict post-reload
+    // safety, and eliminates the `REG_DEAD` inversion; run a short bounded
+    // `kSched1` fixed-point + tie-flip/consumer-hoist refinement from it.
+    std::vector<int> cur_rep_base = rep_in_base;
+    std::vector<sched_model::Insn> cur_rep_seq = rep_seq;
+    sched_model::Sched1ProjectionView cur_rep_view = rep_view;
+    absl::btree_set<int> cur_rep_excl = rep_ctx.excluded_prologue_body_indices;
+    absl::btree_set<std::vector<int>> rep_tried;
+    auto eval_rep_pref = [&](const std::vector<int>& pref_target) -> bool {
+      if (!rep_tried.insert(pref_target).second) {
+        return false;
+      }
+      const std::optional<std::vector<int>> nxt_target = sched_model::InvertBlockOrder(
+          ctx.target_region.sched_block, ctx.facts_s2, ctx.mm, sched_model::Phase::kSched2,
+          ctx.live_at_end_s2, pref_target, ctx.reload_adjacent);
+      if (!nxt_target.has_value()) {
+        return false;
+      }
+      std::vector<int> nxt_base(static_cast<size_t>(ctx.n));
+      for (int pos = 0; pos < ctx.n; ++pos) {
+        nxt_base[static_cast<size_t>(pos)] =
+            ctx.target_to_base[static_cast<size_t>((*nxt_target)[static_cast<size_t>(pos)])];
+      }
+      if (!sched_model::PreservesPostReloadOrderSafety(
+              ctx.base_region.sched_block, nxt_base, prologue_end, epilogue_begin,
+              ctx.live_at_end_s2, ctx.cfg_ctx.cfg_copy_pairs, ctx.facts_s2, ctx.mm,
+              /*allow_pure_reader_reg_dead_transfer=*/false, ctx.cfg_ctx.stack_layout,
+              ctx.proj_ctx.excluded_prologue_body_indices,
+              ctx.allow_moved_store_load_equiv_invalidation)) {
+        return false;
+      }
+      std::vector<sched_model::Insn> nxt_seq;
+      nxt_seq.reserve(static_cast<size_t>(ctx.n));
+      for (int pos = 0; pos < ctx.n; ++pos) {
+        sched_model::Insn insn =
+            ctx.base_region.sched_block[static_cast<size_t>(nxt_base[static_cast<size_t>(pos)])];
+        insn.luid = pos;
+        nxt_seq.push_back(std::move(insn));
+      }
+      if (sched_model::BuildInvertedRegDeadSeedOrderInBase(nxt_seq, prologue_end, epilogue_begin,
+                                                           ctx.facts_s2, ctx.mm)
+              .has_value()) {
+        return false;
+      }
+      std::vector<sched_model::Insn> nxt_body;
+      nxt_body.reserve(static_cast<size_t>(body_len));
+      for (int pos = prologue_end; pos < epilogue_begin; ++pos) {
+        sched_model::Insn insn = nxt_seq[static_cast<size_t>(pos)];
+        insn.luid = pos - prologue_end;
+        nxt_body.push_back(std::move(insn));
+      }
+      sched_model::Sched1ProjectionContext nxt_ctx = ctx.proj_ctx;
+      nxt_ctx.excluded_prologue_body_indices = sched_model::FindInterleavedPrologueSaveBodyIndices(
+          nxt_seq, ctx.bounds, ctx.block_idx, ctx.mm);
+      sched_model::Sched1ProjectionView nxt_view = sched_model::ProjectPostReloadBlockToSched1View(
+          nxt_body, ctx.mm, ctx.live_at_end_s2, nxt_ctx);
+      if (nxt_view.core_insns.size() > 1 &&
+          sched_model::IsAchievable(nxt_view.core_insns, nxt_view.facts_s1, ctx.mm,
+                                    sched_model::Phase::kSched1, nxt_view.live_at_end_s1)) {
+        ApplyReorderedSchedRegion(out_blk, ctx.base_region, nxt_base);
+        return true;
+      }
+      cur_rep_base = std::move(nxt_base);
+      cur_rep_seq = std::move(nxt_seq);
+      cur_rep_view = std::move(nxt_view);
+      cur_rep_excl = std::move(nxt_ctx.excluded_prologue_body_indices);
+      return false;
+    };
+    for (int r = 0; r < 4; ++r) {
+      std::vector<int> pref_target;
+      if (!LiftSched1ViewToPreferredTarget(ctx, cur_rep_base, cur_rep_view, cur_rep_excl, {},
+                                           &pref_target)) {
+        break;
+      }
+      if (eval_rep_pref(pref_target)) {
+        return true;
+      }
+    }
+    const std::vector<int> snap_base = cur_rep_base;
+    const std::vector<sched_model::Insn> snap_seq = cur_rep_seq;
+    const sched_model::Sched1ProjectionView snap_view = cur_rep_view;
+    const absl::btree_set<int> snap_excl = cur_rep_excl;
+    const std::vector<std::pair<int, int>> rep_s2_edges = sched_model::ExtractCoreSched2Edges(
+        snap_seq, prologue_end, epilogue_begin, snap_view, ctx.facts_s2, ctx.mm);
+    std::vector<int> snap_to_target(static_cast<size_t>(ctx.n), -1);
+    for (int pos = 0; pos < ctx.n; ++pos) {
+      snap_to_target[static_cast<size_t>(pos)] =
+          ctx.base_to_target[static_cast<size_t>(snap_base[static_cast<size_t>(pos)])];
+    }
+    const std::vector<std::pair<int, int>> rep_s2_replay_edges =
+        sched_model::ExtractCoreSched2ReplayEdges(
+            ctx.target_region.sched_block, snap_to_target, prologue_end, epilogue_begin, snap_view,
+            ctx.facts_s2, ctx.mm, ctx.live_at_end_s2, /*preserve_reg_dead_reader_order=*/true);
+    std::vector<std::vector<int>> alt_orders = sched_model::CollectSched1TieFlipCoreOrders(
+        snap_view, ctx.mm, /*max_orders=*/12, rep_s2_edges, rep_s2_replay_edges);
+    for (std::vector<int>& ord :
+         sched_model::CollectSched1SunkConsumerHoistCoreOrders(snap_view, ctx.mm,
+                                                               /*max_orders=*/8)) {
+      alt_orders.push_back(std::move(ord));
+    }
+    for (const std::vector<int>& alt_ord : alt_orders) {
+      std::vector<int> pref_target;
+      if (!LiftSched1ViewToPreferredTarget(ctx, snap_base, snap_view, snap_excl, {}, &pref_target,
+                                           alt_ord)) {
+        continue;
+      }
+      if (eval_rep_pref(pref_target)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// `REG_DEAD`) or was successfully reordered into `Im(F_sched1)`.
+bool IsSched2NoopSelfMoveInsn(const sched_model::Insn& insn);
+
+bool TrySelectSched1AchievablePreimageForBlock(
+    RtlBasicBlock* out_blk_ptr, const RtlBasicBlock& target_blk, size_t b,
+    const sched_model::MachineModel& mm, const sched_model::RegFacts& facts_s2,
+    const sched_model::CfgSched1Context& cfg_ctx, const RtlControlFlowGraph& live_cfg,
+    bool allow_moved_store_load_equiv_invalidation = false) {
+  RtlBasicBlock& out_blk = *out_blk_ptr;
+  const sched_model::ParsedSchedRegion base_region =
+      sched_model::ParseBlockForSchedModel(out_blk, b, sched_model::Phase::kSched2);
+  const sched_model::ParsedSchedRegion target_region =
+      sched_model::ParseBlockForSchedModel(target_blk, b, sched_model::Phase::kSched2);
+  if (!base_region.valid || !target_region.valid || base_region.has_mid_block_loop_barrier ||
+      target_region.has_mid_block_loop_barrier) {
+    return true;
+  }
+  const int n = static_cast<int>(base_region.sched_block.size());
+  if (n <= 2 || static_cast<int>(target_region.sched_block.size()) != n) {
+    return true;
+  }
+
+  absl::btree_set<int> live_at_end_s2;
+  for (int succ : out_blk.successors) {
+    if (const auto it = live_cfg.sideband.basic_block_live_at_start.find(succ);
+        it != live_cfg.sideband.basic_block_live_at_start.end()) {
+      live_at_end_s2.insert(it->second.begin(), it->second.end());
+    }
+  }
+
+  // Exclude prologue prefix (block 0), interleaved block-0 prologue callee-save
+  // stores (`toplev.c:3103`, `function.c:5516`, `mips.c:expand_prologue`), and
+  // epilogue suffix from the `sched1` projection because `thread_prologue_and_epilogue_insns`
+  // runs after `reload` and after `sched1`.
+  const sched_model::PostReloadBodyBounds bounds =
+      sched_model::FindPostReloadBodyBounds(base_region.sched_block, b);
+  const int prologue_end = bounds.prologue_end;
+  const int epilogue_begin = bounds.epilogue_begin;
+  const int body_len = epilogue_begin - prologue_end;
+  if (body_len <= 1) {
+    return true;
+  }
+
+  std::vector<sched_model::Insn> base_body;
+  base_body.reserve(static_cast<size_t>(body_len));
+  for (int i = prologue_end; i < epilogue_begin; ++i) {
+    sched_model::Insn insn = base_region.sched_block[static_cast<size_t>(i)];
+    insn.luid = i - prologue_end;
+    base_body.push_back(std::move(insn));
+  }
+
+  sched_model::Sched1ProjectionContext proj_ctx =
+      sched_model::BuildSched1ProjectionContextForBlock(b, cfg_ctx);
+  const bool fp_needed = !proj_ctx.stack_layout.valid || proj_ctx.stack_layout.frame_pointer_needed;
+  // Stage 4 (`invert_alter_reg.cc`, `flow.c:2506-2515`) splits a hard-reg RMW
+  // into distinct pseudos only when an explicit `(REG_DEAD r)` note is present
+  // (either from real GCC RTL or restored at Stage 0). Never hallucinate
+  // implicit post-call `combine_regs` splits here that Stage 4 will not emit.
+  proj_ctx.allow_post_call_combine_regs_split = false;
+  proj_ctx.excluded_prologue_body_indices =
+      sched_model::FindInterleavedPrologueSaveBodyIndices(base_region.sched_block, bounds, b, mm);
+  const sched_model::Sched1ProjectionView base_view =
+      sched_model::ProjectPostReloadBlockToSched1View(base_body, mm, live_at_end_s2, proj_ctx);
+  if (base_view.core_insns.size() <= 1) {
+    return true;
+  }
+  // Fast path: if `Q_base`'s body is already in `Im(F_sched1)`, has no stale
+  // `sched2`-inverted pure-reader `REG_DEAD` (`sched.c:2872-2906, 3415-3611`),
+  // AND actually replays `target_region` under `kSched2` without a mid-block
+  // deleted no-op self-move (`sched.c:4803-4818`), keep it untouched!
+  const std::optional<std::vector<int>> inverted_reg_dead_seed =
+      sched_model::BuildInvertedRegDeadSeedOrderInBase(base_region.sched_block, prologue_end,
+                                                       epilogue_begin, facts_s2, mm);
+  const bool base_ach =
+      sched_model::IsAchievable(base_view.core_insns, base_view.facts_s1, mm,
+                                sched_model::Phase::kSched1, base_view.live_at_end_s1);
+  if (!inverted_reg_dead_seed.has_value() && base_ach) {
+    bool base_replays_s2 = true;
+    for (int pos = 0; pos + 1 < n; ++pos) {
+      if (IsSched2NoopSelfMoveInsn(base_region.sched_block[static_cast<size_t>(pos)])) {
+        base_replays_s2 = false;
+        break;
+      }
+    }
+    if (base_replays_s2) {
+      const sched_model::DepGraph g_base_s2 =
+          sched_model::Analyze(base_region.sched_block, facts_s2, mm, sched_model::Phase::kSched2);
+      const sched_model::ScheduleResult sr_base_s2 =
+          sched_model::Schedule(base_region.sched_block, g_base_s2, facts_s2, mm,
+                                sched_model::Phase::kSched2, live_at_end_s2);
+      if (static_cast<int>(sr_base_s2.order.size()) != n) {
+        base_replays_s2 = false;
+      } else {
+        for (int pos = 0; pos < n; ++pos) {
+          if (base_region
+                  .sched_block[static_cast<size_t>(sr_base_s2.order[static_cast<size_t>(pos)])]
+                  .pn.pattern.ToGccPrintRtlString() !=
+              target_region.sched_block[static_cast<size_t>(pos)]
+                  .pn.pattern.ToGccPrintRtlString()) {
+            base_replays_s2 = false;
+            break;
+          }
+        }
+      }
+    }
+    if (base_replays_s2) {
+      return true;
+    }
+  }
+
+  // Build bijection between `base_region.sched_block` and `target_region.sched_block` by
+  // pattern + call_fusage (ignoring `REG_NOTES` added by `RestoreInheritedSpillSlotDeadNotes`).
+  absl::btree_map<std::string, std::vector<int>> target_buckets;
+  for (int t = 0; t < n; ++t) {
+    target_buckets[BuildSchedModelPatternKey(target_region.sched_block[static_cast<size_t>(t)])]
+        .push_back(t);
+  }
+  absl::btree_map<std::string, size_t> bucket_cursor;
+  std::vector<int> base_to_target(static_cast<size_t>(n), -1);
+  std::vector<int> target_to_base(static_cast<size_t>(n), -1);
+  for (int bi = 0; bi < n; ++bi) {
+    const std::string key =
+        BuildSchedModelPatternKey(base_region.sched_block[static_cast<size_t>(bi)]);
+    const auto it = target_buckets.find(key);
+    if (it == target_buckets.end()) {
+      return false;
+    }
+    size_t& cur = bucket_cursor[key];
+    if (cur >= it->second.size()) {
+      return false;
+    }
+    const int t = it->second[cur++];
+    base_to_target[static_cast<size_t>(bi)] = t;
+    target_to_base[static_cast<size_t>(t)] = bi;
+  }
+
+  // Preserve adjacent `hi`/`lo` (`64`/`65`) output-reload and stack-slot input-reload
+  // pairs (`reload1.c:emit_reload_insns`) via supernode adjacency in `InvertBlockOrder`.
+  std::vector<sched_model::AdjacentPair> reload_adjacent;
+  for (int i = 0; i + 1 < n; ++i) {
+    if (sched_model::IsAdjacentMdOutputReloadPair(
+            base_region.sched_block[static_cast<size_t>(i)],
+            base_region.sched_block[static_cast<size_t>(i + 1)]) ||
+        sched_model::IsAdjacentReloadContiguityPair(
+            base_region.sched_block[static_cast<size_t>(i)],
+            base_region.sched_block[static_cast<size_t>(i + 1)], mm, cfg_ctx.stack_layout)) {
+      reload_adjacent.push_back(sched_model::AdjacentPair{
+          .first = base_to_target[static_cast<size_t>(i)],
+          .second = base_to_target[static_cast<size_t>(i + 1)],
+      });
+    }
+  }
+
+  const Stage3Sched1PreimageContext stage3_ctx{
+      .base_region = base_region,
+      .target_region = target_region,
+      .block_idx = b,
+      .n = n,
+      .bounds = bounds,
+      .mm = mm,
+      .facts_s2 = facts_s2,
+      .cfg_ctx = cfg_ctx,
+      .proj_ctx = proj_ctx,
+      .live_at_end_s2 = live_at_end_s2,
+      .base_to_target = base_to_target,
+      .target_to_base = target_to_base,
+      .reload_adjacent = reload_adjacent,
+      .allow_moved_store_load_equiv_invalidation = allow_moved_store_load_equiv_invalidation,
+  };
+
+  auto lift_view_to_preferred_target =
+      [&](const std::vector<int>& cur_to_base, const sched_model::Sched1ProjectionView& view,
+          const absl::btree_set<int>& excluded_prologue,
+          absl::Span<const int> extra_pinned_body_indices, std::vector<int>* preferred_out,
+          absl::Span<const int> explicit_s1_order = {}) -> bool {
+    return LiftSched1ViewToPreferredTarget(stage3_ctx, cur_to_base, view, excluded_prologue,
+                                           extra_pinned_body_indices, preferred_out,
+                                           explicit_s1_order);
+  };
+
+  auto count_s1_diffs = [&](const sched_model::Sched1ProjectionView& v) -> int {
+    const std::vector<int> ord = sched_model::ScheduleSched1ViewCoreOrder(v, mm);
+    if (ord.size() != v.core_insns.size()) {
+      return static_cast<int>(v.core_insns.size());
+    }
+    int diffs = 0;
+    for (int i = 0; i < static_cast<int>(ord.size()); ++i) {
+      if (ord[static_cast<size_t>(i)] != i) {
+        ++diffs;
+      }
+    }
+    return diffs;
+  };
+
+  auto try_commit_achievable_cand = [&](const std::vector<int>& cand_in_base,
+                                        const std::vector<sched_model::Insn>& cand_seq,
+                                        bool cand_strict_safe) -> bool {
+    return TryCommitAchievableSched1Candidate(stage3_ctx, cand_in_base, cand_seq, cand_strict_safe,
+                                              &out_blk);
+  };
+
+  constexpr int kMaxFixedPointRounds = 4;
+  absl::btree_set<std::vector<int>> tried_prefs;
+  auto run_fixed_point_search = [&](bool hoist_displaced_b0_args, bool run_tie_flips,
+                                    const std::vector<int>* initial_seed = nullptr,
+                                    bool use_closest_s1 = false) -> bool {
+    const bool allow_relaxed = (initial_seed != nullptr);
+    absl::btree_set<std::vector<int>> local_tried_prefs;
+    absl::btree_set<std::vector<int>>& active_tried_prefs =
+        allow_relaxed ? local_tried_prefs : tried_prefs;
+    std::vector<int> cur_to_base(static_cast<size_t>(n));
+    sched_model::Sched1ProjectionView cur_view = base_view;
+    absl::btree_set<int> cur_excluded = proj_ctx.excluded_prologue_body_indices;
+    if (initial_seed != nullptr && static_cast<int>(initial_seed->size()) == n) {
+      cur_to_base = *initial_seed;
+      std::vector<sched_model::Insn> seed_seq;
+      seed_seq.reserve(static_cast<size_t>(n));
+      for (int pos = 0; pos < n; ++pos) {
+        sched_model::Insn insn =
+            base_region.sched_block[static_cast<size_t>(cur_to_base[static_cast<size_t>(pos)])];
+        insn.luid = pos;
+        seed_seq.push_back(std::move(insn));
+      }
+      std::vector<sched_model::Insn> seed_body;
+      seed_body.reserve(static_cast<size_t>(body_len));
+      for (int pos = prologue_end; pos < epilogue_begin; ++pos) {
+        sched_model::Insn insn = seed_seq[static_cast<size_t>(pos)];
+        insn.luid = pos - prologue_end;
+        seed_body.push_back(std::move(insn));
+      }
+      sched_model::Sched1ProjectionContext seed_proj_ctx = proj_ctx;
+      seed_proj_ctx.excluded_prologue_body_indices =
+          sched_model::FindInterleavedPrologueSaveBodyIndices(seed_seq, bounds, b, mm);
+      cur_excluded = seed_proj_ctx.excluded_prologue_body_indices;
+      cur_view = sched_model::ProjectPostReloadBlockToSched1View(seed_body, mm, live_at_end_s2,
+                                                                 seed_proj_ctx);
+      if (cur_view.core_insns.size() <= 1) {
+        return false;
+      }
+    } else {
+      for (int i = 0; i < n; ++i) {
+        cur_to_base[static_cast<size_t>(i)] = i;
+      }
+    }
+
+    for (int round = 0; round < kMaxFixedPointRounds; ++round) {
+      std::vector<int> extra_pinned;
+      if (hoist_displaced_b0_args && b == 0) {
+        std::vector<sched_model::Insn> cur_body;
+        cur_body.reserve(static_cast<size_t>(body_len));
+        for (int pos = prologue_end; pos < epilogue_begin; ++pos) {
+          sched_model::Insn insn =
+              base_region.sched_block[static_cast<size_t>(cur_to_base[static_cast<size_t>(pos)])];
+          insn.luid = pos - prologue_end;
+          cur_body.push_back(std::move(insn));
+        }
+        extra_pinned = sched_model::CollectDisplacedBlock0EntryArgCopyBodyIndices(
+            cur_body, cur_view, cur_excluded, mm, fp_needed);
+        if (round == 0 && extra_pinned.empty()) {
+          return false;
+        }
+      }
+      std::vector<int> closest_s1;
+      if (use_closest_s1) {
+        closest_s1 = sched_model::ScheduleClosestSched1CoreOrder(cur_view, mm);
+      }
+      std::vector<int> preferred_in_target;
+      if (!lift_view_to_preferred_target(cur_to_base, cur_view, cur_excluded, extra_pinned,
+                                         &preferred_in_target, closest_s1)) {
+        break;
+      }
+      if ((!run_tie_flips || allow_relaxed) &&
+          !active_tried_prefs.insert(preferred_in_target).second) {
+        break;
+      }
+      const std::optional<std::vector<int>> cand_in_target = sched_model::InvertBlockOrder(
+          target_region.sched_block, facts_s2, mm, sched_model::Phase::kSched2, live_at_end_s2,
+          preferred_in_target, reload_adjacent);
+      if (!cand_in_target.has_value()) {
+        break;
+      }
+      std::vector<int> cand_in_base(static_cast<size_t>(n));
+      bool differs_from_base = false;
+      for (int pos = 0; pos < n; ++pos) {
+        const int bi =
+            target_to_base[static_cast<size_t>((*cand_in_target)[static_cast<size_t>(pos)])];
+        cand_in_base[static_cast<size_t>(pos)] = bi;
+        if (bi != pos) {
+          differs_from_base = true;
+        }
+      }
+      if (!differs_from_base) {
+        break;
+      }
+      const bool strict_safety_ok = sched_model::PreservesPostReloadOrderSafety(
+          base_region.sched_block, cand_in_base, prologue_end, epilogue_begin, live_at_end_s2,
+          cfg_ctx.cfg_copy_pairs, facts_s2, mm,
+          /*allow_pure_reader_reg_dead_transfer=*/false, cfg_ctx.stack_layout,
+          proj_ctx.excluded_prologue_body_indices, allow_moved_store_load_equiv_invalidation);
+      if (!strict_safety_ok &&
+          (!allow_relaxed ||
+           !sched_model::PreservesPostReloadOrderSafety(
+               base_region.sched_block, cand_in_base, prologue_end, epilogue_begin, live_at_end_s2,
+               cfg_ctx.cfg_copy_pairs, facts_s2, mm,
+               /*allow_pure_reader_reg_dead_transfer=*/true, cfg_ctx.stack_layout,
+               proj_ctx.excluded_prologue_body_indices,
+               allow_moved_store_load_equiv_invalidation))) {
+        break;
+      }
+      std::vector<sched_model::Insn> cand_seq;
+      cand_seq.reserve(static_cast<size_t>(n));
+      for (int pos = 0; pos < n; ++pos) {
+        sched_model::Insn insn =
+            base_region.sched_block[static_cast<size_t>(cand_in_base[static_cast<size_t>(pos)])];
+        insn.luid = pos;
+        cand_seq.push_back(std::move(insn));
+      }
+      std::vector<sched_model::Insn> cand_body;
+      cand_body.reserve(static_cast<size_t>(body_len));
+      for (int pos = prologue_end; pos < epilogue_begin; ++pos) {
+        sched_model::Insn insn = cand_seq[static_cast<size_t>(pos)];
+        insn.luid = pos - prologue_end;
+        cand_body.push_back(std::move(insn));
+      }
+      sched_model::Sched1ProjectionContext cand_proj_ctx = proj_ctx;
+      cand_proj_ctx.excluded_prologue_body_indices =
+          sched_model::FindInterleavedPrologueSaveBodyIndices(cand_seq, bounds, b, mm);
+      sched_model::Sched1ProjectionView cand_view = sched_model::ProjectPostReloadBlockToSched1View(
+          cand_body, mm, live_at_end_s2, cand_proj_ctx);
+      if (cand_view.core_insns.size() <= 1) {
+        break;
+      }
+      const bool cand_ach =
+          sched_model::IsAchievable(cand_view.core_insns, cand_view.facts_s1, mm,
+                                    sched_model::Phase::kSched1, cand_view.live_at_end_s1);
+      if (cand_ach && try_commit_achievable_cand(cand_in_base, cand_seq, strict_safety_ok)) {
+        return true;
+      }
+      cur_to_base = std::move(cand_in_base);
+      cur_excluded = std::move(cand_proj_ctx.excluded_prologue_body_indices);
+      cur_view = std::move(cand_view);
+    }
+
+    if (!run_tie_flips) {
+      return false;
+    }
+
+    std::vector<int> extra_pinned;
+    if (hoist_displaced_b0_args && b == 0) {
+      std::vector<sched_model::Insn> cur_body;
+      cur_body.reserve(static_cast<size_t>(body_len));
+      for (int pos = prologue_end; pos < epilogue_begin; ++pos) {
+        sched_model::Insn insn =
+            base_region.sched_block[static_cast<size_t>(cur_to_base[static_cast<size_t>(pos)])];
+        insn.luid = pos - prologue_end;
+        cur_body.push_back(std::move(insn));
+      }
+      extra_pinned = sched_model::CollectDisplacedBlock0EntryArgCopyBodyIndices(
+          cur_body, cur_view, cur_excluded, mm, fp_needed);
+    }
+    std::vector<sched_model::Insn> cur_seq_for_edges;
+    cur_seq_for_edges.reserve(static_cast<size_t>(n));
+    for (int pos = 0; pos < n; ++pos) {
+      sched_model::Insn insn =
+          base_region.sched_block[static_cast<size_t>(cur_to_base[static_cast<size_t>(pos)])];
+      insn.luid = pos;
+      cur_seq_for_edges.push_back(std::move(insn));
+    }
+
+    struct BestStage3Residual {
+      int s1_diffs = std::numeric_limits<int>::max();
+      std::vector<int> to_base;
+      std::vector<sched_model::Insn> seq;
+      sched_model::Sched1ProjectionView view;
+      absl::btree_set<int> excluded;
+      std::vector<int> extra_pinned;
+    };
+    const int cur_s1_diffs = count_s1_diffs(cur_view);
+    BestStage3Residual best_residual;
+
+    auto refine_from_target_pref = [&](const std::vector<int>& init_pref_in_target,
+                                       bool record_best) -> bool {
+      std::vector<int> seed_to_base;
+      sched_model::Sched1ProjectionView seed_view;
+      absl::btree_set<int> seed_excluded;
+      std::vector<int> seed_extra_pinned;
+      std::vector<int> preferred_in_target = init_pref_in_target;
+      constexpr int kMaxSeedRefineRounds = 4;
+      for (int sround = 0; sround < kMaxSeedRefineRounds; ++sround) {
+        if (sround > 0 && !lift_view_to_preferred_target(seed_to_base, seed_view, seed_excluded,
+                                                         seed_extra_pinned, &preferred_in_target)) {
+          break;
+        }
+        if (!active_tried_prefs.insert(preferred_in_target).second) {
+          break;
+        }
+        const std::optional<std::vector<int>> cand_in_target = sched_model::InvertBlockOrder(
+            target_region.sched_block, facts_s2, mm, sched_model::Phase::kSched2, live_at_end_s2,
+            preferred_in_target, reload_adjacent);
+        if (!cand_in_target.has_value()) {
+          break;
+        }
+        std::vector<int> cand_in_base(static_cast<size_t>(n));
+        bool differs_from_base = false;
+        for (int pos = 0; pos < n; ++pos) {
+          const int bi =
+              target_to_base[static_cast<size_t>((*cand_in_target)[static_cast<size_t>(pos)])];
+          cand_in_base[static_cast<size_t>(pos)] = bi;
+          if (bi != pos) {
+            differs_from_base = true;
+          }
+        }
+        if (!differs_from_base) {
+          break;
+        }
+        const bool strict_safety_ok = sched_model::PreservesPostReloadOrderSafety(
+            base_region.sched_block, cand_in_base, prologue_end, epilogue_begin, live_at_end_s2,
+            cfg_ctx.cfg_copy_pairs, facts_s2, mm,
+            /*allow_pure_reader_reg_dead_transfer=*/false, cfg_ctx.stack_layout,
+            proj_ctx.excluded_prologue_body_indices, allow_moved_store_load_equiv_invalidation);
+        if (!strict_safety_ok &&
+            (!allow_relaxed ||
+             !sched_model::PreservesPostReloadOrderSafety(
+                 base_region.sched_block, cand_in_base, prologue_end, epilogue_begin,
+                 live_at_end_s2, cfg_ctx.cfg_copy_pairs, facts_s2, mm,
+                 /*allow_pure_reader_reg_dead_transfer=*/true, cfg_ctx.stack_layout,
+                 proj_ctx.excluded_prologue_body_indices,
+                 allow_moved_store_load_equiv_invalidation))) {
+          break;
+        }
+        std::vector<sched_model::Insn> cand_seq;
+        cand_seq.reserve(static_cast<size_t>(n));
+        for (int pos = 0; pos < n; ++pos) {
+          sched_model::Insn insn =
+              base_region.sched_block[static_cast<size_t>(cand_in_base[static_cast<size_t>(pos)])];
+          insn.luid = pos;
+          cand_seq.push_back(std::move(insn));
+        }
+        std::vector<sched_model::Insn> cand_body;
+        cand_body.reserve(static_cast<size_t>(body_len));
+        for (int pos = prologue_end; pos < epilogue_begin; ++pos) {
+          sched_model::Insn insn = cand_seq[static_cast<size_t>(pos)];
+          insn.luid = pos - prologue_end;
+          cand_body.push_back(std::move(insn));
+        }
+        sched_model::Sched1ProjectionContext cand_proj_ctx = proj_ctx;
+        cand_proj_ctx.excluded_prologue_body_indices =
+            sched_model::FindInterleavedPrologueSaveBodyIndices(cand_seq, bounds, b, mm);
+        sched_model::Sched1ProjectionView cand_view =
+            sched_model::ProjectPostReloadBlockToSched1View(cand_body, mm, live_at_end_s2,
+                                                            cand_proj_ctx);
+        const bool is_ach_cand =
+            cand_view.core_insns.size() > 1 &&
+            sched_model::IsAchievable(cand_view.core_insns, cand_view.facts_s1, mm,
+                                      sched_model::Phase::kSched1, cand_view.live_at_end_s1);
+        if (is_ach_cand && try_commit_achievable_cand(cand_in_base, cand_seq, strict_safety_ok)) {
+          return true;
+        }
+        seed_to_base = std::move(cand_in_base);
+        seed_excluded = std::move(cand_proj_ctx.excluded_prologue_body_indices);
+        seed_view = std::move(cand_view);
+        if (hoist_displaced_b0_args && b == 0) {
+          seed_extra_pinned = sched_model::CollectDisplacedBlock0EntryArgCopyBodyIndices(
+              cand_body, seed_view, seed_excluded, mm, fp_needed);
+        }
+        if (record_best && seed_view.core_insns.size() > 1) {
+          const int nd = count_s1_diffs(seed_view);
+          if (nd > 0 && nd < best_residual.s1_diffs) {
+            best_residual.s1_diffs = nd;
+            best_residual.to_base = seed_to_base;
+            best_residual.seq = std::move(cand_seq);
+            best_residual.view = seed_view;
+            best_residual.excluded = seed_excluded;
+            best_residual.extra_pinned = seed_extra_pinned;
+          }
+        }
+      }
+      return false;
+    };
+
+    // (a) Hoist callee-saved insns sunk across a call (`sched.c:1704, 2235`).
+    for (const std::vector<int>& hoist_in_cur :
+         sched_model::CollectSched1704CallHoistCandidatePrefs(
+             cur_seq_for_edges, prologue_end, epilogue_begin, cur_view, facts_s2, mm)) {
+      std::vector<int> hoist_in_target(static_cast<size_t>(n));
+      for (int pos = 0; pos < n; ++pos) {
+        hoist_in_target[static_cast<size_t>(pos)] = base_to_target[static_cast<size_t>(
+            cur_to_base[static_cast<size_t>(hoist_in_cur[static_cast<size_t>(pos)])])];
+      }
+      if (refine_from_target_pref(hoist_in_target, /*record_best=*/true)) {
+        return true;
+      }
+    }
+
+    auto run_tie_flips_on_state =
+        [&](const std::vector<int>& st_to_base, const std::vector<sched_model::Insn>& st_seq,
+            const sched_model::Sched1ProjectionView& st_view,
+            const absl::btree_set<int>& st_excluded, const std::vector<int>& st_extra_pinned,
+            int max_orders, bool record_best) -> bool {
+      const std::vector<std::pair<int, int>> core_s2_edges = sched_model::ExtractCoreSched2Edges(
+          st_seq, prologue_end, epilogue_begin, st_view, facts_s2, mm);
+      std::vector<int> st_to_target(static_cast<size_t>(n), -1);
+      for (int pos = 0; pos < n; ++pos) {
+        st_to_target[static_cast<size_t>(pos)] =
+            base_to_target[static_cast<size_t>(st_to_base[static_cast<size_t>(pos)])];
+      }
+      const std::vector<std::pair<int, int>> core_s2_replay_edges =
+          sched_model::ExtractCoreSched2ReplayEdges(
+              target_region.sched_block, st_to_target, prologue_end, epilogue_begin, st_view,
+              facts_s2, mm, live_at_end_s2,
+              /*preserve_reg_dead_reader_order=*/(initial_seed == nullptr));
+      const std::vector<std::vector<int>> tie_flip_orders =
+          sched_model::CollectSched1TieFlipCoreOrders(st_view, mm, max_orders, core_s2_edges,
+                                                      core_s2_replay_edges);
+      for (const std::vector<int>& alt_s1_order : tie_flip_orders) {
+        std::vector<int> preferred_in_target;
+        if (!lift_view_to_preferred_target(st_to_base, st_view, st_excluded, st_extra_pinned,
+                                           &preferred_in_target, alt_s1_order)) {
+          continue;
+        }
+        if (refine_from_target_pref(preferred_in_target, record_best)) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    if (run_tie_flips_on_state(cur_to_base, cur_seq_for_edges, cur_view, cur_excluded, extra_pinned,
+                               /*max_orders=*/24, /*record_best=*/true)) {
+      return true;
+    }
+
+    bool cur_differs_from_base = false;
+    for (int pos = 0; pos < n; ++pos) {
+      if (cur_to_base[static_cast<size_t>(pos)] != pos) {
+        cur_differs_from_base = true;
+        break;
+      }
+    }
+    if (cur_differs_from_base) {
+      std::vector<int> id_to_base(static_cast<size_t>(n));
+      std::vector<sched_model::Insn> id_seq;
+      id_seq.reserve(static_cast<size_t>(n));
+      for (int pos = 0; pos < n; ++pos) {
+        id_to_base[static_cast<size_t>(pos)] = pos;
+        sched_model::Insn insn = base_region.sched_block[static_cast<size_t>(pos)];
+        insn.luid = pos;
+        id_seq.push_back(std::move(insn));
+      }
+      std::vector<int> base_extra_pinned;
+      if (hoist_displaced_b0_args && b == 0) {
+        base_extra_pinned = sched_model::CollectDisplacedBlock0EntryArgCopyBodyIndices(
+            base_body, base_view, proj_ctx.excluded_prologue_body_indices, mm, fp_needed);
+      }
+      if (run_tie_flips_on_state(id_to_base, id_seq, base_view,
+                                 proj_ctx.excluded_prologue_body_indices, base_extra_pinned,
+                                 /*max_orders=*/24, /*record_best=*/true)) {
+        return true;
+      }
+    }
+
+    auto run_sunk_consumer_hoists_on_state =
+        [&](const std::vector<int>& st_to_base, const sched_model::Sched1ProjectionView& st_view,
+            const absl::btree_set<int>& st_excluded, const std::vector<int>& st_extra_pinned,
+            int max_orders, bool record_best) -> bool {
+      const std::vector<std::vector<int>> hoist_orders =
+          sched_model::CollectSched1SunkConsumerHoistCoreOrders(st_view, mm, max_orders);
+      for (const std::vector<int>& alt_s1_order : hoist_orders) {
+        std::vector<int> preferred_in_target;
+        if (!lift_view_to_preferred_target(st_to_base, st_view, st_excluded, st_extra_pinned,
+                                           &preferred_in_target, alt_s1_order)) {
+          continue;
+        }
+        if (refine_from_target_pref(preferred_in_target, record_best)) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    if (best_residual.s1_diffs < cur_s1_diffs && !best_residual.to_base.empty()) {
+      for (int descent = 0; descent < 2; ++descent) {
+        const auto snap_h = best_residual;
+        if (run_sunk_consumer_hoists_on_state(snap_h.to_base, snap_h.view, snap_h.excluded,
+                                              snap_h.extra_pinned, /*max_orders=*/12,
+                                              /*record_best=*/true)) {
+          return true;
+        }
+        const auto snap_t = best_residual;
+        if (run_tie_flips_on_state(snap_t.to_base, snap_t.seq, snap_t.view, snap_t.excluded,
+                                   snap_t.extra_pinned, /*max_orders=*/12,
+                                   /*record_best=*/true)) {
+          return true;
+        }
+        if (best_residual.s1_diffs >= snap_h.s1_diffs) {
+          break;
+        }
+      }
+    } else if (cur_s1_diffs > 0) {
+      if (run_sunk_consumer_hoists_on_state(cur_to_base, cur_view, cur_excluded, extra_pinned,
+                                            /*max_orders=*/12, /*record_best=*/false)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  std::vector<std::vector<int>> verified_reg_dead_seeds;
+  auto record_verified_seed = [&](std::vector<int> cand_in_base) {
+    if (std::find(verified_reg_dead_seeds.begin(), verified_reg_dead_seeds.end(), cand_in_base) ==
+        verified_reg_dead_seeds.end()) {
+      verified_reg_dead_seeds.push_back(std::move(cand_in_base));
+    }
+  };
+  auto try_inverted_reg_dead_seed = [&](const std::vector<int>& seed_in_base) -> bool {
+    std::vector<int> preferred_in_target(static_cast<size_t>(n));
+    for (int pos = 0; pos < n; ++pos) {
+      preferred_in_target[static_cast<size_t>(pos)] =
+          base_to_target[static_cast<size_t>(seed_in_base[static_cast<size_t>(pos)])];
+    }
+    const std::optional<std::vector<int>> cand_in_target = sched_model::InvertBlockOrder(
+        target_region.sched_block, facts_s2, mm, sched_model::Phase::kSched2, live_at_end_s2,
+        preferred_in_target, reload_adjacent);
+    if (!cand_in_target.has_value()) {
+      return false;
+    }
+    std::vector<int> cand_in_base(static_cast<size_t>(n));
+    for (int pos = 0; pos < n; ++pos) {
+      cand_in_base[static_cast<size_t>(pos)] =
+          target_to_base[static_cast<size_t>((*cand_in_target)[static_cast<size_t>(pos)])];
+    }
+    std::vector<sched_model::Insn> cand_seq;
+    cand_seq.reserve(static_cast<size_t>(n));
+    for (int pos = 0; pos < n; ++pos) {
+      sched_model::Insn insn =
+          base_region.sched_block[static_cast<size_t>(cand_in_base[static_cast<size_t>(pos)])];
+      insn.luid = pos;
+      cand_seq.push_back(std::move(insn));
+    }
+    if (sched_model::BuildInvertedRegDeadSeedOrderInBase(cand_seq, prologue_end, epilogue_begin,
+                                                         facts_s2, mm)
+            .has_value()) {
+      return false;
+    }
+    if (!sched_model::PreservesPostReloadOrderSafety(
+            base_region.sched_block, cand_in_base, prologue_end, epilogue_begin, live_at_end_s2,
+            cfg_ctx.cfg_copy_pairs, facts_s2, mm,
+            /*allow_pure_reader_reg_dead_transfer=*/false, cfg_ctx.stack_layout,
+            proj_ctx.excluded_prologue_body_indices, allow_moved_store_load_equiv_invalidation)) {
+      return false;
+    }
+    std::vector<sched_model::Insn> cand_body;
+    cand_body.reserve(static_cast<size_t>(body_len));
+    for (int pos = prologue_end; pos < epilogue_begin; ++pos) {
+      sched_model::Insn insn = cand_seq[static_cast<size_t>(pos)];
+      insn.luid = pos - prologue_end;
+      cand_body.push_back(std::move(insn));
+    }
+    sched_model::Sched1ProjectionContext cand_proj_ctx = proj_ctx;
+    cand_proj_ctx.excluded_prologue_body_indices =
+        sched_model::FindInterleavedPrologueSaveBodyIndices(cand_seq, bounds, b, mm);
+    sched_model::Sched1ProjectionView cand_view = sched_model::ProjectPostReloadBlockToSched1View(
+        cand_body, mm, live_at_end_s2, cand_proj_ctx);
+    if (cand_view.core_insns.size() <= 1 ||
+        !sched_model::IsAchievable(cand_view.core_insns, cand_view.facts_s1, mm,
+                                   sched_model::Phase::kSched1, cand_view.live_at_end_s1)) {
+      record_verified_seed(std::move(cand_in_base));
+      return false;
+    }
+    ApplyReorderedSchedRegion(&out_blk, base_region, cand_in_base);
+    return true;
+  };
+
+  bool has_displaced_integrated_b0_arg = false;
+  if (b == 0) {
+    for (int rel : sched_model::CollectDisplacedBlock0EntryArgCopyBodyIndices(
+             base_body, base_view, proj_ctx.excluded_prologue_body_indices, mm, fp_needed)) {
+      const RtlExpr& pat = base_body[static_cast<size_t>(rel)].pn.pattern;
+      if (pat.op == RtlOp::kSet && pat.children.size() == 2 &&
+          ((pat.SetDest().op == RtlOp::kReg && pat.SetDest().flags.integrated) ||
+           pat.SetDest().op == RtlOp::kMem)) {
+        has_displaced_integrated_b0_arg = true;
+        break;
+      }
+    }
+  }
+  auto refine_verified_seed = [&](const std::vector<int>& seed) -> bool {
+    return run_fixed_point_search(/*hoist_displaced_b0_args=*/false, /*run_tie_flips=*/false,
+                                  &seed) ||
+           (b == 0 && run_fixed_point_search(/*hoist_displaced_b0_args=*/true,
+                                             /*run_tie_flips=*/false, &seed)) ||
+           run_fixed_point_search(/*hoist_displaced_b0_args=*/false, /*run_tie_flips=*/false, &seed,
+                                  /*use_closest_s1=*/true) ||
+           (b == 0 && run_fixed_point_search(/*hoist_displaced_b0_args=*/true,
+                                             /*run_tie_flips=*/false, &seed,
+                                             /*use_closest_s1=*/true)) ||
+           run_fixed_point_search(/*hoist_displaced_b0_args=*/false, /*run_tie_flips=*/true,
+                                  &seed) ||
+           (b == 0 && run_fixed_point_search(/*hoist_displaced_b0_args=*/true,
+                                             /*run_tie_flips=*/true, &seed));
+  };
+  bool solved = false;
+  if (inverted_reg_dead_seed.has_value()) {
+    solved = try_inverted_reg_dead_seed(*inverted_reg_dead_seed);
+    for (const sched_model::InvertedRegDeadSeedMode alt_mode :
+         {sched_model::InvertedRegDeadSeedMode::kPullBeforeDead,
+          sched_model::InvertedRegDeadSeedMode::kDeferAfterReaders}) {
+      if (solved) {
+        break;
+      }
+      const std::optional<std::vector<int>> alt_seed =
+          sched_model::BuildInvertedRegDeadSeedOrderInBase(base_region.sched_block, prologue_end,
+                                                           epilogue_begin, facts_s2, mm, alt_mode);
+      if (alt_seed.has_value() && *alt_seed != *inverted_reg_dead_seed) {
+        solved = try_inverted_reg_dead_seed(*alt_seed);
+      }
+    }
+  }
+  if (!solved) {
+    if (has_displaced_integrated_b0_arg) {
+      solved = run_fixed_point_search(/*hoist_displaced_b0_args=*/true, /*run_tie_flips=*/false) ||
+               run_fixed_point_search(/*hoist_displaced_b0_args=*/false, /*run_tie_flips=*/false);
+    } else {
+      solved = run_fixed_point_search(/*hoist_displaced_b0_args=*/false, /*run_tie_flips=*/false) ||
+               (b == 0 &&
+                run_fixed_point_search(/*hoist_displaced_b0_args=*/true, /*run_tie_flips=*/false));
+    }
+  }
+  if (!solved) {
+    if (has_displaced_integrated_b0_arg) {
+      solved = run_fixed_point_search(/*hoist_displaced_b0_args=*/true, /*run_tie_flips=*/false,
+                                      /*initial_seed=*/nullptr, /*use_closest_s1=*/true) ||
+               run_fixed_point_search(/*hoist_displaced_b0_args=*/false, /*run_tie_flips=*/false,
+                                      /*initial_seed=*/nullptr, /*use_closest_s1=*/true);
+    } else {
+      solved = run_fixed_point_search(/*hoist_displaced_b0_args=*/false, /*run_tie_flips=*/false,
+                                      /*initial_seed=*/nullptr, /*use_closest_s1=*/true) ||
+               (b == 0 && run_fixed_point_search(/*hoist_displaced_b0_args=*/true,
+                                                 /*run_tie_flips=*/false, /*initial_seed=*/nullptr,
+                                                 /*use_closest_s1=*/true));
+    }
+  }
+  if (!solved) {
+    if (has_displaced_integrated_b0_arg) {
+      solved = run_fixed_point_search(/*hoist_displaced_b0_args=*/true, /*run_tie_flips=*/true) ||
+               run_fixed_point_search(/*hoist_displaced_b0_args=*/false, /*run_tie_flips=*/true);
+    } else {
+      solved = run_fixed_point_search(/*hoist_displaced_b0_args=*/false, /*run_tie_flips=*/true) ||
+               (b == 0 &&
+                run_fixed_point_search(/*hoist_displaced_b0_args=*/true, /*run_tie_flips=*/true));
+    }
+  }
+  // When strict search cannot solve a block whose `base_region` has
+  // `sched2`-inverted pure-reader `REG_DEAD` notes (e.g. multiple registers or
+  // `sched.c:1704` call-sunk insns), run relaxed intermediate refinement from
+  // verified inverted-`REG_DEAD` seeds and (if needed) `base_region` itself;
+  // final commit still strictly enforces all four gates (`kSched2` replay,
+  // strict safety, zero remaining `REG_DEAD` inversions, and
+  // `IsAchievable(kSched1)`).
+  for (const std::vector<int>& vseed : verified_reg_dead_seeds) {
+    if (solved) {
+      break;
+    }
+    solved = refine_verified_seed(vseed);
+  }
+  if (!solved && inverted_reg_dead_seed.has_value()) {
+    std::vector<int> identity_seed(static_cast<size_t>(n));
+    for (int pos = 0; pos < n; ++pos) {
+      identity_seed[static_cast<size_t>(pos)] = pos;
+    }
+    solved = refine_verified_seed(identity_seed);
+  }
+  return solved;
+}
+
+// Stage 3 (`kSched2`) -> Stage 6 (`kSched1`) forward-verified preimage selector
+// (`step37_design.md` §2.3 Step 3). Strictly gated on:
+//   (a) exact `InvertBlockOrder(kSched2)` verification `Schedule(Q_cand, kSched2) == P`,
+//   (b) hard-reg/memory DAG and `REG_DEAD` safety for Stage 4 (`Pass04`/`Pass05`), AND
+//   (c) `IsAchievable(ProjectPostReloadBlockToSched1View(Q_cand), kSched1) == true`.
+// Mirrors `caller-save.c:410-411, 568-615` (`restore_referenced_regs`):
+// post-call caller-save restores are emitted immediately in front of the first
+// post-call instruction that references the restored hard register (in
+// ascending hard-register order when multiple restores share a consumer). When
+// Stage 3 commits a `kSched1`-achievable preimage (including from the
+// pre-unscheduled fallback), re-sinks any `sched2`-hoisted caller-save restore
+// (`cfg_ctx.stack_layout.caller_save_slot_offsets`) immediately before its
+// first consumer iff the resulting block strictly passes
+// `PreservesPostReloadOrderSafety`, exact forward `kSched2` replay against
+// `target_blk`, and `IsAchievable(kSched1)`.
+void SinkCallerSaveRestoresIfVerified(RtlBasicBlock* out_blk, const RtlBasicBlock& target_blk,
+                                      size_t b, const sched_model::MachineModel& mm,
+                                      const sched_model::RegFacts& facts_s2,
+                                      const sched_model::CfgSched1Context& cfg_ctx,
+                                      const RtlControlFlowGraph& live_cfg) {
+  if (cfg_ctx.stack_layout.caller_save_slot_offsets.empty()) {
+    return;
+  }
+  const sched_model::ParsedSchedRegion base_region =
+      sched_model::ParseBlockForSchedModel(*out_blk, b, sched_model::Phase::kSched2);
+  const sched_model::ParsedSchedRegion target_region =
+      sched_model::ParseBlockForSchedModel(target_blk, b, sched_model::Phase::kSched2);
+  if (!base_region.valid || !target_region.valid || base_region.has_mid_block_loop_barrier ||
+      target_region.has_mid_block_loop_barrier) {
+    return;
+  }
+  const int n = static_cast<int>(base_region.sched_block.size());
+  if (n <= 2 || static_cast<int>(target_region.sched_block.size()) != n) {
+    return;
+  }
+  const sched_model::PostReloadBodyBounds bounds =
+      sched_model::FindPostReloadBodyBounds(base_region.sched_block, b);
+  const int prologue_end = bounds.prologue_end;
+  const int epilogue_begin = bounds.epilogue_begin;
+  const int body_len = epilogue_begin - prologue_end;
+  if (body_len <= 1) {
+    return;
+  }
+
+  absl::btree_set<int> live_at_end_s2;
+  for (int succ : out_blk->successors) {
+    if (const auto it = live_cfg.sideband.basic_block_live_at_start.find(succ);
+        it != live_cfg.sideband.basic_block_live_at_start.end()) {
+      live_at_end_s2.insert(it->second.begin(), it->second.end());
+    }
+  }
+  sched_model::Sched1ProjectionContext proj_ctx =
+      sched_model::BuildSched1ProjectionContextForBlock(b, cfg_ctx);
+  proj_ctx.allow_post_call_combine_regs_split = false;
+
+  auto match_cs_restore = [&](const sched_model::Insn& insn, int* out_reg, int* out_nregs) -> bool {
+    if (insn.kind != sched_model::Insn::Kind::kInsn) {
+      return false;
+    }
+    const RtlExpr& pat = insn.pn.pattern;
+    if (pat.op != RtlOp::kSet || pat.children.size() != 2 || pat.SetDest().op != RtlOp::kReg ||
+        pat.SetDest().flags.integrated) {
+      return false;
+    }
+    for (const RtlRegNote& note : insn.pn.reg_notes) {
+      if (note.kind == RtlMachineMode::kRegEquiv || note.kind == RtlMachineMode::kRegEqual) {
+        return false;
+      }
+    }
+    const int r = pat.SetDest().RegNo();
+    if (r <= 0 || r >= kMipsFirstPseudoRegister || !mm.CallUsed(r)) {
+      return false;
+    }
+    int base = -1;
+    int64_t off = 0;
+    int64_t sz = 0;
+    if (!ExtractStackBaseDispMem(pat.SetSrc(), &base, &off, &sz) || base != kMipsSpRegno ||
+        !cfg_ctx.stack_layout.caller_save_slot_offsets.contains(off)) {
+      return false;
+    }
+    *out_reg = r;
+    *out_nregs = std::max(1, mm.HardRegNRegs(r, pat.SetDest().mode));
+    return true;
+  };
+
+  auto insn_touches_reg_span = [&](const sched_model::Insn& insn, int r, int nr) -> bool {
+    if (insn.kind == sched_model::Insn::Kind::kCall ||
+        insn.kind == sched_model::Insn::Kind::kJump) {
+      return true;
+    }
+    bool hit = false;
+    auto check_expr = [&](const RtlExpr& root) {
+      root.Visit([&](const RtlExpr& e) {
+        if (hit || e.op != RtlOp::kReg || e.IsArgPointerReg()) {
+          return;
+        }
+        const int er = e.RegNo();
+        if (er < 0 || er >= kMipsFirstPseudoRegister) {
+          return;
+        }
+        const int enr = std::max(1, mm.HardRegNRegs(er, e.mode));
+        if (er < r + nr && r < er + enr) {
+          hit = true;
+        }
+      });
+    };
+    check_expr(insn.pn.pattern);
+    for (const RtlExpr& fu : insn.pn.call_fusage) {
+      check_expr(fu);
+    }
+    return hit;
+  };
+
+  auto insn_reads_reg_span = [&](const sched_model::Insn& insn, int r, int nr) -> bool {
+    bool hit = false;
+    auto check_reads = [&](const auto& self, const RtlExpr& e, bool in_dst) -> void {
+      if (hit || e.op == RtlOp::kClobber) {
+        return;
+      }
+      if (e.op == RtlOp::kReg && !e.IsArgPointerReg()) {
+        if (!in_dst) {
+          const int er = e.RegNo();
+          if (er >= 0 && er < kMipsFirstPseudoRegister) {
+            const int enr = std::max(1, mm.HardRegNRegs(er, e.mode));
+            if (er < r + nr && r < er + enr) {
+              hit = true;
+            }
+          }
+        }
+        return;
+      }
+      if (e.op == RtlOp::kSet && e.children.size() == 2) {
+        self(self, e.children[1], false);
+        if (e.children[0].op == RtlOp::kMem) {
+          self(self, e.children[0], false);
+        } else {
+          self(self, e.children[0], true);
+        }
+        return;
+      }
+      for (const RtlExpr& ch : e.children) {
+        self(self, ch, in_dst);
+      }
+    };
+    check_reads(check_reads, insn.pn.pattern, false);
+    return hit;
+  };
+
+  auto has_reg_dead_covering = [&](const sched_model::Insn& insn, int r, int nr) -> bool {
+    for (const RtlRegNote& note : insn.pn.reg_notes) {
+      if (note.kind == RtlMachineMode::kRegDead && note.datum.op == RtlOp::kReg &&
+          !note.datum.IsArgPointerReg()) {
+        const int dr = note.datum.RegNo();
+        if (dr >= 0 && dr < kMipsFirstPseudoRegister) {
+          const int dnr = std::max(1, mm.HardRegNRegs(dr, note.datum.mode));
+          if (dr < r + nr && r < dr + dnr) {
+            return true;
+          }
+        }
+      }
+    }
+    return false;
+  };
+
+  // Matches a `reload1.c:1938, 5641-6485` (`reload_as_needed` /
+  // `emit_reload_insns`) input reload into a call-used scratch register feeding
+  // `user_insn` without a `(REG_DEAD lr)` note on `user_insn`.
+  auto match_input_reload_for_user = [&](const sched_model::Insn& r_insn,
+                                         const sched_model::Insn& u_insn, int* out_reg,
+                                         int* out_nregs) -> bool {
+    if (r_insn.kind != sched_model::Insn::Kind::kInsn ||
+        u_insn.kind != sched_model::Insn::Kind::kInsn || !r_insn.pn.reg_notes.empty()) {
+      return false;
+    }
+    int dummy_r = -1;
+    int dummy_nr = 0;
+    if (match_cs_restore(r_insn, &dummy_r, &dummy_nr)) {
+      return false;
+    }
+    const RtlExpr& pat = r_insn.pn.pattern;
+    if (pat.op != RtlOp::kSet || pat.children.size() != 2 || pat.SetDest().op != RtlOp::kReg ||
+        pat.SetDest().flags.integrated) {
+      return false;
+    }
+    const int lr = pat.SetDest().RegNo();
+    if (lr <= 0 || lr >= kMipsFirstPseudoRegister || !mm.CallUsed(lr)) {
+      return false;
+    }
+    const RtlExpr& src = pat.SetSrc();
+    int base = -1;
+    int64_t off = 0;
+    int64_t sz = 0;
+    const bool is_stack_load =
+        ExtractStackBaseDispMem(src, &base, &off, &sz) &&
+        (base == kMipsSpRegno ||
+         (cfg_ctx.stack_layout.frame_pointer_needed && base == kMipsFpRegno));
+    const bool is_gpr_to_fpr = (lr >= 32 && lr < 64 && src.op == RtlOp::kReg &&
+                                !src.IsArgPointerReg() && src.RegNo() >= 2 && src.RegNo() < 32);
+    const bool is_const_double = (src.op == RtlOp::kConstDouble);
+    if (!is_stack_load && !is_gpr_to_fpr && !is_const_double) {
+      return false;
+    }
+    const int lnr = std::max(1, mm.HardRegNRegs(lr, pat.SetDest().mode));
+    if (!insn_reads_reg_span(u_insn, lr, lnr) || has_reg_dead_covering(u_insn, lr, lnr)) {
+      return false;
+    }
+    if (out_reg != nullptr) {
+      *out_reg = lr;
+    }
+    if (out_nregs != nullptr) {
+      *out_nregs = lnr;
+    }
+    return true;
+  };
+
+  auto insn_key = [](const sched_model::Insn& insn) {
+    std::string k = insn.pn.pattern.ToSexprString();
+    if (insn.pn.has_explicit_call_fusage) {
+      k.push_back('|');
+      for (const RtlExpr& e : insn.pn.call_fusage) {
+        k.append(e.ToSexprString());
+        k.push_back(';');
+      }
+    }
+    return k;
+  };
+  std::vector<std::string> target_keys(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    target_keys[static_cast<size_t>(i)] =
+        insn_key(target_region.sched_block[static_cast<size_t>(i)]);
+  }
+
+  std::vector<int> cur_in_base(static_cast<size_t>(n));
+  std::iota(cur_in_base.begin(), cur_in_base.end(), 0);
+  std::vector<sched_model::Insn> cur_seq = base_region.sched_block;
+  bool changed = false;
+
+  auto try_candidate_order = [&](const std::vector<int>& cand_in_cur) -> bool {
+    std::vector<int> cand_in_base(static_cast<size_t>(n));
+    std::vector<sched_model::Insn> cand_seq;
+    cand_seq.reserve(static_cast<size_t>(n));
+    for (int pos = 0; pos < n; ++pos) {
+      cand_in_base[static_cast<size_t>(pos)] =
+          cur_in_base[static_cast<size_t>(cand_in_cur[static_cast<size_t>(pos)])];
+      sched_model::Insn insn = cur_seq[static_cast<size_t>(cand_in_cur[static_cast<size_t>(pos)])];
+      insn.luid = pos;
+      cand_seq.push_back(std::move(insn));
+    }
+
+    const absl::btree_set<int> cand_excl =
+        sched_model::FindInterleavedPrologueSaveBodyIndices(cand_seq, bounds, b, mm);
+    if (!sched_model::PreservesPostReloadOrderSafety(
+            base_region.sched_block, cand_in_base, prologue_end, epilogue_begin, live_at_end_s2,
+            cfg_ctx.cfg_copy_pairs, facts_s2, mm,
+            /*allow_pure_reader_reg_dead_transfer=*/false, cfg_ctx.stack_layout, cand_excl)) {
+      return false;
+    }
+    const sched_model::DepGraph g_s2 =
+        sched_model::Analyze(cand_seq, facts_s2, mm, sched_model::Phase::kSched2);
+    const sched_model::ScheduleResult sr_s2 = sched_model::Schedule(
+        cand_seq, g_s2, facts_s2, mm, sched_model::Phase::kSched2, live_at_end_s2);
+    if (static_cast<int>(sr_s2.order.size()) != n) {
+      return false;
+    }
+    for (int pos = 0; pos < n; ++pos) {
+      if (insn_key(cand_seq[static_cast<size_t>(sr_s2.order[static_cast<size_t>(pos)])]) !=
+          target_keys[static_cast<size_t>(pos)]) {
+        return false;
+      }
+    }
+
+    std::vector<sched_model::Insn> cand_body;
+    cand_body.reserve(static_cast<size_t>(body_len));
+    for (int pos = prologue_end; pos < epilogue_begin; ++pos) {
+      sched_model::Insn insn = cand_seq[static_cast<size_t>(pos)];
+      insn.luid = pos - prologue_end;
+      cand_body.push_back(std::move(insn));
+    }
+    sched_model::Sched1ProjectionContext cand_ctx = proj_ctx;
+    cand_ctx.excluded_prologue_body_indices = cand_excl;
+    const sched_model::Sched1ProjectionView cand_view =
+        sched_model::ProjectPostReloadBlockToSched1View(cand_body, mm, live_at_end_s2, cand_ctx);
+    if (cand_view.core_insns.size() > 1 &&
+        !sched_model::IsAchievable(cand_view.core_insns, cand_view.facts_s1, mm,
+                                   sched_model::Phase::kSched1, cand_view.live_at_end_s1)) {
+      return false;
+    }
+    cur_in_base = std::move(cand_in_base);
+    cur_seq = std::move(cand_seq);
+    changed = true;
+    return true;
+  };
+
+  for (int rev = epilogue_begin; rev > prologue_end; --rev) {
+    const int i = rev - 1;
+    int cs_r = -1;
+    int cs_nr = 0;
+    if (!match_cs_restore(cur_seq[static_cast<size_t>(i)], &cs_r, &cs_nr)) {
+      continue;
+    }
+    int first_stop = epilogue_begin;
+    for (int k = i + 1; k < epilogue_begin; ++k) {
+      if (insn_touches_reg_span(cur_seq[static_cast<size_t>(k)], cs_r, cs_nr)) {
+        first_stop = k;
+        break;
+      }
+    }
+    if (first_stop >= epilogue_begin) {
+      continue;
+    }
+    // `reload1.c:1906` (`save_call_clobbered_regs`) runs strictly BEFORE
+    // `reload1.c:1938, 5641` (`reload_as_needed` / `emit_reload_insns`), so
+    // any caller-save restore for `first_stop` precedes `first_stop`'s
+    // contiguous input reload(s).
+    int target = first_stop;
+    while (target > i + 1 && match_input_reload_for_user(cur_seq[static_cast<size_t>(target - 1)],
+                                                         cur_seq[static_cast<size_t>(first_stop)],
+                                                         nullptr, nullptr)) {
+      --target;
+    }
+    while (target > i + 1) {
+      int prev_r = -1;
+      int prev_nr = 0;
+      if (!match_cs_restore(cur_seq[static_cast<size_t>(target - 1)], &prev_r, &prev_nr) ||
+          prev_r <= cs_r) {
+        break;
+      }
+      bool prev_used = false;
+      for (int m = target; m < first_stop; ++m) {
+        if (insn_touches_reg_span(cur_seq[static_cast<size_t>(m)], prev_r, prev_nr)) {
+          prev_used = true;
+          break;
+        }
+      }
+      if (prev_used) {
+        break;
+      }
+      --target;
+    }
+    // Symmetric case: if `i` sits immediately after one or more input reloads
+    // feeding `first_stop` (so `sched2` hoisted the input reload past the
+    // caller-save restore), float `i` back ahead of those input reloads.
+    if (target == i + 1) {
+      int float_pos = i;
+      while (float_pos > prologue_end &&
+             match_input_reload_for_user(cur_seq[static_cast<size_t>(float_pos - 1)],
+                                         cur_seq[static_cast<size_t>(first_stop)], nullptr,
+                                         nullptr)) {
+        --float_pos;
+      }
+      if (float_pos < i) {
+        std::vector<int> float_restore_cand(static_cast<size_t>(n));
+        std::iota(float_restore_cand.begin(), float_restore_cand.end(), 0);
+        std::rotate(float_restore_cand.begin() + float_pos, float_restore_cand.begin() + i,
+                    float_restore_cand.begin() + i + 1);
+        try_candidate_order(float_restore_cand);
+      }
+      continue;
+    }
+
+    bool applied = false;
+    if (target == first_stop &&
+        cur_seq[static_cast<size_t>(first_stop)].kind == sched_model::Insn::Kind::kInsn) {
+      std::vector<int> hoist_user_cand(static_cast<size_t>(n));
+      std::iota(hoist_user_cand.begin(), hoist_user_cand.end(), 0);
+      std::rotate(hoist_user_cand.begin() + i + 1, hoist_user_cand.begin() + first_stop,
+                  hoist_user_cand.begin() + first_stop + 1);
+      applied = try_candidate_order(hoist_user_cand);
+    }
+    if (!applied) {
+      std::vector<int> sink_restore_cand(static_cast<size_t>(n));
+      std::iota(sink_restore_cand.begin(), sink_restore_cand.end(), 0);
+      std::rotate(sink_restore_cand.begin() + i, sink_restore_cand.begin() + i + 1,
+                  sink_restore_cand.begin() + target);
+      try_candidate_order(sink_restore_cand);
+    }
+  }
+
+  // `reload1.c:6476-6482` (`other_input_reload_insns` emitted before
+  // `input_reload_insns[j]`): canonicalize adjacent independent non-constant
+  // input reloads feeding the same consumer `u` into ascending operand preorder
+  // (`FirstReadRegPreorderIndex`) when verified against `kSched2` replay and
+  // `IsAchievable(kSched1)`.
+  for (int u = prologue_end + 2; u < epilogue_begin; ++u) {
+    int grp_begin = u;
+    while (grp_begin > prologue_end &&
+           match_input_reload_for_user(cur_seq[static_cast<size_t>(grp_begin - 1)],
+                                       cur_seq[static_cast<size_t>(u)], nullptr, nullptr)) {
+      --grp_begin;
+    }
+    if (u - grp_begin < 2) {
+      continue;
+    }
+    for (int pass = grp_begin; pass < u - 1; ++pass) {
+      for (int k = grp_begin; k < u - 1; ++k) {
+        int ra = -1, nra = 0, rb = -1, nrb = 0;
+        if (!match_input_reload_for_user(cur_seq[static_cast<size_t>(k)],
+                                         cur_seq[static_cast<size_t>(u)], &ra, &nra) ||
+            !match_input_reload_for_user(cur_seq[static_cast<size_t>(k + 1)],
+                                         cur_seq[static_cast<size_t>(u)], &rb, &nrb)) {
+          continue;
+        }
+        if (cur_seq[static_cast<size_t>(k)].pn.pattern.SetSrc().op == RtlOp::kConstDouble ||
+            cur_seq[static_cast<size_t>(k + 1)].pn.pattern.SetSrc().op == RtlOp::kConstDouble) {
+          continue;
+        }
+        if (ra < rb + nrb && rb < ra + nra) {
+          continue;
+        }
+        if (insn_touches_reg_span(cur_seq[static_cast<size_t>(k + 1)], ra, nra) ||
+            insn_touches_reg_span(cur_seq[static_cast<size_t>(k)], rb, nrb)) {
+          continue;
+        }
+        absl::flat_hash_set<int> words_a;
+        for (int w = 0; w < nra; ++w) {
+          words_a.insert(ra + w);
+        }
+        absl::flat_hash_set<int> words_b;
+        for (int w = 0; w < nrb; ++w) {
+          words_b.insert(rb + w);
+        }
+        const int idx_a =
+            FirstReadRegPreorderIndex(cur_seq[static_cast<size_t>(u)].pn.pattern, words_a);
+        const int idx_b =
+            FirstReadRegPreorderIndex(cur_seq[static_cast<size_t>(u)].pn.pattern, words_b);
+        if (idx_a >= 0 && idx_b >= 0 && idx_b < idx_a) {
+          std::vector<int> swap_cand(static_cast<size_t>(n));
+          std::iota(swap_cand.begin(), swap_cand.end(), 0);
+          std::swap(swap_cand[static_cast<size_t>(k)], swap_cand[static_cast<size_t>(k + 1)]);
+          // Swapping two independent input reloads in `u`'s contiguous prefix
+          // preserves reload contiguity (`reload1.c:6481`), so verify exact
+          // forward `kSched2` replay and `IsAchievable(kSched1)` directly.
+          std::vector<int> cand_in_base(static_cast<size_t>(n));
+          std::vector<sched_model::Insn> cand_seq;
+          cand_seq.reserve(static_cast<size_t>(n));
+          for (int pos = 0; pos < n; ++pos) {
+            cand_in_base[static_cast<size_t>(pos)] =
+                cur_in_base[static_cast<size_t>(swap_cand[static_cast<size_t>(pos)])];
+            sched_model::Insn insn =
+                cur_seq[static_cast<size_t>(swap_cand[static_cast<size_t>(pos)])];
+            insn.luid = pos;
+            cand_seq.push_back(std::move(insn));
+          }
+          const sched_model::DepGraph g_s2 =
+              sched_model::Analyze(cand_seq, facts_s2, mm, sched_model::Phase::kSched2);
+          const sched_model::ScheduleResult sr_s2 = sched_model::Schedule(
+              cand_seq, g_s2, facts_s2, mm, sched_model::Phase::kSched2, live_at_end_s2);
+          bool replay_ok = (static_cast<int>(sr_s2.order.size()) == n);
+          for (int pos = 0; pos < n && replay_ok; ++pos) {
+            if (insn_key(cand_seq[static_cast<size_t>(sr_s2.order[static_cast<size_t>(pos)])]) !=
+                target_keys[static_cast<size_t>(pos)]) {
+              replay_ok = false;
+            }
+          }
+          if (replay_ok) {
+            std::vector<sched_model::Insn> cand_body;
+            cand_body.reserve(static_cast<size_t>(body_len));
+            for (int pos = prologue_end; pos < epilogue_begin; ++pos) {
+              sched_model::Insn insn = cand_seq[static_cast<size_t>(pos)];
+              insn.luid = pos - prologue_end;
+              cand_body.push_back(std::move(insn));
+            }
+            sched_model::Sched1ProjectionContext cand_ctx = proj_ctx;
+            cand_ctx.excluded_prologue_body_indices =
+                sched_model::FindInterleavedPrologueSaveBodyIndices(cand_seq, bounds, b, mm);
+            const sched_model::Sched1ProjectionView cand_view =
+                sched_model::ProjectPostReloadBlockToSched1View(cand_body, mm, live_at_end_s2,
+                                                                cand_ctx);
+            if (cand_view.core_insns.size() <= 1 ||
+                sched_model::IsAchievable(cand_view.core_insns, cand_view.facts_s1, mm,
+                                          sched_model::Phase::kSched1, cand_view.live_at_end_s1)) {
+              cur_in_base = std::move(cand_in_base);
+              cur_seq = std::move(cand_seq);
+              changed = true;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (changed) {
+    ApplyReorderedSchedRegion(out_blk, base_region, cur_in_base);
+  }
+}
+
+// Mirrors `local-alloc.c:1396-1401` (`alloc_qty_for_scratch`),
+// `local-alloc.c:1416-1417`, `local-alloc.c:2158-2182` (`find_free_reg`), and
+// `config/mips/mips.h:1186-1193` (`FIXED_REGISTERS`, ascending numeric
+// allocation order when `REG_ALLOC_ORDER` is undefined):
+// for a `match_scratch` `PARALLEL` carrying `(clobber (reg:M scr_hr))`,
+// `block_alloc` assigns `scr_hr` only when every earlier non-fixed hard
+// register in `scr_hr`'s class is occupied across `[2*p - 1, 2*p + 1]`.
+// When post-reload `sched2` hoisted the death chain of an earlier register `r`
+// above `p`, sink that independent chain past `p` iff the resulting block
+// strictly passes `PreservesPostReloadOrderSafety`, exact forward `kSched2`
+// replay against `target_blk`, and eliminates the missing scratch barrier(s)
+// (preferring a candidate that also satisfies `IsAchievable(kSched1)`).
+void SinkPreScratchDeadChainsIfVerified(RtlBasicBlock* out_blk, const RtlBasicBlock& target_blk,
+                                        size_t b, const sched_model::MachineModel& mm,
+                                        const sched_model::RegFacts& facts_s2,
+                                        const sched_model::CfgSched1Context& cfg_ctx,
+                                        const RtlControlFlowGraph& live_cfg) {
+  const sched_model::ParsedSchedRegion base_region =
+      sched_model::ParseBlockForSchedModel(*out_blk, b, sched_model::Phase::kSched2);
+  const sched_model::ParsedSchedRegion target_region =
+      sched_model::ParseBlockForSchedModel(target_blk, b, sched_model::Phase::kSched2);
+  if (!base_region.valid || !target_region.valid || base_region.has_mid_block_loop_barrier ||
+      target_region.has_mid_block_loop_barrier) {
+    return;
+  }
+  const int n = static_cast<int>(base_region.sched_block.size());
+  if (n <= 2 || static_cast<int>(target_region.sched_block.size()) != n) {
+    return;
+  }
+  const sched_model::PostReloadBodyBounds bounds =
+      sched_model::FindPostReloadBodyBounds(base_region.sched_block, b);
+  const int prologue_end = bounds.prologue_end;
+  const int epilogue_begin = bounds.epilogue_begin;
+  const int body_len = epilogue_begin - prologue_end;
+  if (body_len <= 1) {
+    return;
+  }
+
+  auto is_match_scratch_parallel = [](const RtlExpr& pat) -> bool {
+    if (pat.op != RtlOp::kParallel) {
+      return false;
+    }
+    for (const RtlExpr& elem : pat.children) {
+      if (elem.op != RtlOp::kSet || elem.children.size() != 2) {
+        continue;
+      }
+      const RtlOp sop = elem.children[1].op;
+      if (sop == RtlOp::kFix || sop == RtlOp::kMult || sop == RtlOp::kDiv || sop == RtlOp::kMod ||
+          sop == RtlOp::kUdiv || sop == RtlOp::kUmod || sop == RtlOp::kTruncate ||
+          sop == RtlOp::kFfs) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  struct ScratchSite {
+    int insn_idx = -1;
+    int scr_hr = -1;
+    RtlMachineMode mode = RtlMachineMode::kSi;
+  };
+  std::vector<ScratchSite> sites;
+  for (int i = prologue_end; i < epilogue_begin; ++i) {
+    const sched_model::Insn& insn = base_region.sched_block[static_cast<size_t>(i)];
+    if (insn.kind != sched_model::Insn::Kind::kInsn ||
+        !is_match_scratch_parallel(insn.pn.pattern)) {
+      continue;
+    }
+    for (const RtlExpr& elem : insn.pn.pattern.children) {
+      if (elem.op != RtlOp::kClobber || elem.children.size() != 1 || !elem.children[0].IsReg() ||
+          elem.children[0].IsArgPointerReg()) {
+        continue;
+      }
+      const int hr = elem.children[0].RegNo();
+      const bool in_gr = (hr >= 2 && hr <= 25);
+      const bool in_fp = (hr >= 32 && hr <= 63);
+      if (!in_gr && !in_fp) {
+        continue;
+      }
+      const bool has_unused = std::any_of(
+          insn.pn.reg_notes.begin(), insn.pn.reg_notes.end(), [&](const RtlRegNote& rn) {
+            return rn.kind == RtlMachineMode::kRegUnused && rn.datum.IsReg() &&
+                   !rn.datum.IsArgPointerReg() && rn.datum.RegNo() == hr;
+          });
+      if (has_unused) {
+        sites.push_back(ScratchSite{.insn_idx = i, .scr_hr = hr, .mode = elem.children[0].mode});
+      }
+    }
+  }
+  if (sites.empty()) {
+    return;
+  }
+
+  absl::btree_set<int> live_at_end_s2;
+  for (int succ : out_blk->successors) {
+    if (const auto it = live_cfg.sideband.basic_block_live_at_start.find(succ);
+        it != live_cfg.sideband.basic_block_live_at_start.end()) {
+      live_at_end_s2.insert(it->second.begin(), it->second.end());
+    }
+  }
+
+  auto collect_rw = [&](const sched_model::Insn& insn, absl::btree_set<int>* reads,
+                        absl::btree_set<int>* writes) {
+    auto add_span = [&](int r, RtlMachineMode mode, absl::btree_set<int>* dst) {
+      if (r < 0 || r >= kMipsFirstPseudoRegister) {
+        return;
+      }
+      const int nr = std::max(1, mm.HardRegNRegs(r, mode));
+      for (int k = 0; k < nr && r + k < kMipsFirstPseudoRegister; ++k) {
+        dst->insert(r + k);
+      }
+    };
+    auto walk_reads = [&](const RtlExpr& root) {
+      root.Visit([&](const RtlExpr& e) {
+        if (e.op == RtlOp::kReg && !e.IsArgPointerReg()) {
+          add_span(e.RegNo(), e.mode, reads);
+        }
+      });
+    };
+    auto handle_elem = [&](const RtlExpr& elem) {
+      if (elem.IsSet() && elem.children.size() == 2) {
+        const RtlExpr& d = elem.SetDest();
+        if (d.op == RtlOp::kReg && !d.IsArgPointerReg()) {
+          add_span(d.RegNo(), d.mode, writes);
+        } else if (d.op == RtlOp::kSubreg && !d.children.empty() && d.children[0].IsReg() &&
+                   !d.children[0].IsArgPointerReg()) {
+          add_span(d.children[0].RegNo(), d.children[0].mode, writes);
+        } else {
+          walk_reads(d);
+        }
+        walk_reads(elem.SetSrc());
+      } else if (elem.op == RtlOp::kClobber && elem.children.size() == 1) {
+        const RtlExpr& d = elem.children[0];
+        if (d.op == RtlOp::kReg && !d.IsArgPointerReg()) {
+          add_span(d.RegNo(), d.mode, writes);
+        }
+      } else {
+        walk_reads(elem);
+      }
+    };
+    if (insn.pn.pattern.op == RtlOp::kParallel) {
+      for (const RtlExpr& ch : insn.pn.pattern.children) {
+        handle_elem(ch);
+      }
+    } else {
+      handle_elem(insn.pn.pattern);
+    }
+    for (const RtlExpr& fu : insn.pn.call_fusage) {
+      if (fu.op == RtlOp::kUse && !fu.children.empty()) {
+        walk_reads(fu.children[0]);
+      } else if (fu.op == RtlOp::kClobber && !fu.children.empty() && fu.children[0].IsReg()) {
+        add_span(fu.children[0].RegNo(), fu.children[0].mode, writes);
+      }
+    }
+    if (insn.kind == sched_model::Insn::Kind::kCall) {
+      for (int r = 0; r < kMipsFirstPseudoRegister; ++r) {
+        if (mm.CallUsed(r)) {
+          writes->insert(r);
+        }
+      }
+    }
+  };
+
+  auto compute_missing_barriers =
+      [&](const std::vector<sched_model::Insn>& seq,
+          absl::btree_map<int, absl::btree_set<int>>* missing_by_pos) -> int {
+    missing_by_pos->clear();
+    std::vector<absl::btree_set<int>> insn_reads(static_cast<size_t>(n));
+    std::vector<absl::btree_set<int>> insn_writes(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+      collect_rw(seq[static_cast<size_t>(i)], &insn_reads[static_cast<size_t>(i)],
+                 &insn_writes[static_cast<size_t>(i)]);
+    }
+    std::vector<absl::btree_set<int>> live_after(static_cast<size_t>(n));
+    std::vector<absl::btree_set<int>> live_before(static_cast<size_t>(n));
+    absl::btree_set<int> cur_live = live_at_end_s2;
+    for (int i = n - 1; i >= 0; --i) {
+      live_after[static_cast<size_t>(i)] = cur_live;
+      for (int w : insn_writes[static_cast<size_t>(i)]) {
+        cur_live.erase(w);
+      }
+      for (int r : insn_reads[static_cast<size_t>(i)]) {
+        cur_live.insert(r);
+      }
+      live_before[static_cast<size_t>(i)] = cur_live;
+    }
+    int total_missing = 0;
+    for (int i = prologue_end; i < epilogue_begin; ++i) {
+      const sched_model::Insn& insn = seq[static_cast<size_t>(i)];
+      if (insn.kind != sched_model::Insn::Kind::kInsn ||
+          !is_match_scratch_parallel(insn.pn.pattern)) {
+        continue;
+      }
+      absl::btree_set<int> busy = live_before[static_cast<size_t>(i)];
+      busy.insert(live_after[static_cast<size_t>(i)].begin(),
+                  live_after[static_cast<size_t>(i)].end());
+      busy.insert(insn_reads[static_cast<size_t>(i)].begin(),
+                  insn_reads[static_cast<size_t>(i)].end());
+      busy.insert(insn_writes[static_cast<size_t>(i)].begin(),
+                  insn_writes[static_cast<size_t>(i)].end());
+      for (const RtlExpr& elem : insn.pn.pattern.children) {
+        if (elem.op != RtlOp::kClobber || elem.children.size() != 1 || !elem.children[0].IsReg() ||
+            elem.children[0].IsArgPointerReg()) {
+          continue;
+        }
+        const int hr = elem.children[0].RegNo();
+        const bool in_gr = (hr >= 2 && hr <= 25);
+        const bool in_fp = (hr >= 32 && hr <= 63);
+        if (!in_gr && !in_fp) {
+          continue;
+        }
+        const int start_r = in_gr ? 2 : 32;
+        const int step = in_gr ? 1 : std::max(1, mm.HardRegNRegs(32, elem.children[0].mode));
+        for (int r = start_r; r < hr; r += step) {
+          const int nr = std::max(1, mm.HardRegNRegs(r, elem.children[0].mode));
+          bool all_free = true;
+          for (int k = 0; k < nr; ++k) {
+            if (busy.contains(r + k)) {
+              all_free = false;
+              break;
+            }
+          }
+          if (all_free) {
+            (*missing_by_pos)[i].insert(r);
+            ++total_missing;
+          }
+        }
+      }
+    }
+    return total_missing;
+  };
+
+  absl::btree_map<int, absl::btree_set<int>> base_missing;
+  const int base_missing_count = compute_missing_barriers(base_region.sched_block, &base_missing);
+  if (base_missing_count == 0) {
+    return;
+  }
+
+  const int last_p = base_missing.rbegin()->first;
+  absl::btree_map<int, int> earliest_site_for_reg;
+  for (const auto& [p_pos, regs] : base_missing) {
+    for (int r : regs) {
+      earliest_site_for_reg.try_emplace(r, p_pos);
+    }
+  }
+
+  std::vector<absl::btree_set<int>> base_reads(static_cast<size_t>(n));
+  std::vector<absl::btree_set<int>> base_writes(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    collect_rw(base_region.sched_block[static_cast<size_t>(i)], &base_reads[static_cast<size_t>(i)],
+               &base_writes[static_cast<size_t>(i)]);
+  }
+
+  absl::btree_set<int> minimal_seeds;
+  for (const auto& [r, first_p] : earliest_site_for_reg) {
+    for (int k = first_p - 1; k >= prologue_end; --k) {
+      if (base_reads[static_cast<size_t>(k)].contains(r)) {
+        minimal_seeds.insert(k);
+        break;
+      }
+      if (base_writes[static_cast<size_t>(k)].contains(r)) {
+        break;
+      }
+    }
+  }
+  if (minimal_seeds.empty()) {
+    return;
+  }
+
+  const sched_model::DepGraph g_base =
+      sched_model::Analyze(base_region.sched_block, facts_s2, mm, sched_model::Phase::kSched2);
+  std::vector<std::vector<int>> fwd_edges(static_cast<size_t>(n));
+  for (int cons = 0; cons < n; ++cons) {
+    for (const sched_model::Link& l : g_base.log_links[static_cast<size_t>(cons)]) {
+      fwd_edges[static_cast<size_t>(l.target)].push_back(cons);
+    }
+  }
+
+  auto build_forward_closure = [&](const absl::btree_set<int>& seeds) -> absl::btree_set<int> {
+    absl::btree_set<int> closure = seeds;
+    std::vector<int> work(seeds.begin(), seeds.end());
+    while (!work.empty()) {
+      const int u = work.back();
+      work.pop_back();
+      for (int v : fwd_edges[static_cast<size_t>(u)]) {
+        if (v >= prologue_end && v < last_p && closure.insert(v).second) {
+          work.push_back(v);
+        }
+      }
+    }
+    return closure;
+  };
+
+  auto is_pure_alu_producer = [](const sched_model::Insn& insn) -> bool {
+    if (insn.kind != sched_model::Insn::Kind::kInsn || !insn.pn.pattern.IsSet() ||
+        insn.pn.pattern.children.size() != 2) {
+      return false;
+    }
+    const RtlExpr& dst = insn.pn.pattern.SetDest();
+    if (!dst.IsReg() || dst.IsArgPointerReg() || dst.flags.integrated) {
+      return false;
+    }
+    bool has_mem_or_fp = false;
+    insn.pn.pattern.SetSrc().Visit([&](const RtlExpr& e) {
+      if (e.op == RtlOp::kMem || e.op == RtlOp::kUnalignedLoad || e.op == RtlOp::kUnalignedStore ||
+          e.op == RtlOp::kCall || e.op == RtlOp::kUnspecVolatile ||
+          (e.op == RtlOp::kReg && e.RegNo() >= 32)) {
+        has_mem_or_fp = true;
+      }
+    });
+    return !has_mem_or_fp;
+  };
+
+  // Expand `minimal_seeds` backwards to include pure-ALU producers whose sole
+  // consumers before `last_p` are already inside the sinking set (restoring
+  // the pre-`sched2` integer tail block as a unit when `sched2` hoisted it).
+  absl::btree_set<int> wide_seeds = build_forward_closure(minimal_seeds);
+  bool grew = true;
+  while (grew) {
+    grew = false;
+    for (int u = last_p - 1; u >= prologue_end; --u) {
+      if (wide_seeds.contains(u) ||
+          !is_pure_alu_producer(base_region.sched_block[static_cast<size_t>(u)])) {
+        continue;
+      }
+      bool has_in_set_succ = false;
+      bool has_outside_succ = false;
+      for (int v : fwd_edges[static_cast<size_t>(u)]) {
+        if (v < last_p) {
+          if (wide_seeds.contains(v)) {
+            has_in_set_succ = true;
+          } else {
+            has_outside_succ = true;
+            break;
+          }
+        } else if (base_missing.contains(v)) {
+          has_outside_succ = true;
+          break;
+        }
+      }
+      if (has_in_set_succ && !has_outside_succ) {
+        wide_seeds.insert(u);
+        grew = true;
+      }
+    }
+  }
+
+  auto insn_key = [](const sched_model::Insn& insn) {
+    std::string k = insn.pn.pattern.ToSexprString();
+    if (insn.pn.has_explicit_call_fusage) {
+      k.push_back('|');
+      for (const RtlExpr& e : insn.pn.call_fusage) {
+        k.append(e.ToSexprString());
+        k.push_back(';');
+      }
+    }
+    return k;
+  };
+  std::vector<std::string> target_keys(static_cast<size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    target_keys[static_cast<size_t>(i)] =
+        insn_key(target_region.sched_block[static_cast<size_t>(i)]);
+  }
+  sched_model::Sched1ProjectionContext proj_ctx =
+      sched_model::BuildSched1ProjectionContextForBlock(b, cfg_ctx);
+  proj_ctx.allow_post_call_combine_regs_split = false;
+
+  std::optional<std::vector<int>> fallback_cand;
+  for (const absl::btree_set<int>& seed_set : {wide_seeds, build_forward_closure(minimal_seeds)}) {
+    bool blocked = false;
+    for (int u : seed_set) {
+      for (int v : fwd_edges[static_cast<size_t>(u)]) {
+        if (v <= last_p && !seed_set.contains(v)) {
+          blocked = true;
+          break;
+        }
+      }
+      if (blocked) {
+        break;
+      }
+    }
+    if (blocked) {
+      continue;
+    }
+
+    std::vector<int> cand_in_base;
+    cand_in_base.reserve(static_cast<size_t>(n));
+    for (int i = 0; i < prologue_end; ++i) {
+      cand_in_base.push_back(i);
+    }
+    for (int i = prologue_end; i <= last_p; ++i) {
+      if (!seed_set.contains(i)) {
+        cand_in_base.push_back(i);
+      }
+    }
+    for (int i = prologue_end; i < last_p; ++i) {
+      if (seed_set.contains(i)) {
+        cand_in_base.push_back(i);
+      }
+    }
+    for (int i = last_p + 1; i < n; ++i) {
+      cand_in_base.push_back(i);
+    }
+
+    std::vector<sched_model::Insn> cand_seq;
+    cand_seq.reserve(static_cast<size_t>(n));
+    for (int pos = 0; pos < n; ++pos) {
+      sched_model::Insn insn =
+          base_region.sched_block[static_cast<size_t>(cand_in_base[static_cast<size_t>(pos)])];
+      insn.luid = pos;
+      cand_seq.push_back(std::move(insn));
+    }
+
+    absl::btree_map<int, absl::btree_set<int>> cand_missing;
+    if (compute_missing_barriers(cand_seq, &cand_missing) >= base_missing_count) {
+      continue;
+    }
+
+    const absl::btree_set<int> cand_excl =
+        sched_model::FindInterleavedPrologueSaveBodyIndices(cand_seq, bounds, b, mm);
+    if (!sched_model::PreservesPostReloadOrderSafety(
+            base_region.sched_block, cand_in_base, prologue_end, epilogue_begin, live_at_end_s2,
+            cfg_ctx.cfg_copy_pairs, facts_s2, mm,
+            /*allow_pure_reader_reg_dead_transfer=*/false, cfg_ctx.stack_layout, cand_excl)) {
+      continue;
+    }
+
+    const sched_model::DepGraph g_s2 =
+        sched_model::Analyze(cand_seq, facts_s2, mm, sched_model::Phase::kSched2);
+    const sched_model::ScheduleResult sr_s2 = sched_model::Schedule(
+        cand_seq, g_s2, facts_s2, mm, sched_model::Phase::kSched2, live_at_end_s2);
+    if (static_cast<int>(sr_s2.order.size()) != n) {
+      continue;
+    }
+    bool replay_ok = true;
+    for (int pos = 0; pos < n; ++pos) {
+      if (insn_key(cand_seq[static_cast<size_t>(sr_s2.order[static_cast<size_t>(pos)])]) !=
+          target_keys[static_cast<size_t>(pos)]) {
+        replay_ok = false;
+        break;
+      }
+    }
+    if (!replay_ok) {
+      continue;
+    }
+
+    std::vector<sched_model::Insn> cand_body;
+    cand_body.reserve(static_cast<size_t>(body_len));
+    for (int pos = prologue_end; pos < epilogue_begin; ++pos) {
+      sched_model::Insn insn = cand_seq[static_cast<size_t>(pos)];
+      insn.luid = pos - prologue_end;
+      cand_body.push_back(std::move(insn));
+    }
+    sched_model::Sched1ProjectionContext cand_ctx = proj_ctx;
+    cand_ctx.excluded_prologue_body_indices = cand_excl;
+    const sched_model::Sched1ProjectionView cand_view =
+        sched_model::ProjectPostReloadBlockToSched1View(cand_body, mm, live_at_end_s2, cand_ctx);
+    const bool s1_ach =
+        cand_view.core_insns.size() <= 1 ||
+        sched_model::IsAchievable(cand_view.core_insns, cand_view.facts_s1, mm,
+                                  sched_model::Phase::kSched1, cand_view.live_at_end_s1);
+    if (s1_ach) {
+      ApplyReorderedSchedRegion(out_blk, base_region, cand_in_base);
+      return;
+    }
+    if (!fallback_cand.has_value()) {
+      fallback_cand = std::move(cand_in_base);
+    }
+  }
+  if (fallback_cand.has_value()) {
+    ApplyReorderedSchedRegion(out_blk, base_region, *fallback_cand);
+  }
+}
+
+// Mirrors `sched.c:4803-4821` (`single_set(insn)` + `rtx_equal_p(SET_SRC, SET_DEST)`
+// with `rtx_equal_function_value_matters == 0`, `toplev.c:2779`).
+bool RtxEqualForNoopMove(const RtlExpr& a, const RtlExpr& b) {
+  if (a.op != b.op || a.mode != b.mode || a.children.size() != b.children.size()) {
+    return false;
+  }
+  if (a.op == RtlOp::kReg) {
+    return a.RegNo() == b.RegNo();
+  }
+  if (a.op == RtlOp::kConstInt || a.op == RtlOp::kCodeLabel) {
+    return a.int_val == b.int_val;
+  }
+  if (a.op == RtlOp::kSymbolRef || a.op == RtlOp::kLabelRef) {
+    return a.SymbolName() == b.SymbolName() && a.int_val == b.int_val;
+  }
+  for (size_t i = 0; i < a.children.size(); ++i) {
+    if (!RtxEqualForNoopMove(a.children[i], b.children[i])) {
+      return false;
+    }
+  }
+  return a.ToSexprString() == b.ToSexprString();
+}
+
+bool IsSched2NoopSelfMoveInsn(const sched_model::Insn& insn) {
+  if (insn.kind != sched_model::Insn::Kind::kInsn) {
+    return false;
+  }
+  const RtlExpr* set = nullptr;
+  if (insn.pn.pattern.op == RtlOp::kSet && insn.pn.pattern.children.size() >= 2) {
+    set = &insn.pn.pattern;
+  } else if (insn.pn.pattern.op == RtlOp::kParallel) {
+    for (const RtlExpr& ch : insn.pn.pattern.children) {
+      if (ch.op == RtlOp::kSet && ch.children.size() >= 2) {
+        if (set != nullptr) {
+          return false;
+        }
+        set = &ch;
+      } else if (ch.op != RtlOp::kClobber && ch.op != RtlOp::kUse) {
+        return false;
+      }
+    }
+  }
+  return set != nullptr && RtxEqualForNoopMove(set->SetSrc(), set->SetDest());
+}
+
+// Monotonic `kSched2` right-inverse safeguard (`sched.c:schedule_block`): if
+// heuristic pre-unscheduling (`UnscheduleBlockInstructions` /
+// `UnscheduleSched2ReloadsAndCallerSaves`) broke exact forward `kSched2` replay
+// (e.g., by sinking `caller-save` restore loads past equal-priority ALU/const
+// loads and shifting `INSN_LUID` tie-break order, or moving a surviving
+// post-reload no-op self-move off `basic_block_end[b]`, `sched.c:4803-4818`)
+// and 3-gate `kSched1` selection did not replace the block, repair the block
+// via `InvertBlockOrder` using the heuristically unscheduled order as a soft
+// preference.
+void RepairSched2BlockReplayIfBroken(RtlBasicBlock* out_blk, const RtlBasicBlock& target_blk,
+                                     const RtlBasicBlock* pre_unsched_blk, size_t b,
+                                     const sched_model::MachineModel& mm,
+                                     const sched_model::RegFacts& facts_s2,
+                                     const RtlControlFlowGraph& live_cfg) {
+  const sched_model::ParsedSchedRegion out_region =
+      sched_model::ParseBlockForSchedModel(*out_blk, b, sched_model::Phase::kSched2);
+  const sched_model::ParsedSchedRegion target_region =
+      sched_model::ParseBlockForSchedModel(target_blk, b, sched_model::Phase::kSched2);
+  const int n = static_cast<int>(target_region.sched_block.size());
+  if (!out_region.valid || !target_region.valid || n <= 1 ||
+      static_cast<int>(out_region.sched_block.size()) != n) {
+    return;
+  }
+  absl::btree_set<int> live_at_end_s2;
+  for (int succ : out_blk->successors) {
+    if (const auto it = live_cfg.sideband.basic_block_live_at_start.find(succ);
+        it != live_cfg.sideband.basic_block_live_at_start.end()) {
+      live_at_end_s2.insert(it->second.begin(), it->second.end());
+    }
+  }
+  auto pat_key = [](const sched_model::Insn& insn) {
+    return insn.pn.pattern.ToGccPrintRtlString();
+  };
+  std::vector<std::string> target_pats;
+  target_pats.reserve(static_cast<size_t>(n));
+  for (const sched_model::Insn& insn : target_region.sched_block) {
+    target_pats.push_back(pat_key(insn));
+  }
+  auto replays_target = [&](const sched_model::ParsedSchedRegion& region) -> bool {
+    if (!region.valid || static_cast<int>(region.sched_block.size()) != n) {
+      return false;
+    }
+    // `sched.c:4803-4818`: post-reload `schedule_insns` deletes every no-op
+    // self-move before `schedule_block` except `basic_block_end[b]`.
+    for (int pos = 0; pos + 1 < n; ++pos) {
+      if (IsSched2NoopSelfMoveInsn(region.sched_block[static_cast<size_t>(pos)])) {
+        return false;
+      }
+    }
+    const sched_model::DepGraph g =
+        sched_model::Analyze(region.sched_block, facts_s2, mm, sched_model::Phase::kSched2);
+    const sched_model::ScheduleResult sr = sched_model::Schedule(
+        region.sched_block, g, facts_s2, mm, sched_model::Phase::kSched2, live_at_end_s2);
+    if (static_cast<int>(sr.order.size()) != n) {
+      return false;
+    }
+    for (int pos = 0; pos < n; ++pos) {
+      if (pat_key(region.sched_block[static_cast<size_t>(sr.order[static_cast<size_t>(pos)])]) !=
+          target_pats[static_cast<size_t>(pos)]) {
+        return false;
+      }
+    }
+    return true;
+  };
+  if (replays_target(out_region)) {
+    return;
+  }
+  // Map `out_region` indices to `target_region` indices by pattern so restored
+  // `REG_DEAD` / `REG_UNUSED` notes on `*out_blk` are preserved verbatim when
+  // reordering.
+  std::vector<int> preferred_in_target;
+  std::vector<int> target_to_out(static_cast<size_t>(n), -1);
+  std::vector<bool> used_target(static_cast<size_t>(n), false);
+  bool bijective = true;
+  for (int oi = 0; oi < n; ++oi) {
+    const std::string key = pat_key(out_region.sched_block[static_cast<size_t>(oi)]);
+    int matched = -1;
+    for (int j = 0; j < n; ++j) {
+      if (!used_target[static_cast<size_t>(j)] && target_pats[static_cast<size_t>(j)] == key) {
+        used_target[static_cast<size_t>(j)] = true;
+        matched = j;
+        break;
+      }
+    }
+    if (matched < 0) {
+      bijective = false;
+      break;
+    }
+    preferred_in_target.push_back(matched);
+    target_to_out[static_cast<size_t>(matched)] = oi;
+  }
+  if (bijective) {
+    // Build a target-ordered block carrying `*out_blk`'s restored notes so
+    // `InvertBlockOrder` operates on the exact post-note-restoration insns.
+    RtlBasicBlock target_with_out_notes = *out_blk;
+    ApplyReorderedSchedRegion(&target_with_out_notes, out_region, target_to_out);
+    const sched_model::ParsedSchedRegion target_out_region =
+        sched_model::ParseBlockForSchedModel(target_with_out_notes, b, sched_model::Phase::kSched2);
+    if (target_out_region.valid && static_cast<int>(target_out_region.sched_block.size()) == n) {
+      for (int attempt = 0; attempt < 2; ++attempt) {
+        const absl::Span<const int> pref =
+            (attempt == 0) ? absl::Span<const int>(preferred_in_target) : absl::Span<const int>{};
+        const std::optional<std::vector<int>> inv =
+            sched_model::InvertBlockOrder(target_out_region.sched_block, facts_s2, mm,
+                                          sched_model::Phase::kSched2, live_at_end_s2, pref);
+        if (inv.has_value()) {
+          RtlBasicBlock repaired = target_with_out_notes;
+          ApplyReorderedSchedRegion(&repaired, target_out_region, *inv);
+          const sched_model::ParsedSchedRegion rep_region =
+              sched_model::ParseBlockForSchedModel(repaired, b, sched_model::Phase::kSched2);
+          if (replays_target(rep_region)) {
+            *out_blk = std::move(repaired);
+            return;
+          }
+        }
+      }
+    }
+  }
+  if (pre_unsched_blk != nullptr) {
+    const sched_model::ParsedSchedRegion pre_region =
+        sched_model::ParseBlockForSchedModel(*pre_unsched_blk, b, sched_model::Phase::kSched2);
+    if (replays_target(pre_region)) {
+      *out_blk = *pre_unsched_blk;
+    }
+  }
+}
+
+void SelectSched1AchievablePreimageForSched2(RtlControlFlowGraph* out,
+                                             const RtlControlFlowGraph& scheduled_cfg,
+                                             const CompilationProfile& profile,
+                                             const RtlControlFlowGraph* pre_unsched_cfg = nullptr) {
+  if (out->rpo_blocks.size() != scheduled_cfg.rpo_blocks.size()) {
+    return;
+  }
+  const sched_model::MachineModel mm = sched_model::MachineModel::FromProfile(profile);
+  const sched_model::RegFacts facts_s2 =
+      sched_model::RegFacts::FromCfg(scheduled_cfg, profile, sched_model::Phase::kSched2);
+
+  RtlControlFlowGraph live_cfg = *out;
+  ReconstructRtlLiveness(
+      &live_cfg, profile,
+      {.reload_completed = true, .update_reg_notes = false, .preserve_phantom_pseudos = false});
+  const std::vector<int> restored_b0_args = PredictRestoredEntryArgSelfMoveRegs(*out, profile);
+  const sched_model::CfgSched1Context cfg_ctx =
+      sched_model::ComputeCfgSched1Context(*out, live_cfg, mm, restored_b0_args);
+
+  std::optional<RtlControlFlowGraph> pre_live_cfg;
+  std::optional<sched_model::CfgSched1Context> pre_cfg_ctx;
+
+  for (size_t b = 0; b < out->rpo_blocks.size(); ++b) {
+    if (TrySelectSched1AchievablePreimageForBlock(&out->rpo_blocks[b], scheduled_cfg.rpo_blocks[b],
+                                                  b, mm, facts_s2, cfg_ctx, live_cfg)) {
+      SinkCallerSaveRestoresIfVerified(&out->rpo_blocks[b], scheduled_cfg.rpo_blocks[b], b, mm,
+                                       facts_s2, cfg_ctx, live_cfg);
+      SinkPreScratchDeadChainsIfVerified(&out->rpo_blocks[b], scheduled_cfg.rpo_blocks[b], b, mm,
+                                         facts_s2, cfg_ctx, live_cfg);
+      continue;
+    }
+    // If heuristic pre-unscheduling (`UnscheduleBlockInstructions` /
+    // `UnscheduleSched2ReloadsAndCallerSaves`) locked an incompatible `reload_adjacent`
+    // or base ordering, retry strictly from the pre-unscheduled post-reload block
+    // (the exact Stage 0 domain) under all three gates.
+    bool solved_from_pre = false;
+    if (pre_unsched_cfg != nullptr &&
+        pre_unsched_cfg->rpo_blocks.size() == out->rpo_blocks.size() &&
+        pre_unsched_cfg->rpo_blocks[b].instructions != out->rpo_blocks[b].instructions) {
+      if (!pre_live_cfg.has_value()) {
+        pre_live_cfg = *pre_unsched_cfg;
+        ReconstructRtlLiveness(&*pre_live_cfg, profile,
+                               {.reload_completed = true,
+                                .update_reg_notes = false,
+                                .preserve_phantom_pseudos = false});
+        const std::vector<int> pre_b0_args =
+            PredictRestoredEntryArgSelfMoveRegs(*pre_unsched_cfg, profile);
+        pre_cfg_ctx =
+            sched_model::ComputeCfgSched1Context(*pre_unsched_cfg, *pre_live_cfg, mm, pre_b0_args);
+      }
+      RtlBasicBlock fallback_blk = pre_unsched_cfg->rpo_blocks[b];
+      if (TrySelectSched1AchievablePreimageForBlock(&fallback_blk, scheduled_cfg.rpo_blocks[b], b,
+                                                    mm, facts_s2, *pre_cfg_ctx, *pre_live_cfg)) {
+        SinkCallerSaveRestoresIfVerified(&fallback_blk, scheduled_cfg.rpo_blocks[b], b, mm,
+                                         facts_s2, *pre_cfg_ctx, *pre_live_cfg);
+        SinkPreScratchDeadChainsIfVerified(&fallback_blk, scheduled_cfg.rpo_blocks[b], b, mm,
+                                           facts_s2, *pre_cfg_ctx, *pre_live_cfg);
+        out->rpo_blocks[b] = std::move(fallback_blk);
+        solved_from_pre = true;
+      }
+    }
+    if (!solved_from_pre) {
+      // When strict `validate_equiv_mem` preservation finds no `kSched1`
+      // preimage (e.g., `sched2` hoisted `REG_DEAD dst_r` ahead of an aliasing
+      // store and Stage 0 stripped the spurious load `REG_EQUIV`, `local-alloc.c:
+      // 540-603, 1049-1055`), retry allowing aliasing stores to move back into
+      // `[load, dst_death)` for loads without a matching `REG_EQUIV`.
+      if (TrySelectSched1AchievablePreimageForBlock(
+              &out->rpo_blocks[b], scheduled_cfg.rpo_blocks[b], b, mm, facts_s2, cfg_ctx, live_cfg,
+              /*allow_moved_store_load_equiv_invalidation=*/true)) {
+        SinkCallerSaveRestoresIfVerified(&out->rpo_blocks[b], scheduled_cfg.rpo_blocks[b], b, mm,
+                                         facts_s2, cfg_ctx, live_cfg);
+        SinkPreScratchDeadChainsIfVerified(&out->rpo_blocks[b], scheduled_cfg.rpo_blocks[b], b, mm,
+                                           facts_s2, cfg_ctx, live_cfg);
+        solved_from_pre = true;
+      } else if (pre_unsched_cfg != nullptr &&
+                 pre_unsched_cfg->rpo_blocks.size() == out->rpo_blocks.size() &&
+                 pre_unsched_cfg->rpo_blocks[b].instructions != out->rpo_blocks[b].instructions) {
+        RtlBasicBlock fallback_blk = pre_unsched_cfg->rpo_blocks[b];
+        if (TrySelectSched1AchievablePreimageForBlock(
+                &fallback_blk, scheduled_cfg.rpo_blocks[b], b, mm, facts_s2, *pre_cfg_ctx,
+                *pre_live_cfg, /*allow_moved_store_load_equiv_invalidation=*/true)) {
+          SinkCallerSaveRestoresIfVerified(&fallback_blk, scheduled_cfg.rpo_blocks[b], b, mm,
+                                           facts_s2, *pre_cfg_ctx, *pre_live_cfg);
+          SinkPreScratchDeadChainsIfVerified(&fallback_blk, scheduled_cfg.rpo_blocks[b], b, mm,
+                                             facts_s2, *pre_cfg_ctx, *pre_live_cfg);
+          out->rpo_blocks[b] = std::move(fallback_blk);
+          solved_from_pre = true;
+        }
+      }
+    }
+    if (!solved_from_pre) {
+      const RtlBasicBlock* pre_blk = (pre_unsched_cfg != nullptr &&
+                                      pre_unsched_cfg->rpo_blocks.size() == out->rpo_blocks.size())
+                                         ? &pre_unsched_cfg->rpo_blocks[b]
+                                         : nullptr;
+      const std::vector<std::string> before_repair = out->rpo_blocks[b].instructions;
+      RepairSched2BlockReplayIfBroken(&out->rpo_blocks[b], scheduled_cfg.rpo_blocks[b], pre_blk, b,
+                                      mm, facts_s2, live_cfg);
+      if (out->rpo_blocks[b].instructions != before_repair &&
+          TrySelectSched1AchievablePreimageForBlock(&out->rpo_blocks[b],
+                                                    scheduled_cfg.rpo_blocks[b], b, mm, facts_s2,
+                                                    cfg_ctx, live_cfg)) {
+        SinkCallerSaveRestoresIfVerified(&out->rpo_blocks[b], scheduled_cfg.rpo_blocks[b], b, mm,
+                                         facts_s2, cfg_ctx, live_cfg);
+      }
+      SinkPreScratchDeadChainsIfVerified(&out->rpo_blocks[b], scheduled_cfg.rpo_blocks[b], b, mm,
+                                         facts_s2, cfg_ctx, live_cfg);
+    }
+  }
+}
+
+// Re-aligns any block where `RestoreSched2DeletedNoopMoves` inserted a
+// `sched.c:4803-4821`-deleted early-return noop copy `(set (reg/i:M r) (reg:M r))`
+// immediately before its conditional jump. Because `sched2` deletes the noop
+// copy before scheduling while `sched1` schedules the pre-allocation copy
+// `(set (reg/i:M r) (reg:M P))` in place, verifies:
+//   (a) `Schedule(Q_cand \ {copy}, kSched2) == P_target`,
+//   (b) `PreservesPostReloadOrderSafety(Q_base \ {copy}, Q_cand \ {copy}, ...)`,
+//   (c) `IsAchievable(ProjectPostReloadBlockToSched1View(Q_cand), kSched1)`.
+void AlignEarlyReturnNoopMoveBlockForSched1(RtlControlFlowGraph* out,
+                                            const RtlControlFlowGraph& scheduled_cfg,
+                                            const CompilationProfile& profile) {
+  if (out == nullptr || out->rpo_blocks.size() != scheduled_cfg.rpo_blocks.size()) {
+    return;
+  }
+  const sched_model::MachineModel mm = sched_model::MachineModel::FromProfile(profile);
+  const sched_model::RegFacts facts_s2 =
+      sched_model::RegFacts::FromCfg(scheduled_cfg, profile, sched_model::Phase::kSched2);
+
+  RtlControlFlowGraph live_cfg = *out;
+  ReconstructRtlLiveness(
+      &live_cfg, profile,
+      {.reload_completed = true, .update_reg_notes = false, .preserve_phantom_pseudos = false});
+  const std::vector<int> restored_b0_args = PredictRestoredEntryArgSelfMoveRegs(*out, profile);
+  const sched_model::CfgSched1Context cfg_ctx =
+      sched_model::ComputeCfgSched1Context(*out, live_cfg, mm, restored_b0_args);
+
+  auto is_noop_self_move_insn = [](const sched_model::Insn& insn) {
+    return insn.kind == sched_model::Insn::Kind::kInsn && insn.pn.pattern.IsSet() &&
+           insn.pn.pattern.SetDest().IsHardReg() && insn.pn.pattern.SetSrc().IsHardReg() &&
+           insn.pn.pattern.SetDest().RegNo() == insn.pn.pattern.SetSrc().RegNo() &&
+           insn.pn.pattern.SetDest().mode == insn.pn.pattern.SetSrc().mode;
+  };
+
+  for (size_t b = 0; b < out->rpo_blocks.size(); ++b) {
+    RtlBasicBlock& out_blk = out->rpo_blocks[b];
+    const RtlBasicBlock& target_blk = scheduled_cfg.rpo_blocks[b];
+    if (out_blk.instructions.size() <= target_blk.instructions.size()) {
+      continue;
+    }
+    const sched_model::ParsedSchedRegion out_region =
+        sched_model::ParseBlockForSchedModel(out_blk, b, sched_model::Phase::kSched2);
+    const sched_model::ParsedSchedRegion target_region =
+        sched_model::ParseBlockForSchedModel(target_blk, b, sched_model::Phase::kSched2);
+    const int m = static_cast<int>(out_region.sched_block.size());
+    const int n = static_cast<int>(target_region.sched_block.size());
+    if (!out_region.valid || !target_region.valid || m <= n || n <= 1) {
+      continue;
+    }
+    const int copy_idx = m - 2;
+    const sched_model::Insn& copy_insn = out_region.sched_block[static_cast<size_t>(copy_idx)];
+    const sched_model::Insn& tail_insn = out_region.sched_block[static_cast<size_t>(m - 1)];
+    if (tail_insn.kind != sched_model::Insn::Kind::kJump || !is_noop_self_move_insn(copy_insn) ||
+        !copy_insn.pn.pattern.SetDest().flags.integrated) {
+      continue;
+    }
+    const sched_model::PostReloadBodyBounds bounds =
+        sched_model::FindPostReloadBodyBounds(out_region.sched_block, b);
+    const int prologue_end = bounds.prologue_end;
+    const int epilogue_begin = bounds.epilogue_begin;
+    const int body_len = epilogue_begin - prologue_end;
+    if (body_len <= 2 || copy_idx < prologue_end || copy_idx >= epilogue_begin) {
+      continue;
+    }
+
+    absl::btree_set<int> live_at_end_s2;
+    for (int succ : target_blk.successors) {
+      if (const auto it = live_cfg.sideband.basic_block_live_at_start.find(succ);
+          it != live_cfg.sideband.basic_block_live_at_start.end()) {
+        live_at_end_s2.insert(it->second.begin(), it->second.end());
+      }
+    }
+
+    std::vector<sched_model::Insn> out_body;
+    out_body.reserve(static_cast<size_t>(body_len));
+    for (int i = prologue_end; i < epilogue_begin; ++i) {
+      sched_model::Insn insn = out_region.sched_block[static_cast<size_t>(i)];
+      insn.luid = i - prologue_end;
+      out_body.push_back(std::move(insn));
+    }
+    sched_model::Sched1ProjectionContext proj_ctx =
+        sched_model::BuildSched1ProjectionContextForBlock(b, cfg_ctx);
+    proj_ctx.allow_post_call_combine_regs_split = false;
+    proj_ctx.excluded_prologue_body_indices =
+        sched_model::FindInterleavedPrologueSaveBodyIndices(out_region.sched_block, bounds, b, mm);
+    const sched_model::Sched1ProjectionView out_view =
+        sched_model::ProjectPostReloadBlockToSched1View(out_body, mm, live_at_end_s2, proj_ctx);
+    const int num_core = static_cast<int>(out_view.core_insns.size());
+    if (num_core <= 1 ||
+        num_core + static_cast<int>(out_view.pinned_prefix_orig_indices.size()) != body_len ||
+        sched_model::IsAchievable(out_view.core_insns, out_view.facts_s1, mm,
+                                  sched_model::Phase::kSched1, out_view.live_at_end_s1)) {
+      continue;
+    }
+
+    const std::vector<int> s1_order = sched_model::ScheduleSched1ViewCoreOrder(out_view, mm);
+    if (static_cast<int>(s1_order.size()) != num_core) {
+      continue;
+    }
+    std::vector<int> cand_in_out;
+    cand_in_out.reserve(static_cast<size_t>(m));
+    for (int i = 0; i < prologue_end; ++i) {
+      cand_in_out.push_back(i);
+    }
+    for (int pp_rel : out_view.pinned_prefix_orig_indices) {
+      cand_in_out.push_back(prologue_end + pp_rel);
+    }
+    for (int ci : s1_order) {
+      cand_in_out.push_back(prologue_end + out_view.core_to_orig_index[static_cast<size_t>(ci)]);
+    }
+    for (int i = epilogue_begin; i < m; ++i) {
+      cand_in_out.push_back(i);
+    }
+    if (static_cast<int>(cand_in_out.size()) != m ||
+        cand_in_out[static_cast<size_t>(m - 1)] != m - 1) {
+      continue;
+    }
+
+    // Build `base_wo` and `cand_wo` without non-block-end `noop_move_p` insns
+    // (`sched.c:4805-4818` deletes them before `schedule_block`) and verify Gate (a) + Gate (b).
+    absl::btree_set<int> noop_indices;
+    for (int i = 0; i + 1 < m; ++i) {
+      if (is_noop_self_move_insn(out_region.sched_block[static_cast<size_t>(i)])) {
+        noop_indices.insert(i);
+      }
+    }
+    if (m - static_cast<int>(noop_indices.size()) != n) {
+      continue;
+    }
+    std::vector<sched_model::Insn> base_wo;
+    std::vector<int> out_to_wo(static_cast<size_t>(m), -1);
+    base_wo.reserve(static_cast<size_t>(n));
+    for (int i = 0; i < m; ++i) {
+      if (noop_indices.contains(i)) {
+        continue;
+      }
+      out_to_wo[static_cast<size_t>(i)] = static_cast<int>(base_wo.size());
+      sched_model::Insn insn = out_region.sched_block[static_cast<size_t>(i)];
+      insn.luid = static_cast<int>(base_wo.size());
+      base_wo.push_back(std::move(insn));
+    }
+    std::vector<int> cand_wo_in_base;
+    cand_wo_in_base.reserve(static_cast<size_t>(n));
+    std::vector<sched_model::Insn> cand_wo;
+    cand_wo.reserve(static_cast<size_t>(n));
+    for (int oi : cand_in_out) {
+      if (noop_indices.contains(oi)) {
+        continue;
+      }
+      const int bi = out_to_wo[static_cast<size_t>(oi)];
+      cand_wo_in_base.push_back(bi);
+      sched_model::Insn insn = base_wo[static_cast<size_t>(bi)];
+      insn.luid = static_cast<int>(cand_wo.size());
+      cand_wo.push_back(std::move(insn));
+    }
+    if (static_cast<int>(cand_wo.size()) != n) {
+      continue;
+    }
+    const sched_model::DepGraph cand_wo_graph =
+        sched_model::Analyze(cand_wo, facts_s2, mm, sched_model::Phase::kSched2);
+    const std::vector<int> replayed_s2 =
+        sched_model::Schedule(cand_wo, cand_wo_graph, facts_s2, mm, sched_model::Phase::kSched2,
+                              live_at_end_s2)
+            .order;
+    if (static_cast<int>(replayed_s2.size()) != n) {
+      continue;
+    }
+    bool gate_a_ok = true;
+    for (int i = 0; i < n; ++i) {
+      if (BuildSchedModelPatternKey(
+              cand_wo[static_cast<size_t>(replayed_s2[static_cast<size_t>(i)])]) !=
+          BuildSchedModelPatternKey(target_region.sched_block[static_cast<size_t>(i)])) {
+        gate_a_ok = false;
+        break;
+      }
+    }
+    if (!gate_a_ok) {
+      continue;
+    }
+    const sched_model::PostReloadBodyBounds wo_bounds =
+        sched_model::FindPostReloadBodyBounds(base_wo, b);
+    if (!sched_model::PreservesPostReloadOrderSafety(
+            base_wo, cand_wo_in_base, wo_bounds.prologue_end, wo_bounds.epilogue_begin,
+            live_at_end_s2, cfg_ctx.cfg_copy_pairs, facts_s2, mm,
+            /*allow_pure_reader_reg_dead_transfer=*/false, cfg_ctx.stack_layout,
+            proj_ctx.excluded_prologue_body_indices)) {
+      continue;
+    }
+
+    // Verify Gate (c) on `cand_in_out` WITH `copy_idx`.
+    std::vector<sched_model::Insn> cand_body;
+    cand_body.reserve(static_cast<size_t>(body_len));
+    for (int pos = prologue_end; pos < epilogue_begin; ++pos) {
+      sched_model::Insn insn =
+          out_region.sched_block[static_cast<size_t>(cand_in_out[static_cast<size_t>(pos)])];
+      insn.luid = pos - prologue_end;
+      cand_body.push_back(std::move(insn));
+    }
+    const sched_model::Sched1ProjectionView cand_view =
+        sched_model::ProjectPostReloadBlockToSched1View(cand_body, mm, live_at_end_s2, proj_ctx);
+    if (cand_view.core_insns.size() <= 1 ||
+        !sched_model::IsAchievable(cand_view.core_insns, cand_view.facts_s1, mm,
+                                   sched_model::Phase::kSched1, cand_view.live_at_end_s1)) {
+      continue;
+    }
+    ApplyReorderedSchedRegion(&out_blk, out_region, cand_in_out);
+  }
+}
+
+// Restores and aligns a `sched.c:4803-4821`-deleted `COND_EXPR` diamond
+// pre-branch noop copy `(set (reg:M r) (reg:M r)) (REG_DEAD r)`
+// (`expr.c:5867-5908`, `jump.c:699-834` `if (...) x = a; else x = b;` ->
+// `x = b; if (...) x = a;`) ONLY when the block is otherwise NOT in
+// `Im(F_sched1)` and the restored + reordered block strictly passes all three gates:
+//   (a) `Schedule(Q_cand \ {noops}, kSched2) == P_target` (via `InvertBlockOrder`),
+//   (b) `PreservesPostReloadOrderSafety(Q_base \ {noops}, Q_cand \ {noops}, ...)`,
+//   (c) `IsAchievable(ProjectPostReloadBlockToSched1View(Q_cand), kSched1)`.
+void RestoreAndAlignCondExprNoopMoveForSched1(RtlControlFlowGraph* out,
+                                              const RtlControlFlowGraph& scheduled_cfg,
+                                              const CompilationProfile& profile) {
+  if (out == nullptr || out->rpo_blocks.size() != scheduled_cfg.rpo_blocks.size()) {
+    return;
+  }
+  const sched_model::MachineModel mm = sched_model::MachineModel::FromProfile(profile);
+  const sched_model::RegFacts facts_s2 =
+      sched_model::RegFacts::FromCfg(scheduled_cfg, profile, sched_model::Phase::kSched2);
+
+  RtlControlFlowGraph live_cfg = *out;
+  ReconstructRtlLiveness(
+      &live_cfg, profile,
+      {.reload_completed = true, .update_reg_notes = false, .preserve_phantom_pseudos = false});
+  const std::vector<int> restored_b0_args = PredictRestoredEntryArgSelfMoveRegs(*out, profile);
+  const sched_model::CfgSched1Context cfg_ctx =
+      sched_model::ComputeCfgSched1Context(*out, live_cfg, mm, restored_b0_args);
+
+  auto is_noop_self_move_insn = [](const sched_model::Insn& insn) {
+    return insn.kind == sched_model::Insn::Kind::kInsn && insn.pn.pattern.IsSet() &&
+           insn.pn.pattern.SetDest().IsHardReg() && insn.pn.pattern.SetSrc().IsHardReg() &&
+           insn.pn.pattern.SetDest().RegNo() == insn.pn.pattern.SetSrc().RegNo() &&
+           insn.pn.pattern.SetDest().mode == insn.pn.pattern.SetSrc().mode;
+  };
+  auto extract_zero_cmp_hard_reg = [](const RtlExpr& jump_pat, int* out_reg,
+                                      RtlMachineMode* out_mode) -> bool {
+    if (!jump_pat.IsSet() || jump_pat.SetDest().op != RtlOp::kPc ||
+        jump_pat.SetSrc().op != RtlOp::kIfThenElse || jump_pat.SetSrc().children.size() != 3) {
+      return false;
+    }
+    const RtlExpr& cond = jump_pat.SetSrc().children[0];
+    if (cond.children.size() != 2) {
+      return false;
+    }
+    const RtlExpr* reg_side = nullptr;
+    if (cond.children[0].IsHardReg() && !cond.children[0].IsArgPointerReg() &&
+        cond.children[1].IsConstInt() && cond.children[1].int_val == 0) {
+      reg_side = &cond.children[0];
+    } else if (cond.children[1].IsHardReg() && !cond.children[1].IsArgPointerReg() &&
+               cond.children[0].IsConstInt() && cond.children[0].int_val == 0) {
+      reg_side = &cond.children[1];
+    }
+    if (reg_side == nullptr || reg_side->RegNo() < 2 || reg_side->RegNo() >= 64) {
+      return false;
+    }
+    *out_reg = reg_side->RegNo();
+    *out_mode = reg_side->mode;
+    return true;
+  };
+  auto block_unconditionally_overwrites_reg = [](const RtlBasicBlock& blk, int regno,
+                                                 RtlMachineMode mode) -> bool {
+    bool saw_set = false;
+    for (const std::string& raw : blk.instructions) {
+      auto p = ParsePatternAndNotes(raw);
+      if (!p.ok()) {
+        return false;
+      }
+      if (p->pattern.op == RtlOp::kNote || p->pattern.op == RtlOp::kCodeLabel) {
+        continue;
+      }
+      if (p->pattern.IsSet() && p->pattern.SetDest().IsHardReg() &&
+          p->pattern.SetDest().RegNo() == regno && p->pattern.SetDest().mode == mode &&
+          !p->pattern.SetSrc().ContainsReg(regno)) {
+        saw_set = true;
+        continue;
+      }
+      return false;
+    }
+    return saw_set;
+  };
+
+  for (size_t b = 0; b < out->rpo_blocks.size(); ++b) {
+    RtlBasicBlock& out_blk = out->rpo_blocks[b];
+    const RtlBasicBlock& target_blk = scheduled_cfg.rpo_blocks[b];
+    if (out_blk.successors.size() != 2) {
+      continue;
+    }
+    const sched_model::ParsedSchedRegion out_region =
+        sched_model::ParseBlockForSchedModel(out_blk, b, sched_model::Phase::kSched2);
+    const sched_model::ParsedSchedRegion target_region =
+        sched_model::ParseBlockForSchedModel(target_blk, b, sched_model::Phase::kSched2);
+    const int n = static_cast<int>(target_region.sched_block.size());
+    const int m_orig = static_cast<int>(out_region.sched_block.size());
+    if (!out_region.valid || !target_region.valid || n <= 2 || m_orig < n ||
+        out_region.has_mid_block_loop_barrier || target_region.has_mid_block_loop_barrier) {
+      continue;
+    }
+    const sched_model::Insn& tail_insn = out_region.sched_block.back();
+    int cond_reg = -1;
+    RtlMachineMode cond_mode = RtlMachineMode::kNone;
+    if (tail_insn.kind != sched_model::Insn::Kind::kJump ||
+        !extract_zero_cmp_hard_reg(tail_insn.pn.pattern, &cond_reg, &cond_mode)) {
+      continue;
+    }
+    // Verify diamond `b -> {b_fall, b_merge}` where `b_fall` unconditionally
+    // overwrites `cond_reg` and has sole successor `b_merge`, and `cond_reg` is
+    // live-in at `b_merge`.
+    const size_t s0 = out_blk.successors[0];
+    const size_t s1 = out_blk.successors[1];
+    auto is_diamond_pair = [&](size_t fall_id, size_t merge_id) -> bool {
+      if (fall_id >= out->rpo_blocks.size() || merge_id >= out->rpo_blocks.size()) {
+        return false;
+      }
+      const RtlBasicBlock& fall_blk = out->rpo_blocks[fall_id];
+      if (fall_blk.successors.size() != 1 || fall_blk.successors[0] != merge_id) {
+        return false;
+      }
+      const auto live_it =
+          live_cfg.sideband.basic_block_live_at_start.find(static_cast<int>(merge_id));
+      if (live_it == live_cfg.sideband.basic_block_live_at_start.end() ||
+          !live_it->second.contains(cond_reg)) {
+        return false;
+      }
+      return block_unconditionally_overwrites_reg(fall_blk, cond_reg, cond_mode);
+    };
+    if (!is_diamond_pair(s0, s1) && !is_diamond_pair(s1, s0)) {
+      continue;
+    }
+
+    absl::btree_set<int> live_at_end_s2;
+    for (int succ : target_blk.successors) {
+      if (const auto it = live_cfg.sideband.basic_block_live_at_start.find(succ);
+          it != live_cfg.sideband.basic_block_live_at_start.end()) {
+        live_at_end_s2.insert(it->second.begin(), it->second.end());
+      }
+    }
+    const sched_model::PostReloadBodyBounds orig_bounds =
+        sched_model::FindPostReloadBodyBounds(out_region.sched_block, b);
+    const int orig_body_len = orig_bounds.epilogue_begin - orig_bounds.prologue_end;
+    if (orig_body_len <= 2) {
+      continue;
+    }
+    std::vector<sched_model::Insn> orig_body;
+    orig_body.reserve(static_cast<size_t>(orig_body_len));
+    for (int i = orig_bounds.prologue_end; i < orig_bounds.epilogue_begin; ++i) {
+      sched_model::Insn insn = out_region.sched_block[static_cast<size_t>(i)];
+      insn.luid = i - orig_bounds.prologue_end;
+      orig_body.push_back(std::move(insn));
+    }
+    sched_model::Sched1ProjectionContext proj_ctx =
+        sched_model::BuildSched1ProjectionContextForBlock(b, cfg_ctx);
+    proj_ctx.allow_post_call_combine_regs_split = false;
+    proj_ctx.excluded_prologue_body_indices = sched_model::FindInterleavedPrologueSaveBodyIndices(
+        out_region.sched_block, orig_bounds, b, mm);
+    const sched_model::Sched1ProjectionView orig_view =
+        sched_model::ProjectPostReloadBlockToSched1View(orig_body, mm, live_at_end_s2, proj_ctx);
+    if (orig_view.core_insns.size() <= 1 ||
+        sched_model::IsAchievable(orig_view.core_insns, orig_view.facts_s1, mm,
+                                  sched_model::Phase::kSched1, orig_view.live_at_end_s1)) {
+      continue;
+    }
+
+    // Build trial block inserting `(set (reg:M cond_reg) (reg:M cond_reg)) (REG_DEAD cond_reg)`
+    // immediately before the trailing conditional jump.
+    RtlPatternAndNotes noop_pn;
+    RtlExpr reg_expr;
+    reg_expr.op = RtlOp::kReg;
+    reg_expr.mode = cond_mode;
+    reg_expr.int_val = cond_reg;
+    noop_pn.pattern = RtlExpr::MakeSet(reg_expr, reg_expr);
+    noop_pn.reg_notes.push_back(RtlRegNote{
+        .kind = RtlMachineMode::kRegDead,
+        .list_op = RtlOp::kExprList,
+        .datum = reg_expr,
+    });
+    const std::string noop_str = FormatGccPrintRtlPatternAndNotes(
+        noop_pn.pattern, noop_pn.reg_notes, noop_pn.bracketed_notes, /*call_fusage=*/{});
+    const size_t jump_orig_idx = out_region.sched_orig_indices.back();
+    RtlBasicBlock trial_blk = out_blk;
+    if (trial_blk.rtl_insns.size() != trial_blk.instructions.size()) {
+      trial_blk.SyncRtlInsnsFromInstructions();
+    }
+    trial_blk.instructions.insert(trial_blk.instructions.begin() + jump_orig_idx, noop_str);
+    RtlInsn noop_rinsn;
+    noop_rinsn.canonical_pattern = noop_str;
+    noop_rinsn.is_synthetic_rtl_expansion = true;
+    trial_blk.rtl_insns.insert(trial_blk.rtl_insns.begin() + jump_orig_idx, std::move(noop_rinsn));
+
+    const sched_model::ParsedSchedRegion trial_region =
+        sched_model::ParseBlockForSchedModel(trial_blk, b, sched_model::Phase::kSched2);
+    const int m = static_cast<int>(trial_region.sched_block.size());
+    if (!trial_region.valid || m != m_orig + 1) {
+      continue;
+    }
+    const sched_model::PostReloadBodyBounds bounds =
+        sched_model::FindPostReloadBodyBounds(trial_region.sched_block, b);
+    const int prologue_end = bounds.prologue_end;
+    const int epilogue_begin = bounds.epilogue_begin;
+    const int body_len = epilogue_begin - prologue_end;
+    if (body_len <= 2) {
+      continue;
+    }
+    absl::btree_set<int> noop_indices;
+    for (int i = 0; i + 1 < m; ++i) {
+      if (is_noop_self_move_insn(trial_region.sched_block[static_cast<size_t>(i)])) {
+        noop_indices.insert(i);
+      }
+    }
+    if (m - static_cast<int>(noop_indices.size()) != n) {
+      continue;
+    }
+    std::vector<sched_model::Insn> base_wo;
+    std::vector<int> trial_to_wo(static_cast<size_t>(m), -1);
+    std::vector<int> wo_to_trial;
+    base_wo.reserve(static_cast<size_t>(n));
+    wo_to_trial.reserve(static_cast<size_t>(n));
+    for (int i = 0; i < m; ++i) {
+      if (noop_indices.contains(i)) {
+        continue;
+      }
+      trial_to_wo[static_cast<size_t>(i)] = static_cast<int>(base_wo.size());
+      wo_to_trial.push_back(i);
+      sched_model::Insn insn = trial_region.sched_block[static_cast<size_t>(i)];
+      insn.luid = static_cast<int>(base_wo.size());
+      base_wo.push_back(std::move(insn));
+    }
+    absl::btree_map<std::string, std::vector<int>> target_buckets;
+    for (int t = 0; t < n; ++t) {
+      target_buckets[BuildSchedModelPatternKey(target_region.sched_block[static_cast<size_t>(t)])]
+          .push_back(t);
+    }
+    absl::btree_map<std::string, size_t> bucket_cursor;
+    std::vector<int> wo_to_target(static_cast<size_t>(n), -1);
+    std::vector<int> target_to_wo(static_cast<size_t>(n), -1);
+    bool bij_ok = true;
+    for (int bi = 0; bi < n; ++bi) {
+      const std::string key = BuildSchedModelPatternKey(base_wo[static_cast<size_t>(bi)]);
+      const auto it = target_buckets.find(key);
+      if (it == target_buckets.end() || bucket_cursor[key] >= it->second.size()) {
+        bij_ok = false;
+        break;
+      }
+      const int t = it->second[bucket_cursor[key]++];
+      wo_to_target[static_cast<size_t>(bi)] = t;
+      target_to_wo[static_cast<size_t>(t)] = bi;
+    }
+    if (!bij_ok) {
+      continue;
+    }
+    const sched_model::PostReloadBodyBounds wo_bounds =
+        sched_model::FindPostReloadBodyBounds(base_wo, b);
+
+    auto eval_and_commit = [&](const std::vector<int>& trial_order) -> bool {
+      std::vector<int> pref_wo_in_target;
+      pref_wo_in_target.reserve(static_cast<size_t>(n));
+      // Record each stripped noop's next non-noop anchor in `trial_order`.
+      absl::btree_map<int, std::vector<int>> noops_before_wo;
+      std::vector<int> pending_noops;
+      for (int oi : trial_order) {
+        if (noop_indices.contains(oi)) {
+          pending_noops.push_back(oi);
+          continue;
+        }
+        const int wi = trial_to_wo[static_cast<size_t>(oi)];
+        if (!pending_noops.empty()) {
+          auto& vec = noops_before_wo[wi];
+          vec.insert(vec.end(), pending_noops.begin(), pending_noops.end());
+          pending_noops.clear();
+        }
+        pref_wo_in_target.push_back(wo_to_target[static_cast<size_t>(wi)]);
+      }
+      if (static_cast<int>(pref_wo_in_target.size()) != n || !pending_noops.empty()) {
+        return false;
+      }
+      const std::optional<std::vector<int>> cand_wo_in_target = sched_model::InvertBlockOrder(
+          target_region.sched_block, facts_s2, mm, sched_model::Phase::kSched2, live_at_end_s2,
+          pref_wo_in_target);
+      if (!cand_wo_in_target.has_value()) {
+        return false;
+      }
+      std::vector<int> cand_wo_in_base(static_cast<size_t>(n));
+      for (int pos = 0; pos < n; ++pos) {
+        cand_wo_in_base[static_cast<size_t>(pos)] =
+            target_to_wo[static_cast<size_t>((*cand_wo_in_target)[static_cast<size_t>(pos)])];
+      }
+      if (!sched_model::PreservesPostReloadOrderSafety(
+              base_wo, cand_wo_in_base, wo_bounds.prologue_end, wo_bounds.epilogue_begin,
+              live_at_end_s2, cfg_ctx.cfg_copy_pairs, facts_s2, mm,
+              /*allow_pure_reader_reg_dead_transfer=*/false, cfg_ctx.stack_layout,
+              proj_ctx.excluded_prologue_body_indices)) {
+        return false;
+      }
+      std::vector<int> cand_in_trial;
+      cand_in_trial.reserve(static_cast<size_t>(m));
+      for (int wi : cand_wo_in_base) {
+        if (const auto nit = noops_before_wo.find(wi); nit != noops_before_wo.end()) {
+          cand_in_trial.insert(cand_in_trial.end(), nit->second.begin(), nit->second.end());
+        }
+        cand_in_trial.push_back(wo_to_trial[static_cast<size_t>(wi)]);
+      }
+      if (static_cast<int>(cand_in_trial.size()) != m) {
+        return false;
+      }
+      std::vector<sched_model::Insn> cand_body;
+      cand_body.reserve(static_cast<size_t>(body_len));
+      for (int pos = prologue_end; pos < epilogue_begin; ++pos) {
+        sched_model::Insn insn =
+            trial_region.sched_block[static_cast<size_t>(cand_in_trial[static_cast<size_t>(pos)])];
+        insn.luid = pos - prologue_end;
+        cand_body.push_back(std::move(insn));
+      }
+      const sched_model::Sched1ProjectionView cand_view =
+          sched_model::ProjectPostReloadBlockToSched1View(cand_body, mm, live_at_end_s2, proj_ctx);
+      if (cand_view.core_insns.size() <= 1 ||
+          !sched_model::IsAchievable(cand_view.core_insns, cand_view.facts_s1, mm,
+                                     sched_model::Phase::kSched1, cand_view.live_at_end_s1)) {
+        return false;
+      }
+      ApplyReorderedSchedRegion(&trial_blk, trial_region, cand_in_trial);
+      out_blk = std::move(trial_blk);
+      return true;
+    };
+
+    std::vector<sched_model::Insn> trial_body;
+    trial_body.reserve(static_cast<size_t>(body_len));
+    for (int i = prologue_end; i < epilogue_begin; ++i) {
+      sched_model::Insn insn = trial_region.sched_block[static_cast<size_t>(i)];
+      insn.luid = i - prologue_end;
+      trial_body.push_back(std::move(insn));
+    }
+    const sched_model::Sched1ProjectionView trial_view =
+        sched_model::ProjectPostReloadBlockToSched1View(trial_body, mm, live_at_end_s2, proj_ctx);
+    const int num_core = static_cast<int>(trial_view.core_insns.size());
+    if (num_core <= 1 ||
+        num_core + static_cast<int>(trial_view.pinned_prefix_orig_indices.size()) != body_len) {
+      continue;
+    }
+    auto lift_core_order = [&](absl::Span<const int> core_ord) -> std::vector<int> {
+      std::vector<int> full;
+      full.reserve(static_cast<size_t>(m));
+      for (int i = 0; i < prologue_end; ++i) {
+        full.push_back(i);
+      }
+      for (int pp_rel : trial_view.pinned_prefix_orig_indices) {
+        full.push_back(prologue_end + pp_rel);
+      }
+      for (int ci : core_ord) {
+        full.push_back(prologue_end + trial_view.core_to_orig_index[static_cast<size_t>(ci)]);
+      }
+      for (int i = epilogue_begin; i < m; ++i) {
+        full.push_back(i);
+      }
+      return full;
+    };
+    const std::vector<int> s1_order = sched_model::ScheduleSched1ViewCoreOrder(trial_view, mm);
+    if (static_cast<int>(s1_order.size()) == num_core &&
+        eval_and_commit(lift_core_order(s1_order))) {
+      continue;
+    }
+    const std::vector<std::vector<int>> tie_orders =
+        sched_model::CollectSched1TieFlipCoreOrders(trial_view, mm, /*max_orders=*/24);
+    for (const std::vector<int>& alt : tie_orders) {
+      if (static_cast<int>(alt.size()) == num_core && eval_and_commit(lift_core_order(alt))) {
+        break;
+      }
+    }
+  }
+}
+
+// Aligns synthetic `(set (reg:DI dh) (reg:DI dh)) (REG_RETVAL)` no-op moves
+// restored by `RestoreSched2PreScheduleDeletedNoopMoves` (`reload1.c`/`sched.c:4803-4821`)
+// when `sched1` scheduled an independent insn between the last `REG_NO_CONFLICT`
+// subword set and the `REG_RETVAL` no-op (`sched.c:schedule_block`). Moving a
+// synthetic no-op self-move across independent insns that do not touch `dh` is
+// invisible to `sched2`/`reload`/`local-alloc` and restores exact `kSched1` placement.
+void AlignRestoredNoConflictRetvalNoopsForSched1(RtlControlFlowGraph* out,
+                                                 const CompilationProfile& profile) {
+  if (out == nullptr) {
+    return;
+  }
+  auto has_synth_retval_note = [](const RtlBasicBlock& blk, size_t i) -> bool {
+    if (i >= blk.rtl_insns.size() || !blk.rtl_insns[i].is_synthetic_rtl_expansion) {
+      return false;
+    }
+    const absl::StatusOr<RtlPatternAndNotes> parsed = ParsePatternAndNotes(blk.instructions[i]);
+    if (!parsed.ok()) {
+      return false;
+    }
+    return std::any_of(
+        parsed->reg_notes.begin(), parsed->reg_notes.end(),
+        [](const RtlRegNote& note) { return note.kind == RtlMachineMode::kRegRetval; });
+  };
+  bool any_candidate = false;
+  for (const RtlBasicBlock& blk : out->rpo_blocks) {
+    for (size_t i = 0; i < blk.instructions.size(); ++i) {
+      if (has_synth_retval_note(blk, i)) {
+        any_candidate = true;
+        break;
+      }
+    }
+    if (any_candidate) {
+      break;
+    }
+  }
+  if (!any_candidate) {
+    return;
+  }
+
+  const sched_model::MachineModel mm = sched_model::MachineModel::FromProfile(profile);
+  RtlControlFlowGraph live_cfg = *out;
+  ReconstructRtlLiveness(
+      &live_cfg, profile,
+      {.reload_completed = true, .update_reg_notes = false, .preserve_phantom_pseudos = false});
+  const sched_model::CfgSched1Context cfg_ctx =
+      sched_model::ComputeCfgSched1Context(*out, live_cfg, mm);
+
+  auto is_synth_retval_di_self_move = [&](const RtlBasicBlock& blk,
+                                          const sched_model::ParsedSchedRegion& region,
+                                          int sched_idx, int* out_dh) -> bool {
+    const int orig_idx = region.sched_orig_indices[static_cast<size_t>(sched_idx)];
+    if (orig_idx < 0 || static_cast<size_t>(orig_idx) >= blk.rtl_insns.size() ||
+        !blk.rtl_insns[static_cast<size_t>(orig_idx)].is_synthetic_rtl_expansion) {
+      return false;
+    }
+    const sched_model::Insn& insn = region.sched_block[static_cast<size_t>(sched_idx)];
+    const RtlExpr& pat = insn.pn.pattern;
+    if (insn.kind != sched_model::Insn::Kind::kInsn || !pat.IsSet() || !pat.SetDest().IsHardReg() ||
+        !pat.SetSrc().IsHardReg() || pat.SetDest().mode != RtlMachineMode::kDi ||
+        pat.SetSrc().mode != RtlMachineMode::kDi || pat.SetDest().RegNo() != pat.SetSrc().RegNo()) {
+      return false;
+    }
+    const bool has_retval =
+        std::any_of(insn.pn.reg_notes.begin(), insn.pn.reg_notes.end(),
+                    [](const RtlRegNote& note) { return note.kind == RtlMachineMode::kRegRetval; });
+    if (!has_retval) {
+      return false;
+    }
+    *out_dh = pat.SetDest().RegNo();
+    return true;
+  };
+
+  for (size_t b = 0; b < out->rpo_blocks.size(); ++b) {
+    RtlBasicBlock& blk = out->rpo_blocks[b];
+    bool blk_has_synth_retval = false;
+    for (size_t i = 0; i < blk.instructions.size(); ++i) {
+      if (has_synth_retval_note(blk, i)) {
+        blk_has_synth_retval = true;
+        break;
+      }
+    }
+    if (!blk_has_synth_retval) {
+      continue;
+    }
+    const sched_model::ParsedSchedRegion region =
+        sched_model::ParseBlockForSchedModel(blk, b, sched_model::Phase::kSched2);
+    if (!region.valid || region.sched_block.size() <= 1) {
+      continue;
+    }
+    const int n = static_cast<int>(region.sched_block.size());
+    absl::btree_set<int> live_at_end_s2;
+    for (int succ_id : blk.successors) {
+      const auto it = live_cfg.sideband.basic_block_live_at_start.find(succ_id);
+      if (it != live_cfg.sideband.basic_block_live_at_start.end()) {
+        live_at_end_s2.insert(it->second.begin(), it->second.end());
+      }
+    }
+    const sched_model::PostReloadBodyBounds bounds =
+        sched_model::FindPostReloadBodyBounds(region.sched_block, b);
+    const int prologue_end = bounds.prologue_end;
+    const int epilogue_begin = bounds.epilogue_begin;
+    const int body_len = epilogue_begin - prologue_end;
+    if (body_len <= 1) {
+      continue;
+    }
+    std::vector<sched_model::Insn> body;
+    body.reserve(static_cast<size_t>(body_len));
+    for (int i = prologue_end; i < epilogue_begin; ++i) {
+      sched_model::Insn copy = region.sched_block[static_cast<size_t>(i)];
+      copy.luid = i - prologue_end;
+      body.push_back(std::move(copy));
+    }
+    sched_model::Sched1ProjectionContext proj_ctx =
+        sched_model::BuildSched1ProjectionContextForBlock(b, cfg_ctx);
+    proj_ctx.allow_post_call_combine_regs_split = false;
+    proj_ctx.excluded_prologue_body_indices =
+        sched_model::FindInterleavedPrologueSaveBodyIndices(region.sched_block, bounds, b, mm);
+    const sched_model::Sched1ProjectionView view =
+        sched_model::ProjectPostReloadBlockToSched1View(body, mm, live_at_end_s2, proj_ctx);
+    const int num_core = static_cast<int>(view.core_insns.size());
+    if (num_core <= 1 ||
+        sched_model::IsAchievable(view.core_insns, view.facts_s1, mm, sched_model::Phase::kSched1,
+                                  view.live_at_end_s1)) {
+      continue;
+    }
+    const std::vector<int> s1_order = sched_model::ScheduleSched1ViewCoreOrder(view, mm);
+    if (static_cast<int>(s1_order.size()) != num_core) {
+      continue;
+    }
+
+    absl::btree_map<int, int> synth_retval_core_dh;
+    for (int ci = 0; ci < num_core; ++ci) {
+      const int si = prologue_end + view.core_to_orig_index[static_cast<size_t>(ci)];
+      int dh = -1;
+      if (is_synth_retval_di_self_move(blk, region, si, &dh)) {
+        synth_retval_core_dh[ci] = dh;
+      }
+    }
+    if (synth_retval_core_dh.empty()) {
+      continue;
+    }
+
+    // Verify `s1_order` preserves every non-synthetic-`REG_RETVAL` core insn in
+    // its exact original relative order and only shifts synthetic `REG_RETVAL`
+    // no-op moves across independent insns.
+    int expected_real = 0;
+    while (expected_real < num_core && synth_retval_core_dh.contains(expected_real)) {
+      ++expected_real;
+    }
+    bool only_synth_moved = true;
+    absl::btree_map<int, std::vector<int>> insert_before_base_si;
+    std::vector<int> insert_at_body_end;
+    absl::btree_set<int> moved_base_sis;
+    for (size_t pos = 0; pos < s1_order.size(); ++pos) {
+      const int ci = s1_order[pos];
+      if (!synth_retval_core_dh.contains(ci)) {
+        if (ci != expected_real) {
+          only_synth_moved = false;
+          break;
+        }
+        ++expected_real;
+        while (expected_real < num_core && synth_retval_core_dh.contains(expected_real)) {
+          ++expected_real;
+        }
+        continue;
+      }
+      const int rv_si = prologue_end + view.core_to_orig_index[static_cast<size_t>(ci)];
+      int next_non_rv_si = epilogue_begin;
+      for (size_t q = pos + 1; q < s1_order.size(); ++q) {
+        if (!synth_retval_core_dh.contains(s1_order[q])) {
+          next_non_rv_si = prologue_end + view.core_to_orig_index[static_cast<size_t>(s1_order[q])];
+          break;
+        }
+      }
+      if (next_non_rv_si <= rv_si) {
+        only_synth_moved = false;
+        break;
+      }
+      const int dh = synth_retval_core_dh[ci];
+      for (int mid = rv_si + 1; mid < next_non_rv_si; ++mid) {
+        const sched_model::Insn& minsn = region.sched_block[static_cast<size_t>(mid)];
+        if (minsn.kind == sched_model::Insn::Kind::kCall ||
+            minsn.kind == sched_model::Insn::Kind::kJump || minsn.pn.pattern.ContainsReg(dh) ||
+            minsn.pn.pattern.ContainsReg(dh + 1)) {
+          only_synth_moved = false;
+          break;
+        }
+      }
+      if (!only_synth_moved) {
+        break;
+      }
+      moved_base_sis.insert(rv_si);
+      if (next_non_rv_si < epilogue_begin) {
+        insert_before_base_si[next_non_rv_si].push_back(rv_si);
+      } else {
+        insert_at_body_end.push_back(rv_si);
+      }
+    }
+    if (!only_synth_moved || moved_base_sis.empty()) {
+      continue;
+    }
+
+    std::vector<int> cand_in_base;
+    cand_in_base.reserve(static_cast<size_t>(n));
+    for (int si = 0; si < n; ++si) {
+      if (si == epilogue_begin) {
+        for (int rv_si : insert_at_body_end) {
+          cand_in_base.push_back(rv_si);
+        }
+      }
+      if (const auto it = insert_before_base_si.find(si); it != insert_before_base_si.end()) {
+        for (int rv_si : it->second) {
+          cand_in_base.push_back(rv_si);
+        }
+      }
+      if (!moved_base_sis.contains(si)) {
+        cand_in_base.push_back(si);
+      }
+    }
+    if (epilogue_begin == n) {
+      for (int rv_si : insert_at_body_end) {
+        cand_in_base.push_back(rv_si);
+      }
+    }
+    if (static_cast<int>(cand_in_base.size()) != n) {
+      continue;
+    }
+    bool changed = false;
+    for (int i = 0; i < n; ++i) {
+      if (cand_in_base[static_cast<size_t>(i)] != i) {
+        changed = true;
+        break;
+      }
+    }
+    if (!changed) {
+      continue;
+    }
+
+    std::vector<sched_model::Insn> cand_body;
+    cand_body.reserve(static_cast<size_t>(body_len));
+    for (int pos = prologue_end; pos < epilogue_begin; ++pos) {
+      sched_model::Insn copy =
+          region.sched_block[static_cast<size_t>(cand_in_base[static_cast<size_t>(pos)])];
+      copy.luid = pos - prologue_end;
+      cand_body.push_back(std::move(copy));
+    }
+    const sched_model::Sched1ProjectionView cand_view =
+        sched_model::ProjectPostReloadBlockToSched1View(cand_body, mm, live_at_end_s2, proj_ctx);
+    if (cand_view.core_insns.size() > 1 &&
+        sched_model::IsAchievable(cand_view.core_insns, cand_view.facts_s1, mm,
+                                  sched_model::Phase::kSched1, cand_view.live_at_end_s1)) {
+      ApplyReorderedSchedRegion(&blk, region, cand_in_base);
+    }
+  }
+}
+
 }  // namespace
 
 RtlControlFlowGraph InvertScheduleBlock(const RtlControlFlowGraph& scheduled_cfg) {
@@ -4833,89 +9510,172 @@ RtlControlFlowGraph InvertScheduleBlock(const RtlControlFlowGraph& scheduled_cfg
                          : (scheduled_cfg.pass == RtlPassKind::kSched) ? flags.RunsSched1()
                                                                        : true;
   if (ran_sched) {
-    if (scheduled_cfg.pass == RtlPassKind::kSched2) {
-      RestoreInheritedSpillSlotDeadNotes(&out, gp64, fp64);
-    }
+    if (scheduled_cfg.pass == RtlPassKind::kSched) {
+      UnscheduleSched1WithModel(&out, profile, gp64, fp64);
+    } else {
+      std::optional<RtlControlFlowGraph> pre_unsched_cfg;
+      if (scheduled_cfg.pass == RtlPassKind::kSched2) {
+        RestoreInheritedSpillSlotDeadNotes(&out, gp64, fp64);
+        pre_unsched_cfg = out;
+      }
 
-    for (RtlBasicBlock& blk : out.rpo_blocks) {
-      UnscheduleBlockInstructions(&blk, gp64, fp64, scheduled_cfg.pass == RtlPassKind::kSched2,
-                                  out.sideband.frame_pointer_needed, flags.RunsSched1());
-    }
+      for (RtlBasicBlock& blk : out.rpo_blocks) {
+        UnscheduleBlockInstructions(&blk, gp64, fp64, scheduled_cfg.pass == RtlPassKind::kSched2,
+                                    out.sideband.frame_pointer_needed, flags.RunsSched1());
+      }
 
-    if (scheduled_cfg.pass == RtlPassKind::kSched2) {
-      UnscheduleSched2ReloadsAndCallerSaves(&out, gp64, fp64);
-      RestoreNoConflictExtendClobbers(&out, gp64, fp64);
+      if (scheduled_cfg.pass == RtlPassKind::kSched2) {
+        UnscheduleSched2ReloadsAndCallerSaves(&out, gp64, fp64);
+        RestoreNoConflictExtendClobbers(&out, gp64, fp64);
+        if (flags.RunsSched1()) {
+          SelectSched1AchievablePreimageForSched2(
+              &out, scheduled_cfg, profile,
+              pre_unsched_cfg.has_value() ? &*pre_unsched_cfg : nullptr);
+        }
+        // After `SelectSched1AchievablePreimageForSched2` re-adjoins reload
+        // groups, restore `reload1.c:702, 2229, 4758-4767` round-robin FP spill
+        // register ordering (`r2 < r1`) when verified against exact `kSched2`
+        // forward replay.
+        {
+          const sched_model::MachineModel mm = sched_model::MachineModel::FromProfile(profile);
+          const sched_model::RegFacts facts_s2 =
+              sched_model::RegFacts::FromCfg(scheduled_cfg, profile, sched_model::Phase::kSched2);
+          RtlControlFlowGraph live_cfg = out;
+          ReconstructRtlLiveness(&live_cfg, profile,
+                                 {.reload_completed = true,
+                                  .update_reg_notes = false,
+                                  .preserve_phantom_pseudos = false});
+          absl::flat_hash_set<int> ever_used_fprs;
+          std::vector<std::vector<ParsedBlockInsn>> all_parsed_blocks(out.rpo_blocks.size());
+          std::vector<bool> block_parse_ok(out.rpo_blocks.size(), false);
+          for (size_t b = 0; b < out.rpo_blocks.size(); ++b) {
+            const RtlBasicBlock& blk = out.rpo_blocks[b];
+            all_parsed_blocks[b].reserve(blk.instructions.size());
+            bool ok = true;
+            for (size_t i = 0; i < blk.instructions.size(); ++i) {
+              auto parsed = ParsePatternAndNotes(blk.instructions[i]);
+              if (!parsed.ok()) {
+                ok = false;
+                break;
+              }
+              std::optional<RtlInsn> orig_insn = (i < blk.rtl_insns.size())
+                                                     ? std::optional<RtlInsn>(blk.rtl_insns[i])
+                                                     : std::nullopt;
+              all_parsed_blocks[b].push_back(
+                  BuildParsedBlockInsn(std::move(*parsed), gp64, fp64, orig_insn));
+            }
+            block_parse_ok[b] = ok;
+          }
+          int rr_min_prologue_save_off = 0;
+          absl::flat_hash_set<int64_t> rr_caller_save_offsets;
+          absl::flat_hash_set<int64_t> rr_proven_spill_offsets;
+          IdentifySched2CallerSaveAndSpillOffsets(
+              out, all_parsed_blocks, gp64, fp64, &rr_min_prologue_save_off,
+              &rr_caller_save_offsets, &rr_proven_spill_offsets);
+          for (size_t b = 0; b < out.rpo_blocks.size(); ++b) {
+            if (!block_parse_ok[b]) {
+              continue;
+            }
+            RtlBasicBlock& blk = out.rpo_blocks[b];
+            auto& parsed_insns = all_parsed_blocks[b];
+            const sched_model::ParsedSchedRegion tgt_reg = sched_model::ParseBlockForSchedModel(
+                scheduled_cfg.rpo_blocks[b], b, sched_model::Phase::kSched2);
+            if (!tgt_reg.valid) {
+              continue;
+            }
+            absl::btree_set<int> live_end;
+            for (size_t succ : live_cfg.rpo_blocks[b].successors) {
+              auto it = live_cfg.sideband.basic_block_live_at_start.find(succ);
+              if (it != live_cfg.sideband.basic_block_live_at_start.end()) {
+                live_end.insert(it->second.begin(), it->second.end());
+              }
+            }
+            auto build_and_verify_s2 = [&](const std::vector<ParsedBlockInsn>& cand_insns,
+                                           RtlBasicBlock* out_cand_blk) -> bool {
+              RtlBasicBlock cand_blk = blk;
+              cand_blk.instructions.clear();
+              cand_blk.rtl_insns.clear();
+              cand_blk.instructions.reserve(cand_insns.size());
+              cand_blk.rtl_insns.reserve(cand_insns.size());
+              for (const ParsedBlockInsn& pi : cand_insns) {
+                cand_blk.instructions.push_back(FormatGccPrintRtlPatternAndNotes(
+                    pi.parsed.pattern, pi.parsed.reg_notes, pi.parsed.bracketed_notes,
+                    /*call_fusage=*/{}));
+                if (pi.orig_rtl_insn.has_value()) {
+                  cand_blk.rtl_insns.push_back(*pi.orig_rtl_insn);
+                }
+              }
+              if (cand_blk.rtl_insns.size() != cand_blk.instructions.size()) {
+                cand_blk.SyncRtlInsnsFromInstructions();
+              }
+              const sched_model::ParsedSchedRegion cand_reg =
+                  sched_model::ParseBlockForSchedModel(cand_blk, b, sched_model::Phase::kSched2);
+              if (!cand_reg.valid || cand_reg.sched_block.size() != tgt_reg.sched_block.size()) {
+                return false;
+              }
+              const sched_model::DepGraph g_s2 = sched_model::Analyze(
+                  cand_reg.sched_block, facts_s2, mm, sched_model::Phase::kSched2);
+              const sched_model::ScheduleResult sr = sched_model::Schedule(
+                  cand_reg.sched_block, g_s2, facts_s2, mm, sched_model::Phase::kSched2, live_end);
+              if (sr.order.size() != tgt_reg.sched_block.size()) {
+                return false;
+              }
+              for (size_t pos = 0; pos < sr.order.size(); ++pos) {
+                const auto& a = cand_reg.sched_block[static_cast<size_t>(sr.order[pos])].pn.pattern;
+                const auto& t = tgt_reg.sched_block[pos].pn.pattern;
+                if (a.ToSexprString() != t.ToSexprString()) {
+                  return false;
+                }
+              }
+              if (out_cand_blk != nullptr) {
+                *out_cand_blk = std::move(cand_blk);
+              }
+              return true;
+            };
+            std::vector<ParsedBlockInsn> work_insns = parsed_insns;
+            if (RestoreRoundRobinFpReloadGroupOrder(gp64, fp64, &ever_used_fprs, &work_insns)) {
+              RtlBasicBlock cand_blk;
+              if (build_and_verify_s2(work_insns, &cand_blk)) {
+                blk = std::move(cand_blk);
+                parsed_insns = std::move(work_insns);
+              }
+            }
+            if (RestoreRoundRobinTwoRegFpSpillOrder(
+                    live_cfg, b, gp64, fp64, rr_proven_spill_offsets,
+                    [&](const std::vector<ParsedBlockInsn>& cand) {
+                      return build_and_verify_s2(cand, nullptr);
+                    },
+                    &parsed_insns)) {
+              RtlBasicBlock cand_blk;
+              if (build_and_verify_s2(parsed_insns, &cand_blk)) {
+                blk = std::move(cand_blk);
+              }
+            }
+            if (!flags.RunsSched1()) {
+              const RtlBasicBlock* pre_blk =
+                  (pre_unsched_cfg.has_value() &&
+                   pre_unsched_cfg->rpo_blocks.size() == out.rpo_blocks.size())
+                      ? &pre_unsched_cfg->rpo_blocks[b]
+                      : nullptr;
+              RepairSched2BlockReplayIfBroken(&blk, scheduled_cfg.rpo_blocks[b], pre_blk, b, mm,
+                                              facts_s2, live_cfg);
+            }
+          }
+        }
+      }
     }
   }
   if (scheduled_cfg.pass == RtlPassKind::kSched2) {
     PreserveBlockLabelsAndBarriers(&out);
     if (ran_sched) {
       RestoreSched2DeletedNoopMoves(&out, profile);
+      if (flags.RunsSched1()) {
+        AlignEarlyReturnNoopMoveBlockForSched1(&out, scheduled_cfg, profile);
+        RestoreAndAlignCondExprNoopMoveForSched1(&out, scheduled_cfg, profile);
+      }
     }
     if (had_empty_live_at_start) {
       out.sideband.basic_block_live_at_start.clear();
-    }
-  }
-
-  return out;
-}
-
-RtlControlFlowGraph InvertUpdateFlowInfo(const RtlControlFlowGraph& scheduled_cfg) {
-  if (!ValidateScheduledCfg(scheduled_cfg)) {
-    return {};
-  }
-
-  RtlControlFlowGraph out = scheduled_cfg;
-  for (RtlBasicBlock& blk : out.rpo_blocks) {
-    if (blk.instructions.size() < 2) {
-      continue;
-    }
-    std::vector<std::string> new_insns;
-    new_insns.reserve(blk.instructions.size());
-
-    bool modified_block = false;
-    for (size_t i = 0; i < blk.instructions.size(); ++i) {
-      if (i + 1 < blk.instructions.size()) {
-        auto p0 = ParsePatternAndNotes(blk.instructions[i]);
-        auto p1 = ParsePatternAndNotes(blk.instructions[i + 1]);
-        RtlExpr dest_reg;
-        int64_t combined_val = 0;
-        if (p0.ok() && p1.ok() && MatchSplitLargeIntPair(*p0, *p1, &dest_reg, &combined_val)) {
-          RtlPatternAndNotes merged;
-          merged.bracketed_notes = p1->bracketed_notes;
-          merged.pattern = RtlExpr::MakeSet(dest_reg, RtlExpr::MakeConstInt(combined_val));
-
-          for (const RtlRegNote& note : p0->reg_notes) {
-            if (note.kind == RtlMachineMode::kRegDead && note.datum.op == RtlOp::kReg &&
-                note.datum.RegNo() == dest_reg.RegNo()) {
-              continue;
-            }
-            merged.reg_notes.push_back(note);
-          }
-          for (const RtlRegNote& note : p1->reg_notes) {
-            merged.reg_notes.push_back(note);
-          }
-
-          new_insns.push_back(FormatGccPrintRtlPatternAndNotes(
-              merged.pattern, merged.reg_notes, merged.bracketed_notes, /*call_fusage=*/{}));
-
-          auto sets_it = out.sideband.reg_n_sets.find(dest_reg.RegNo());
-          if (sets_it != out.sideband.reg_n_sets.end() && sets_it->second > 1) {
-            sets_it->second -= 1;
-          }
-
-          modified_block = true;
-          ++i;  // Skip `i + 1`.
-          continue;
-        }
-      }
-
-      new_insns.push_back(blk.instructions[i]);
-    }
-
-    if (modified_block) {
-      blk.instructions = std::move(new_insns);
-      blk.SyncRtlInsnsFromInstructions();
     }
   }
 
@@ -5390,7 +10150,8 @@ RtlControlFlowGraph InvertThreadPrologueAndEpilogueInsns(const RtlControlFlowGra
     }
 
     absl::flat_hash_set<int> stripped_saves;
-    std::optional<int> active_base13_offset;
+    bool has_active_base13_offset = false;
+    int active_base13_offset = 0;
     bool reg12_clobbered = body_writes.contains(kMipsTemp1Regno);
 
     for (size_t i = sp_dec_idx + 1; i < n; ++i) {
@@ -5407,6 +10168,7 @@ RtlControlFlowGraph InvertThreadPrologueAndEpilogueInsns(const RtlControlFlowGra
         // `$13 = $12 + $sp` (`mips.c:4639, 4750`).
         if (large_reg12_defined && !reg12_clobbered &&
             MatchPrologueRegPlusSp(pat, kMipsTemp2Regno, kMipsTemp1Regno)) {
+          has_active_base13_offset = true;
           active_base13_offset = tsize;
           strip[i] = true;
           continue;
@@ -5417,6 +10179,7 @@ RtlControlFlowGraph InvertThreadPrologueAndEpilogueInsns(const RtlControlFlowGra
           size_t idx1 = 0;
           std::optional<size_t> idx0;
           if (find_const_load_before(i, kMipsTemp2Regno, &reg13_val, &idx1, &idx0)) {
+            has_active_base13_offset = true;
             active_base13_offset = reg13_val;
             if (idx0.has_value()) {
               strip[*idx0] = true;
@@ -5429,8 +10192,8 @@ RtlControlFlowGraph InvertThreadPrologueAndEpilogueInsns(const RtlControlFlowGra
 
         int saved_reg = -1;
         int save_offset = 0;
-        if (MatchPrologueSaveStoreWithBase(pat, active_base13_offset, tsize, &saved_reg,
-                                           &save_offset) &&
+        if (MatchPrologueSaveStoreWithBase(pat, has_active_base13_offset, active_base13_offset,
+                                           tsize, &saved_reg, &save_offset) &&
             !stripped_saves.contains(saved_reg) && !body_writes.contains(saved_reg)) {
           const RtlMachineMode src_mode = pat.children[1].mode;
           const bool second_half_clobbered =
@@ -5471,7 +10234,7 @@ RtlControlFlowGraph InvertThreadPrologueAndEpilogueInsns(const RtlControlFlowGra
         reg12_clobbered = true;
       }
       if (insns[i].write_regs.contains(kMipsTemp2Regno)) {
-        active_base13_offset.reset();
+        has_active_base13_offset = false;
       }
       for (int r : insns[i].write_regs) {
         body_writes.insert(r);
@@ -5493,6 +10256,9 @@ RtlControlFlowGraph InvertThreadPrologueAndEpilogueInsns(const RtlControlFlowGra
     if (flags.opt_level > 0 && flags.RunsSched2() &&
         (scheduled_cfg.pass == RtlPassKind::kSched2 || scheduled_cfg.pass == RtlPassKind::kGreg)) {
       RestoreSched2PreScheduleDeletedNoopMoves(&out, profile);
+      if (flags.RunsSched1()) {
+        AlignRestoredNoConflictRetvalNoopsForSched1(&out, profile);
+      }
     }
     return out;
   }
@@ -5590,6 +10356,10 @@ RtlControlFlowGraph InvertThreadPrologueAndEpilogueInsns(const RtlControlFlowGra
     if (strip[i]) {
       continue;
     }
+    if (mutated_notes[i] && flags.RunsSched1()) {
+      CanonicalizeInsnLivenessNoteOrder(&insns[i].parsed, /*sched_note_order=*/true, gp64, fp64,
+                                        /*reload_completed=*/true);
+    }
     std::string pat_str =
         mutated_notes[i]
             ? FormatGccPrintRtlPatternAndNotes(insns[i].parsed.pattern, insns[i].parsed.reg_notes,
@@ -5613,6 +10383,9 @@ RtlControlFlowGraph InvertThreadPrologueAndEpilogueInsns(const RtlControlFlowGra
   if (flags.opt_level > 0 && flags.RunsSched2() &&
       (scheduled_cfg.pass == RtlPassKind::kSched2 || scheduled_cfg.pass == RtlPassKind::kGreg)) {
     RestoreSched2PreScheduleDeletedNoopMoves(&out, profile);
+    if (flags.RunsSched1()) {
+      AlignRestoredNoConflictRetvalNoopsForSched1(&out, profile);
+    }
   }
 
   return out;

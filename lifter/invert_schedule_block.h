@@ -22,14 +22,6 @@ RtlControlFlowGraph InvertScheduleBlock(const RtlControlFlowGraph& scheduled_cfg
 RtlControlFlowGraph InvertScheduleBlock(const RtlControlFlowGraph& scheduled_cfg,
                                         const CompilationProfile& profile);
 
-// Inverts `sched.c:update_flow_info` after pre-allocation `try_split` in Stage
-// 6 (`RtlPassKind::kSched`): re-merges split 32-bit `large_int` immediate moves
-// (`(set (reg:SI R) (const_int HI))` followed by
-// `(set (reg:SI R) (ior:SI (reg:SI R) (const_int LO)))`) back into a single
-// `(set (reg:SI R) (const_int V))` instruction, restores `REG_NOTES` onto the
-// merged instruction, and decrements `sideband.reg_n_sets[R]`.
-RtlControlFlowGraph InvertUpdateFlowInfo(const RtlControlFlowGraph& scheduled_cfg);
-
 // Inverts `function.c:thread_prologue_and_epilogue_insns` /
 // `mips.c:mips_expand_prologue` in post-reload Stage 3 (`RtlPassKind::kSched2`):
 // recovers `< 4`-byte by-value struct shift specs (`prologue_args`), variadic

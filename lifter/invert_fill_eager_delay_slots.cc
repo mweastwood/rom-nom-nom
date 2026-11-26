@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/btree_set.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
@@ -17,6 +18,7 @@
 #include "core/rtl_cfg.h"
 #include "core/rtl_expr.h"
 #include "lifter/reconstruct_hard_reg_liveness.h"
+#include "lifter/sched_model.h"
 
 namespace rom_nom_nom::lifter {
 namespace {
@@ -402,7 +404,61 @@ std::vector<std::vector<size_t>> BuildPredecessors(const RtlControlFlowGraph& cf
   return preds;
 }
 
-void InsertBlockAt(RtlControlFlowGraph* cfg, size_t insert_idx, RtlBasicBlock new_blk) {
+struct EagerStolenSlotSite {
+  size_t block_idx = 0;
+  size_t slot_idx = 0;
+  std::optional<size_t> opposite_block_idx;
+  bool thread_if_true = true;
+  bool is_annulled = false;
+  bool valid = true;
+  std::string slot_text;
+};
+
+void ShiftEagerSitesOnInsert(std::vector<EagerStolenSlotSite>* sites, size_t insert_idx) {
+  if (sites == nullptr) {
+    return;
+  }
+  for (EagerStolenSlotSite& s : *sites) {
+    if (!s.valid) {
+      continue;
+    }
+    if (s.block_idx >= insert_idx) {
+      ++s.block_idx;
+    }
+    if (s.opposite_block_idx.has_value() && *s.opposite_block_idx >= insert_idx) {
+      ++(*s.opposite_block_idx);
+    }
+  }
+}
+
+void ShiftEagerSitesOnErase(std::vector<EagerStolenSlotSite>* sites, size_t erase_idx) {
+  if (sites == nullptr) {
+    return;
+  }
+  for (EagerStolenSlotSite& s : *sites) {
+    if (!s.valid) {
+      continue;
+    }
+    if (s.block_idx == erase_idx) {
+      s.valid = false;
+      continue;
+    }
+    if (s.block_idx > erase_idx) {
+      --s.block_idx;
+    }
+    if (s.opposite_block_idx.has_value()) {
+      if (*s.opposite_block_idx == erase_idx) {
+        s.opposite_block_idx.reset();
+        s.valid = false;
+      } else if (*s.opposite_block_idx > erase_idx) {
+        --(*s.opposite_block_idx);
+      }
+    }
+  }
+}
+
+void InsertBlockAt(RtlControlFlowGraph* cfg, size_t insert_idx, RtlBasicBlock new_blk,
+                   std::vector<EagerStolenSlotSite>* sites = nullptr) {
   cfg->rpo_blocks.insert(cfg->rpo_blocks.begin() + static_cast<ptrdiff_t>(insert_idx),
                          std::move(new_blk));
   for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
@@ -420,9 +476,11 @@ void InsertBlockAt(RtlControlFlowGraph* cfg, size_t insert_idx, RtlBasicBlock ne
       }
     }
   }
+  ShiftEagerSitesOnInsert(sites, insert_idx);
 }
 
-void EraseBlockAt(RtlControlFlowGraph* cfg, size_t erase_idx) {
+void EraseBlockAt(RtlControlFlowGraph* cfg, size_t erase_idx,
+                  std::vector<EagerStolenSlotSite>* sites = nullptr) {
   cfg->rpo_blocks.erase(cfg->rpo_blocks.begin() + static_cast<ptrdiff_t>(erase_idx));
   for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
     for (size_t& succ : cfg->rpo_blocks[b].successors) {
@@ -436,6 +494,7 @@ void EraseBlockAt(RtlControlFlowGraph* cfg, size_t erase_idx) {
       }
     }
   }
+  ShiftEagerSitesOnErase(sites, erase_idx);
 }
 
 bool IsRealActiveInsn(const RtlExpr& pat) {
@@ -1323,16 +1382,16 @@ size_t ComputeTargetStolenInsertPos(const RtlControlFlowGraph& out, size_t tgt_b
                                     const CompilationProfile& profile);
 
 FallthroughSequenceResult TryInvertFallthroughThreadSequence(
-    RtlControlFlowGraph* out_ptr, std::vector<bool>* entered_with_filled_end_jump_ptr, size_t b,
-    const RtlExpr& jump_sub, const RtlPatternAndNotes& jump_pat_notes,
-    const RtlPatternAndNotes& slot_pat_notes, bool is_cond_jump, bool is_simple_uncond_jump,
-    const CompilationProfile& profile) {
+    RtlControlFlowGraph* out_ptr, std::vector<bool>* entered_with_filled_end_jump_ptr,
+    std::vector<EagerStolenSlotSite>* stolen_sites, size_t b, const RtlExpr& jump_sub,
+    const RtlPatternAndNotes& jump_pat_notes, const RtlPatternAndNotes& slot_pat_notes,
+    bool is_cond_jump, bool is_simple_uncond_jump, const CompilationProfile& profile) {
   RtlControlFlowGraph& out = *out_ptr;
   std::vector<bool>& entered_with_filled_end_jump = *entered_with_filled_end_jump_ptr;
   auto& blk = out.rpo_blocks[b];
   const RtlExpr& jump_pat = jump_pat_notes.pattern;
   auto insert_block_at = [&](size_t insert_idx, RtlBasicBlock new_blk) {
-    InsertBlockAt(&out, insert_idx, std::move(new_blk));
+    InsertBlockAt(&out, insert_idx, std::move(new_blk), stolen_sites);
     entered_with_filled_end_jump.insert(
         entered_with_filled_end_jump.begin() + static_cast<ptrdiff_t>(insert_idx), false);
   };
@@ -1753,17 +1812,41 @@ FallthroughSequenceResult TryInvertFallthroughThreadSequence(
   } else if (own_fallthrough && !shared_return_latch_ft) {
     const size_t ft_ins_pos =
         ComputeTargetStolenInsertPos(out, fallthrough_b, ft_blk, slot_pat_notes, profile);
+    const std::string slot_str = slot_pat_notes.ToGccPrintRtlString();
     ft_blk.instructions.insert(ft_blk.instructions.begin() + static_cast<ptrdiff_t>(ft_ins_pos),
-                               slot_pat_notes.ToGccPrintRtlString());
+                               slot_str);
+    if (stolen_sites != nullptr) {
+      stolen_sites->push_back(EagerStolenSlotSite{
+          .block_idx = fallthrough_b,
+          .slot_idx = ft_ins_pos,
+          .opposite_block_idx = cond_target_b,
+          .thread_if_true = false,
+          .is_annulled = jump_sub.flags.unchanging,
+          .valid = true,
+          .slot_text = slot_str,
+      });
+    }
   } else {
     const size_t ins_b = shared_return_latch_ft ? *shared_ret_insert_b : fallthrough_b;
     if (shared_return_latch_ft && ins_b < out.rpo_blocks.size() &&
         !out.rpo_blocks[ins_b].has_label && preds[ins_b].size() == 1) {
       const size_t ft_ins_pos =
           ComputeTargetStolenInsertPos(out, ins_b, out.rpo_blocks[ins_b], slot_pat_notes, profile);
+      const std::string slot_str = slot_pat_notes.ToGccPrintRtlString();
       out.rpo_blocks[ins_b].instructions.insert(
           out.rpo_blocks[ins_b].instructions.begin() + static_cast<ptrdiff_t>(ft_ins_pos),
-          slot_pat_notes.ToGccPrintRtlString());
+          slot_str);
+      if (stolen_sites != nullptr) {
+        stolen_sites->push_back(EagerStolenSlotSite{
+            .block_idx = ins_b,
+            .slot_idx = ft_ins_pos,
+            .opposite_block_idx = cond_target_b,
+            .thread_if_true = false,
+            .is_annulled = jump_sub.flags.unchanging,
+            .valid = true,
+            .slot_text = slot_str,
+        });
+      }
     } else {
       RtlBasicBlock new_ft;
       new_ft.has_label = false;
@@ -1936,9 +2019,10 @@ bool ComputeLoopVtopNeededForTargetSteal(const RtlControlFlowGraph& out,
 
 void TryRecoverMissingFallthroughCompensation(
     RtlControlFlowGraph* out_ptr, std::vector<bool>* entered_with_filled_end_jump_ptr,
-    size_t* rev_idx_ptr, size_t* b_ptr, size_t* target_b_ptr,
-    std::vector<size_t>* same_slot_jumpers_ptr, std::vector<std::vector<size_t>>* preds_ptr,
-    bool* pred_falls_through_to_target_ptr, bool* need_loop_beg_ptr, const RtlExpr& orig_slot_pat) {
+    std::vector<EagerStolenSlotSite>* stolen_sites, size_t* rev_idx_ptr, size_t* b_ptr,
+    size_t* target_b_ptr, std::vector<size_t>* same_slot_jumpers_ptr,
+    std::vector<std::vector<size_t>>* preds_ptr, bool* pred_falls_through_to_target_ptr,
+    bool* need_loop_beg_ptr, const RtlExpr& orig_slot_pat) {
   if (!orig_slot_pat.IsSet() || !orig_slot_pat.SetDest().IsReg()) {
     return;
   }
@@ -2116,7 +2200,7 @@ void TryRecoverMissingFallthroughCompensation(
           break;
         }
       }
-      EraseBlockAt(&out, ft_b);
+      EraseBlockAt(&out, ft_b, stolen_sites);
       entered_with_filled_end_jump.erase(entered_with_filled_end_jump.begin() +
                                          static_cast<ptrdiff_t>(ft_b));
       if (ft_b <= b && rev_idx > 0) {
@@ -2269,6 +2353,7 @@ bool PrefixInsnsAreRedundantInAllJumpers(const RtlControlFlowGraph& out,
 }
 
 void ApplyPostEagerDelaySlotNormalizations(RtlControlFlowGraph* out_ptr,
+                                           std::vector<EagerStolenSlotSite>* stolen_sites,
                                            const CompilationProfile& profile) {
   RtlControlFlowGraph& out = *out_ptr;
   for (auto& blk : out.rpo_blocks) {
@@ -2466,7 +2551,7 @@ void ApplyPostEagerDelaySlotNormalizations(RtlControlFlowGraph* out_ptr,
           }
         }
       }
-      EraseBlockAt(&out, b);
+      EraseBlockAt(&out, b, stolen_sites);
       continue;
     }
     ++b;
@@ -2717,7 +2802,8 @@ void RestoreSubwordConstSlotModeIfNeeded(const RtlControlFlowGraph& out,
 }
 
 void PrependLoopVtopAndBegIfNeeded(RtlControlFlowGraph* out,
-                                   std::vector<bool>* entered_with_filled_end_jump, size_t hdr_b,
+                                   std::vector<bool>* entered_with_filled_end_jump,
+                                   std::vector<EagerStolenSlotSite>* stolen_sites, size_t hdr_b,
                                    bool need_loop_vtop, bool need_loop_beg, size_t b,
                                    size_t* rev_idx) {
   if (hdr_b >= out->rpo_blocks.size()) {
@@ -2802,7 +2888,7 @@ void PrependLoopVtopAndBegIfNeeded(RtlControlFlowGraph* out,
   beg_blk.has_label = false;
   beg_blk.instructions = {RtlExpr::MakeNote("NOTE_INSN_LOOP_BEG").ToGccPrintRtlString()};
   beg_blk.successors = {hdr_b + 1};
-  InsertBlockAt(out, hdr_b, std::move(beg_blk));
+  InsertBlockAt(out, hdr_b, std::move(beg_blk), stolen_sites);
   entered_with_filled_end_jump->insert(
       entered_with_filled_end_jump->begin() + static_cast<ptrdiff_t>(hdr_b), false);
   if (prev_fell_through) {
@@ -2983,6 +3069,612 @@ size_t ComputeTargetStolenInsertPos(const RtlControlFlowGraph& out, size_t tgt_b
   return ins_pos;
 }
 
+bool IsInsnIneligibleForMipsDelaySlot(const sched_model::Insn& insn,
+                                      const ParsedCompilerFlags& flags) {
+  const RtlExpr& pat = insn.pn.pattern;
+  if (pat.op == RtlOp::kParallel) {
+    return true;
+  }
+  if (!pat.IsSet() || pat.children.size() != 2) {
+    return false;
+  }
+  const RtlExpr& dst = pat.SetDest();
+  const RtlExpr& src = pat.SetSrc();
+  // `mips.md:79-82`: `type=load`, `xfer`, `hilo`, `fcmp` have `dslot="yes"`.
+  bool src_has_mem = false;
+  src.Visit([&src_has_mem](const RtlExpr& n) {
+    if (n.op == RtlOp::kMem) {
+      src_has_mem = true;
+    }
+  });
+  if (src_has_mem) {
+    return true;
+  }
+  if (dst.IsReg() && dst.RegNo() == 67) {
+    return true;
+  }
+  bool touches_hilo = false;
+  pat.Visit([&touches_hilo](const RtlExpr& n) {
+    if (n.IsReg() && (n.RegNo() == 64 || n.RegNo() == 65)) {
+      touches_hilo = true;
+    }
+  });
+  if (touches_hilo) {
+    return true;
+  }
+  if (src.op == RtlOp::kFloat || src.op == RtlOp::kUnsignedFloat || src.op == RtlOp::kFix ||
+      src.op == RtlOp::kUnsignedFix || src.op == RtlOp::kConstDouble) {
+    return true;
+  }
+  auto is_fpr = [](int r) { return r >= 32 && r <= 63; };
+  if (dst.IsReg() && src.IsReg() && (is_fpr(dst.RegNo()) != is_fpr(src.RegNo()))) {
+    return true;
+  }
+  // `mips.md:3290-3300` (`movsi_internal2`): `symbol_ref`/`label_ref`/`const`
+  // and 2-insn 32-bit immediates have `length=2` (or `type=load, length=2`).
+  if (dst.IsReg()) {
+    if (src.op == RtlOp::kSymbolRef || src.op == RtlOp::kLabelRef || src.op == RtlOp::kConst) {
+      return true;
+    }
+    if (src.op == RtlOp::kConstInt) {
+      const int64_t v = src.int_val;
+      const bool fits_i16 = (v >= -32768 && v <= 32767);
+      const bool fits_u16 = (v >= 0 && v <= 65535);
+      const bool fits_lui = ((v & 0xffff) == 0 && v >= -2147483648LL && v <= 2147483647LL);
+      if (!fits_i16 && !fits_u16 && !fits_lui) {
+        return true;
+      }
+    }
+  }
+  if (dst.mode == RtlMachineMode::kDi || src.mode == RtlMachineMode::kDi ||
+      (dst.mode == RtlMachineMode::kDf && dst.IsReg() && src.IsReg() &&
+       is_fpr(dst.RegNo()) != is_fpr(src.RegNo()))) {
+    return true;
+  }
+  // Multi-insn symbolic `MEM` stores have `length=2` under `-G 0`.
+  if (dst.IsMem() && !dst.children.empty() && flags.small_data_threshold == 0) {
+    const RtlExpr& addr = dst.children[0];
+    const bool simple_reg_disp =
+        addr.IsReg() || (addr.op == RtlOp::kPlus && addr.children.size() == 2 &&
+                         addr.children[0].IsReg() && addr.children[1].op == RtlOp::kConstInt &&
+                         addr.children[1].int_val >= -32768 && addr.children[1].int_val <= 32767);
+    if (!simple_reg_disp) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool PatternMayTrapForReorg(const RtlExpr& pat) {
+  bool traps = false;
+  pat.Visit([&traps](const RtlExpr& n) {
+    if (traps) {
+      return;
+    }
+    if (n.op == RtlOp::kMem || n.op == RtlOp::kDiv || n.op == RtlOp::kUdiv || n.op == RtlOp::kMod ||
+        n.op == RtlOp::kUmod) {
+      traps = true;
+      return;
+    }
+    if ((n.mode == RtlMachineMode::kSf || n.mode == RtlMachineMode::kDf) &&
+        (n.op == RtlOp::kPlus || n.op == RtlOp::kMinus || n.op == RtlOp::kMult ||
+         n.op == RtlOp::kAbs || n.op == RtlOp::kNeg || n.op == RtlOp::kFloatExtend ||
+         n.op == RtlOp::kFloatTruncate || n.op == RtlOp::kSqrt)) {
+      traps = true;
+    }
+  });
+  return traps;
+}
+
+bool IsInsnSkippedByFillSlotsFromThread(const sched_model::Insn& insn,
+                                        const absl::btree_set<int>* opposite_live_regs,
+                                        const EagerStolenSlotSite& site,
+                                        const ParsedCompilerFlags& flags,
+                                        const sched_model::MachineModel& mm) {
+  if (insn.kind != sched_model::Insn::Kind::kInsn) {
+    return false;
+  }
+  const RtlExpr& pat = insn.pn.pattern;
+  if (pat.op == RtlOp::kSequence || pat.op == RtlOp::kBarrier || pat.op == RtlOp::kUse ||
+      pat.op == RtlOp::kClobber) {
+    return false;
+  }
+  // `reorg.c:3386, 3405-3407` + `mips.md:79-82, 125-138`:
+  // instructions failing `(dslot == no && length == 1)` are always skipped.
+  if (IsInsnIneligibleForMipsDelaySlot(insn, flags)) {
+    return true;
+  }
+  // `reorg.c:3375-3378, 3389-3407` + `mips.md:125-128`:
+  // MIPS has `ANNUL_IFTRUE == (nil)` (so fallthrough steals can never annul) and
+  // `ANNUL_IFFALSE` requires `branch_likely == yes` (`-mips2`+). When annulling
+  // is unavailable, any insn that may trap or sets a register live at the
+  // opposite branch target is skipped.
+  const bool can_annul = site.thread_if_true && (flags.mips_isa >= 2);
+  if (!can_annul && !site.is_annulled && opposite_live_regs != nullptr) {
+    if (PatternMayTrapForReorg(pat)) {
+      return true;
+    }
+    if (pat.IsSet() && pat.children.size() == 2) {
+      const RtlExpr* dst = &pat.SetDest();
+      while ((dst->op == RtlOp::kSubreg || dst->op == RtlOp::kStrictLowPart ||
+              dst->op == RtlOp::kZeroExtract || dst->op == RtlOp::kSignExtract) &&
+             !dst->children.empty()) {
+        dst = &dst->children[0];
+      }
+      if (dst->IsReg() && dst->RegNo() >= 0 && dst->RegNo() < 72) {
+        const int nr = mm.HardRegNRegs(dst->RegNo(), dst->mode);
+        for (int k = 0; k < nr; ++k) {
+          if (opposite_live_regs->contains(dst->RegNo() + k)) {
+            return true;
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
+// Forward-verified Stage 1 preimage selector for `reorg.c:3258-3460`
+// (`fill_slots_from_thread`): when restoring a stolen delay-slot insn at the
+// head of an owned target/fallthrough block leaves the block outside
+// `Im(F_sched1)`, searches later positions `cand_s > slot_s` in the same block
+// strictly gated on:
+//   (1) exact `reorg.c:3316-3460` forward-scan skip legality,
+//   (2) post-reload `Pass04`/`Pass05` safety (`PreservesPostReloadOrderSafety`),
+//   (3) `Pass03` `sched2` achievability (`IsAchievable(kSched2)` when `RunsSched2`),
+//   (4) `Pass06` `sched1` achievability (`IsAchievable(kSched1)`).
+void SelectSched1AchievableEagerStolenPositions(RtlControlFlowGraph* cfg,
+                                                absl::Span<const EagerStolenSlotSite> sites,
+                                                const CompilationProfile& profile) {
+  const ParsedCompilerFlags flags = ParseCompilationProfileFlags(profile);
+  if (cfg == nullptr || sites.empty() || flags.opt_level <= 0 || !flags.RunsSched1()) {
+    return;
+  }
+  const sched_model::MachineModel mm = sched_model::MachineModel::FromProfile(profile);
+  const sched_model::RegFacts facts_s2 =
+      sched_model::RegFacts::FromCfg(*cfg, profile, sched_model::Phase::kSched2);
+  const sched_model::CfgSched1Context cfg_ctx =
+      sched_model::ComputeCfgSched1Context(*cfg, *cfg, mm);
+
+  bool any_moved = false;
+  for (const EagerStolenSlotSite& site : sites) {
+    if (!site.valid || site.block_idx >= cfg->rpo_blocks.size()) {
+      continue;
+    }
+    RtlBasicBlock& blk = cfg->rpo_blocks[site.block_idx];
+    size_t slot_idx = site.slot_idx;
+    if (slot_idx >= blk.instructions.size() || blk.instructions[slot_idx] != site.slot_text) {
+      bool found = false;
+      for (size_t i = 0; i < blk.instructions.size(); ++i) {
+        if (blk.instructions[i] == site.slot_text) {
+          slot_idx = i;
+          found = true;
+          break;
+        }
+        auto pi = ParsePatternAndNotes(blk.instructions[i]);
+        if (pi.ok() && pi->pattern.op != RtlOp::kNote) {
+          break;
+        }
+      }
+      if (!found) {
+        continue;
+      }
+    }
+
+    const sched_model::ParsedSchedRegion region =
+        sched_model::ParseBlockForSchedModel(blk, site.block_idx, sched_model::Phase::kSched2);
+    if (!region.valid || region.has_mid_block_loop_barrier || region.sched_block.size() <= 2) {
+      continue;
+    }
+    const int n = static_cast<int>(region.sched_block.size());
+    int slot_s = -1;
+    for (int i = 0; i < n; ++i) {
+      if (region.sched_orig_indices[static_cast<size_t>(i)] == slot_idx) {
+        slot_s = i;
+        break;
+      }
+    }
+    if (slot_s < 0) {
+      continue;
+    }
+
+    const sched_model::PostReloadBodyBounds bounds =
+        sched_model::FindPostReloadBodyBounds(region.sched_block, site.block_idx);
+    if (slot_s < bounds.prologue_end || slot_s >= bounds.epilogue_begin) {
+      continue;
+    }
+    const int body_len = bounds.epilogue_begin - bounds.prologue_end;
+    if (body_len <= 1) {
+      continue;
+    }
+
+    absl::btree_set<int> live_at_end_s2;
+    for (size_t succ : blk.successors) {
+      if (const auto it = cfg->sideband.basic_block_live_at_start.find(static_cast<int>(succ));
+          it != cfg->sideband.basic_block_live_at_start.end()) {
+        live_at_end_s2.insert(it->second.begin(), it->second.end());
+      }
+    }
+
+    std::vector<sched_model::Insn> base_body;
+    base_body.reserve(static_cast<size_t>(body_len));
+    for (int i = bounds.prologue_end; i < bounds.epilogue_begin; ++i) {
+      sched_model::Insn insn = region.sched_block[static_cast<size_t>(i)];
+      insn.luid = i - bounds.prologue_end;
+      base_body.push_back(std::move(insn));
+    }
+    sched_model::Sched1ProjectionContext proj_ctx =
+        sched_model::BuildSched1ProjectionContextForBlock(site.block_idx, cfg_ctx);
+    proj_ctx.excluded_prologue_body_indices = sched_model::FindInterleavedPrologueSaveBodyIndices(
+        region.sched_block, bounds, site.block_idx, mm);
+    const sched_model::Sched1ProjectionView base_view =
+        sched_model::ProjectPostReloadBlockToSched1View(base_body, mm, live_at_end_s2, proj_ctx);
+    if (base_view.core_insns.size() <= 1 ||
+        sched_model::IsAchievable(base_view.core_insns, base_view.facts_s1, mm,
+                                  sched_model::Phase::kSched1, base_view.live_at_end_s1)) {
+      continue;
+    }
+
+    absl::btree_set<int> opposite_live_regs;
+    const absl::btree_set<int>* opp_live_ptr = nullptr;
+    if (site.opposite_block_idx.has_value() && *site.opposite_block_idx < cfg->rpo_blocks.size()) {
+      if (const auto it = cfg->sideband.basic_block_live_at_start.find(
+              static_cast<int>(*site.opposite_block_idx));
+          it != cfg->sideband.basic_block_live_at_start.end()) {
+        opposite_live_regs.insert(it->second.begin(), it->second.end());
+        opp_live_ptr = &opposite_live_regs;
+      }
+    }
+
+    const RtlPatternAndNotes& slot_pn = region.sched_block[static_cast<size_t>(slot_s)].pn;
+    std::optional<size_t> chosen_blk_pos;
+    for (int cand_s = slot_s + 1; cand_s < bounds.epilogue_begin; ++cand_s) {
+      const sched_model::Insn& k_insn = region.sched_block[static_cast<size_t>(cand_s)];
+      if (k_insn.kind != sched_model::Insn::Kind::kInsn ||
+          ExpressionsConflict(k_insn.pn.pattern, slot_pn.pattern)) {
+        break;
+      }
+      if (!IsInsnSkippedByFillSlotsFromThread(k_insn, opp_live_ptr, site, flags, mm)) {
+        break;
+      }
+
+      // Construct `cand_in_base`: erase `slot_s`, re-insert at `cand_s`.
+      std::vector<int> cand_in_base;
+      cand_in_base.reserve(static_cast<size_t>(n));
+      for (int i = 0; i < n; ++i) {
+        if (i != slot_s) {
+          cand_in_base.push_back(i);
+        }
+      }
+      cand_in_base.insert(cand_in_base.begin() + cand_s, slot_s);
+
+      // Gate 2: post-reload DAG, reload contiguity, `REG_DEAD`, liveness, equiv, interferences.
+      if (!sched_model::PreservesPostReloadOrderSafety(
+              region.sched_block, cand_in_base, bounds.prologue_end, bounds.epilogue_begin,
+              live_at_end_s2, cfg_ctx.cfg_copy_pairs, facts_s2, mm,
+              /*allow_pure_reader_reg_dead_transfer=*/false, cfg_ctx.stack_layout,
+              proj_ctx.excluded_prologue_body_indices)) {
+        continue;
+      }
+
+      std::vector<sched_model::Insn> cand_sched;
+      cand_sched.reserve(static_cast<size_t>(n));
+      for (int pos = 0; pos < n; ++pos) {
+        sched_model::Insn insn =
+            region.sched_block[static_cast<size_t>(cand_in_base[static_cast<size_t>(pos)])];
+        insn.luid = pos;
+        cand_sched.push_back(std::move(insn));
+      }
+
+      // Gate 3: `Pass03` `sched2` achievability.
+      if (flags.RunsSched2() &&
+          !sched_model::IsAchievable(cand_sched, facts_s2, mm, sched_model::Phase::kSched2,
+                                     live_at_end_s2)) {
+        continue;
+      }
+
+      // Gate 4: `Pass06` `sched1` achievability.
+      std::vector<sched_model::Insn> cand_body;
+      cand_body.reserve(static_cast<size_t>(body_len));
+      for (int pos = bounds.prologue_end; pos < bounds.epilogue_begin; ++pos) {
+        sched_model::Insn insn = cand_sched[static_cast<size_t>(pos)];
+        insn.luid = pos - bounds.prologue_end;
+        cand_body.push_back(std::move(insn));
+      }
+      sched_model::Sched1ProjectionContext cand_proj_ctx = proj_ctx;
+      cand_proj_ctx.excluded_prologue_body_indices =
+          sched_model::FindInterleavedPrologueSaveBodyIndices(cand_sched, bounds, site.block_idx,
+                                                              mm);
+      const sched_model::Sched1ProjectionView cand_view =
+          sched_model::ProjectPostReloadBlockToSched1View(cand_body, mm, live_at_end_s2,
+                                                          cand_proj_ctx);
+      if (cand_view.core_insns.size() <= 1 ||
+          !sched_model::IsAchievable(cand_view.core_insns, cand_view.facts_s1, mm,
+                                     sched_model::Phase::kSched1, cand_view.live_at_end_s1)) {
+        continue;
+      }
+
+      chosen_blk_pos = region.sched_orig_indices[static_cast<size_t>(cand_s)];
+      break;
+    }
+
+    if (!chosen_blk_pos.has_value()) {
+      continue;
+    }
+    const bool has_synced_rtl = (blk.rtl_insns.size() == blk.instructions.size());
+    std::string moved_str = std::move(blk.instructions[slot_idx]);
+    blk.instructions.erase(blk.instructions.begin() + static_cast<ptrdiff_t>(slot_idx));
+    const size_t insert_at = *chosen_blk_pos;
+    blk.instructions.insert(blk.instructions.begin() + static_cast<ptrdiff_t>(insert_at),
+                            std::move(moved_str));
+    if (has_synced_rtl) {
+      RtlInsn moved_rtl = std::move(blk.rtl_insns[slot_idx]);
+      blk.rtl_insns.erase(blk.rtl_insns.begin() + static_cast<ptrdiff_t>(slot_idx));
+      blk.rtl_insns.insert(blk.rtl_insns.begin() + static_cast<ptrdiff_t>(insert_at),
+                           std::move(moved_rtl));
+    }
+    any_moved = true;
+  }
+  if (any_moved) {
+    RecomputePostReloadLiveAtStart(cfg, profile);
+  }
+}
+
+absl::flat_hash_set<int> CollectOrigUnfilledCondBranchBlockIds(const RtlControlFlowGraph& cfg) {
+  absl::flat_hash_set<int> ids;
+  for (const RtlBasicBlock& blk : cfg.rpo_blocks) {
+    if (blk.successors.size() != 2 || blk.instructions.empty()) {
+      continue;
+    }
+    auto p = ParsePatternAndNotes(blk.instructions.back());
+    if (p.ok() && p->pattern.op != RtlOp::kSequence && IsCondJumpExpr(p->pattern)) {
+      ids.insert(blk.id);
+    }
+  }
+  return ids;
+}
+
+// Mirrors `combine.c:10831-10846` + `reorg.c:3294, 3375-3377, 3691-3730`:
+// When `combine` simplifies an instruction at the head of a loop-latch block
+// `fall_b` and emits a zero-code `(use (reg:M d)) (REG_DEAD d)` before
+// `fall_b`'s first active insn `(set (reg:M d) <rhs>)`, `mark_target_live_regs`
+// propagates `d` live around any def-free path from an enclosing branch target
+// `target_b` back to `fall_b`, preventing `fill_eager_delay_slots` from pulling
+// that length-1 non-trapping `SET` into an unfilled conditional branch at `b`.
+// Restore `(use (reg:M d)) (REG_DEAD d)` when all conditions hold.
+void RestoreCombineDeadUseForUnfilledEagerBranch(
+    RtlControlFlowGraph* cfg, const absl::flat_hash_set<int>& orig_unfilled_cond_branch_ids,
+    const CompilationProfile& profile) {
+  if (cfg == nullptr || profile.optimize_level <= 0 || cfg->rpo_blocks.size() < 2) {
+    return;
+  }
+  const size_t n_blocks = cfg->rpo_blocks.size();
+  const auto preds = BuildPredecessors(*cfg);
+
+  bool gp64 = false;
+  bool fp64 = false;
+  DetectMipsRegisterWidthFlags(*cfg, &profile, &gp64, &fp64);
+  auto reg_covers_gpr = [gp64](const RtlExpr& reg_expr, int target_regno) -> bool {
+    if (!reg_expr.IsReg() || reg_expr.IsArgPointerReg()) {
+      return false;
+    }
+    const int base_r = reg_expr.RegNo();
+    const int span =
+        (!gp64 && (reg_expr.mode == RtlMachineMode::kDi || reg_expr.mode == RtlMachineMode::kDf))
+            ? 2
+            : 1;
+    return target_regno >= base_r && target_regno < base_r + span;
+  };
+  auto block_kills_gpr = [&](size_t blk_idx, int regno) -> bool {
+    const bool call_clobbers = (regno < 16 || regno == 24 || regno == 25);
+    for (const std::string& raw : cfg->rpo_blocks[blk_idx].instructions) {
+      auto parsed = ParsePatternAndNotes(raw);
+      if (!parsed.ok()) {
+        return true;
+      }
+      const RtlExpr& pat = parsed->pattern;
+      if (pat.op == RtlOp::kNote || pat.op == RtlOp::kUse || pat.op == RtlOp::kClobber) {
+        continue;
+      }
+      bool killed = false;
+      auto check_pat = [&](const auto& self, const RtlExpr& expr) -> void {
+        if (killed) {
+          return;
+        }
+        if (expr.op == RtlOp::kCall && call_clobbers) {
+          killed = true;
+          return;
+        }
+        if (expr.IsSet() && reg_covers_gpr(expr.SetDest(), regno)) {
+          killed = true;
+          return;
+        }
+        for (const RtlExpr& ch : expr.children) {
+          self(self, ch);
+        }
+      };
+      check_pat(check_pat, pat);
+      if (killed) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  std::vector<int> inserted_use_regs;
+  for (size_t b = 0; b + 1 < n_blocks; ++b) {
+    const RtlBasicBlock& blk = cfg->rpo_blocks[b];
+    if (!orig_unfilled_cond_branch_ids.contains(blk.id) || blk.successors.size() != 2 ||
+        blk.instructions.empty()) {
+      continue;
+    }
+    const size_t fall_b = b + 1;
+    const size_t target_b = (blk.successors[0] == fall_b) ? blk.successors[1] : blk.successors[0];
+    if (target_b == fall_b || target_b >= n_blocks || preds[fall_b].size() != 1 ||
+        preds[fall_b][0] != b) {
+      continue;
+    }
+    auto jmp_pn = ParsePatternAndNotes(blk.instructions.back());
+    if (!jmp_pn.ok() || jmp_pn->pattern.op == RtlOp::kSequence ||
+        !IsCondJumpExpr(jmp_pn->pattern)) {
+      continue;
+    }
+
+    RtlBasicBlock& fall_blk = cfg->rpo_blocks[fall_b];
+    size_t first_idx = fall_blk.instructions.size();
+    RtlPatternAndNotes first_pn;
+    bool has_prior_use = false;
+    for (size_t i = 0; i < fall_blk.instructions.size(); ++i) {
+      auto parsed = ParsePatternAndNotes(fall_blk.instructions[i]);
+      if (!parsed.ok()) {
+        first_idx = fall_blk.instructions.size();
+        break;
+      }
+      if (parsed->pattern.op == RtlOp::kUse) {
+        has_prior_use = true;
+        continue;
+      }
+      if (!IsRealActiveInsn(parsed->pattern)) {
+        continue;
+      }
+      first_idx = i;
+      first_pn = std::move(*parsed);
+      break;
+    }
+    if (has_prior_use || first_idx >= fall_blk.instructions.size()) {
+      continue;
+    }
+    const RtlExpr& fpat = first_pn.pattern;
+    if (!fpat.IsSet() || !fpat.SetDest().IsReg() || fpat.SetDest().IsArgPointerReg() ||
+        fpat.SetDest().mode != RtlMachineMode::kSi || fpat.SetSrc().op != RtlOp::kConstInt ||
+        fpat.SetSrc().int_val < -32768 || fpat.SetSrc().int_val > 65535) {
+      continue;
+    }
+    const int dst_r = fpat.SetDest().RegNo();
+    if (dst_r <= 0 || dst_r >= 32 || dst_r == 28 || dst_r == 29 || dst_r == 31 ||
+        jmp_pn->pattern.ContainsReg(dst_r)) {
+      continue;
+    }
+    if (IsAnyRegLiveAtBlockEntry(*cfg, absl::MakeConstSpan(&dst_r, 1), target_b)) {
+      continue;
+    }
+    // Check whether `fall_b` is reachable from `target_b` along a path that
+    // does not kill `dst_r` before `fall_b`, so `(use (reg:SI dst_r))` at the
+    // head of `fall_b` propagates `dst_r` into `opposite_needed` at `target_b`.
+    std::vector<bool> visited(n_blocks, false);
+    std::vector<size_t> worklist = {target_b};
+    visited[target_b] = true;
+    bool reaches_fall_without_kill = false;
+    while (!worklist.empty()) {
+      const size_t cur = worklist.back();
+      worklist.pop_back();
+      if (cur == fall_b) {
+        reaches_fall_without_kill = true;
+        break;
+      }
+      if (block_kills_gpr(cur, dst_r)) {
+        continue;
+      }
+      for (size_t succ : cfg->rpo_blocks[cur].successors) {
+        if (succ < n_blocks && !visited[succ]) {
+          visited[succ] = true;
+          worklist.push_back(succ);
+        }
+      }
+    }
+    if (!reaches_fall_without_kill) {
+      continue;
+    }
+    RtlPatternAndNotes use_pn;
+    RtlExpr use_reg = fpat.SetDest();
+    use_reg.flags = RtlFlags{};
+    use_pn.pattern = RtlExpr::MakeUse(use_reg);
+    use_pn.reg_notes.push_back(RtlRegNote{
+        .kind = RtlMachineMode::kRegDead,
+        .list_op = RtlOp::kExprList,
+        .datum = std::move(use_reg),
+    });
+    fall_blk.instructions.insert(fall_blk.instructions.begin() + static_cast<ptrdiff_t>(first_idx),
+                                 use_pn.ToGccPrintRtlString());
+    inserted_use_regs.push_back(dst_r);
+  }
+  if (inserted_use_regs.empty()) {
+    return;
+  }
+  // Mirrors `reorg.c:2415-2430, 2613-2654` (`mark_target_live_regs`):
+  // `mark_target_live_regs` walks from the block after the preceding `BARRIER`
+  // to `target`, accumulating `REG_DEAD` notes into `pending_dead_regs` and
+  // clearing them from `current_live_regs` at the next `CODE_LABEL`. Once the
+  // restored `(use (reg:SI dst_r))` makes `dst_r` live around the enclosing
+  // loop, remove any now-stale `REG_DEAD` note for `dst_r` on instructions
+  // where `dst_r` is live-out (up to the preceding definition of `dst_r`).
+  RecomputePostReloadLiveAtStart(cfg, profile);
+  for (int dst_r : inserted_use_regs) {
+    const bool call_clobbers = (dst_r < 16 || dst_r == 24 || dst_r == 25);
+    for (size_t k = 0; k < cfg->rpo_blocks.size(); ++k) {
+      RtlBasicBlock& blk = cfg->rpo_blocks[k];
+      bool live_after = false;
+      for (size_t succ : blk.successors) {
+        if (succ < cfg->rpo_blocks.size() &&
+            IsAnyRegLiveAtBlockEntry(*cfg, absl::MakeConstSpan(&dst_r, 1), succ)) {
+          live_after = true;
+          break;
+        }
+      }
+      if (!live_after) {
+        continue;
+      }
+      for (size_t rev = blk.instructions.size(); rev > 0; --rev) {
+        const size_t i = rev - 1;
+        auto parsed = ParsePatternAndNotes(blk.instructions[i]);
+        if (!parsed.ok()) {
+          break;
+        }
+        if (parsed->pattern.op == RtlOp::kNote || parsed->pattern.op == RtlOp::kUse ||
+            parsed->pattern.op == RtlOp::kClobber) {
+          continue;
+        }
+        bool changed_notes = false;
+        std::vector<RtlRegNote> kept_notes;
+        kept_notes.reserve(parsed->reg_notes.size());
+        for (RtlRegNote& note : parsed->reg_notes) {
+          if (note.kind == RtlMachineMode::kRegDead && note.datum.IsReg() &&
+              !note.datum.IsArgPointerReg() && note.datum.RegNo() == dst_r) {
+            changed_notes = true;
+            continue;
+          }
+          kept_notes.push_back(std::move(note));
+        }
+        if (changed_notes) {
+          parsed->reg_notes = std::move(kept_notes);
+          blk.instructions[i] = parsed->ToGccPrintRtlString();
+        }
+        bool defines_dst = false;
+        auto check_def = [&](const auto& self, const RtlExpr& expr) -> void {
+          if (defines_dst) {
+            return;
+          }
+          if (expr.op == RtlOp::kCall && call_clobbers) {
+            defines_dst = true;
+            return;
+          }
+          if (expr.IsSet() && reg_covers_gpr(expr.SetDest(), dst_r)) {
+            defines_dst = true;
+            return;
+          }
+          for (const RtlExpr& ch : expr.children) {
+            self(self, ch);
+          }
+        };
+        check_def(check_def, parsed->pattern);
+        if (defines_dst) {
+          break;
+        }
+      }
+    }
+  }
+}
+
 }  // namespace
 
 RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eager_cfg_x,
@@ -2990,6 +3682,8 @@ RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eag
   if (!IsValidCfg(dbr_eager_cfg_x)) {
     return {};
   }
+  const absl::flat_hash_set<int> orig_unfilled_cond_branch_ids =
+      CollectOrigUnfilledCondBranchBlockIds(dbr_eager_cfg_x);
 
   RtlControlFlowGraph out = dbr_eager_cfg_x;
   out.pass = RtlPassKind::kDbr;
@@ -3005,13 +3699,14 @@ RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eag
       entered_with_filled_end_jump[i] = true;
     }
   }
+  std::vector<EagerStolenSlotSite> stolen_sites;
   auto insert_block_at = [&](size_t insert_idx, RtlBasicBlock new_blk) {
-    InsertBlockAt(&out, insert_idx, std::move(new_blk));
+    InsertBlockAt(&out, insert_idx, std::move(new_blk), &stolen_sites);
     entered_with_filled_end_jump.insert(
         entered_with_filled_end_jump.begin() + static_cast<ptrdiff_t>(insert_idx), false);
   };
   auto erase_block_at = [&](size_t erase_idx) {
-    EraseBlockAt(&out, erase_idx);
+    EraseBlockAt(&out, erase_idx, &stolen_sites);
     entered_with_filled_end_jump.erase(entered_with_filled_end_jump.begin() +
                                        static_cast<ptrdiff_t>(erase_idx));
   };
@@ -3066,9 +3761,9 @@ RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eag
     // steal whose destination register is immediately killed on `fallthrough_b`
     // (or read-before-written at `target_b`).
     if (!slot_sub.flags.in_struct) {
-      if (TryInvertFallthroughThreadSequence(&out, &entered_with_filled_end_jump, b, jump_sub,
-                                             *jump_pat_notes, *slot_pat_notes, is_cond_jump,
-                                             is_simple_uncond_jump, profile) ==
+      if (TryInvertFallthroughThreadSequence(&out, &entered_with_filled_end_jump, &stolen_sites, b,
+                                             jump_sub, *jump_pat_notes, *slot_pat_notes,
+                                             is_cond_jump, is_simple_uncond_jump, profile) ==
           FallthroughSequenceResult::kHandledOrSkipped) {
         continue;
       }
@@ -3105,8 +3800,8 @@ RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eag
         slot_pat_notes->pattern);
     bool need_loop_beg = false;
     auto maybe_prepend_loop_vtop = [&](size_t hdr_b) {
-      PrependLoopVtopAndBegIfNeeded(&out, &entered_with_filled_end_jump, hdr_b, need_loop_vtop,
-                                    need_loop_beg, b, &rev_idx);
+      PrependLoopVtopAndBegIfNeeded(&out, &entered_with_filled_end_jump, &stolen_sites, hdr_b,
+                                    need_loop_vtop, need_loop_beg, b, &rev_idx);
     };
 
     RestoreSubwordConstSlotModeIfNeeded(out, preds, b, target_b, orig_slot_pat, &*slot_pat_notes);
@@ -3118,8 +3813,8 @@ RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eag
     // emitted the opposite adjustment (`-C` or `PLUS <-> MINUS`) immediately
     // after `p_blk`.
     TryRecoverMissingFallthroughCompensation(
-        &out, &entered_with_filled_end_jump, &rev_idx, &b, &target_b, &same_slot_jumpers, &preds,
-        &pred_falls_through_to_target, &need_loop_beg, orig_slot_pat);
+        &out, &entered_with_filled_end_jump, &stolen_sites, &rev_idx, &b, &target_b,
+        &same_slot_jumpers, &preds, &pred_falls_through_to_target, &need_loop_beg, orig_slot_pat);
 
     // Unpack the terminating `SEQUENCE` of every block in `same_slot_jumpers`.
     for (size_t p_blk : same_slot_jumpers) {
@@ -3331,6 +4026,21 @@ RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eag
             tgt_blk.instructions.insert(
                 tgt_blk.instructions.begin() + static_cast<ptrdiff_t>(t1_ins_pos),
                 moved_slice.begin(), moved_slice.end());
+            if (moved_slice.size() == 1) {
+              std::optional<size_t> opp_b;
+              if (is_cond_jump && same_slot_jumpers.size() == 1 && b + 1 < out.rpo_blocks.size()) {
+                opp_b = b + 1;
+              }
+              stolen_sites.push_back(EagerStolenSlotSite{
+                  .block_idx = target_b,
+                  .slot_idx = t1_ins_pos,
+                  .opposite_block_idx = opp_b,
+                  .thread_if_true = true,
+                  .is_annulled = jump_sub.flags.unchanging,
+                  .valid = true,
+                  .slot_text = moved_slice[0],
+              });
+            }
             tgt_blk.has_label = true;
             if (pred_blk.instructions.empty() && pred_blk.addr_vec_targets.empty() &&
                 pred_blk.successors.size() == 1 && pred_blk.successors[0] == target_b) {
@@ -3473,9 +4183,22 @@ RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eag
       auto& tgt_blk = out.rpo_blocks[target_b];
       const size_t tgt_ins_pos =
           ComputeTargetStolenInsertPos(out, target_b, tgt_blk, *slot_pat_notes, profile);
+      const std::string slot_str = slot_pat_notes->ToGccPrintRtlString();
       tgt_blk.instructions.insert(
-          tgt_blk.instructions.begin() + static_cast<ptrdiff_t>(tgt_ins_pos),
-          slot_pat_notes->ToGccPrintRtlString());
+          tgt_blk.instructions.begin() + static_cast<ptrdiff_t>(tgt_ins_pos), slot_str);
+      std::optional<size_t> opp_b;
+      if (is_cond_jump && same_slot_jumpers.size() == 1 && b + 1 < out.rpo_blocks.size()) {
+        opp_b = b + 1;
+      }
+      stolen_sites.push_back(EagerStolenSlotSite{
+          .block_idx = target_b,
+          .slot_idx = tgt_ins_pos,
+          .opposite_block_idx = opp_b,
+          .thread_if_true = true,
+          .is_annulled = jump_sub.flags.unchanging,
+          .valid = true,
+          .slot_text = slot_str,
+      });
       tgt_blk.has_label = true;
       maybe_prepend_loop_vtop(target_b);
       continue;
@@ -3704,7 +4427,8 @@ RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eag
     }
   }
 
-  ApplyPostEagerDelaySlotNormalizations(&out, profile);
+  ApplyPostEagerDelaySlotNormalizations(&out, &stolen_sites, profile);
+  RestoreCombineDeadUseForUnfilledEagerBranch(&out, orig_unfilled_cond_branch_ids, profile);
 
   for (size_t b = 0; b < out.rpo_blocks.size(); ++b) {
     RtlBasicBlock& blk = out.rpo_blocks[b];
@@ -3740,6 +4464,7 @@ RtlControlFlowGraph InvertFillEagerDelaySlots(const RtlControlFlowGraph& dbr_eag
   SynchronizeCanonicalLabels(&out);
   out.SyncAllBlocksPreservingMachineInsns(dbr_eager_cfg_x.rpo_blocks);
   RecomputePostReloadLiveAtStart(&out, profile);
+  SelectSched1AchievableEagerStolenPositions(&out, stolen_sites, profile);
   return out;
 }
 

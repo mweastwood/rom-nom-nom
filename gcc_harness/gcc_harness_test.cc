@@ -3137,5 +3137,386 @@ TEST(GccHarnessTest, PreservesRegnoPointerFlagFidelityAcrossLocalAllocHooksAndVe
   EXPECT_FALSE(bad_verifier.VerifyLocalAllocStageRightInverse(after_lreg).matches);
 }
 
+TEST(GccHarnessTest, Sched1HooksAndVerifiersHonorFlagsAndPreservePointerRegnos) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+
+  // Two independent memory loads followed by a sum: `schedule_insns` at `-O2`
+  // reorders instructions to cover load latency, whereas `-O1` and
+  // `-O2 -fno-schedule-insns` must skip `schedule_insns` (`toplev.c:3028`).
+  // Also sets `pointer_regnos = {72}` while pseudo 74 holds `sp + 16` to verify
+  // `RunScheduleInsns` and `ExecuteSubfunctionBoundary(kScheduleBlockSched1)`
+  // never clobber or hallucinate `regno_pointer_flag`.
+  RtlControlFlowGraph combine_cfg;
+  combine_cfg.pass = RtlPassKind::kCombine;
+  combine_cfg.rpo_blocks.resize(1);
+  combine_cfg.rpo_blocks[0].id = 0;
+  combine_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg:SI 74) (plus:SI (reg:SI 29 sp) (const_int 16)))");
+  combine_cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 72) (mem:SI (reg:SI 4 a0)))");
+  combine_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg:SI 73) (plus:SI (reg:SI 72) (const_int 1))) "
+      "(expr_list:REG_DEAD (reg:SI 72) (nil))");
+  combine_cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 73) (reg:SI 74))) "
+      "(expr_list:REG_DEAD (reg:SI 73) (expr_list:REG_DEAD (reg:SI 74) (nil)))");
+  combine_cfg.rpo_blocks[0].AddPatternOnly("(use (reg/i:SI 2 v0))");
+  combine_cfg.sideband.pointer_regnos = {72};
+  combine_cfg.sideband.basic_block_live_at_start[0] = {4, 29};
+  combine_cfg.sideband.reg_live_length[72] = 2;
+  combine_cfg.sideband.reg_live_length[73] = -1;
+  combine_cfg.sideband.reg_live_length[74] = 4;
+
+  // 1. At `-O2`, `RunScheduleInsns` hoists `(set 72 (mem a0))` ahead of
+  // `(set 74 (plus sp 16))` (stretching `reg_live_length[72]` from 2 to 3 and
+  // shrinking `reg_live_length[74]` from 4 to 3) while preserving
+  // `pointer_regnos == {72}` and keeping negative `reg_live_length[73] == -1`
+  // untouched (`sched.c:4946`).
+  hooks.ApplyCompilationProfile({.optimize_level = 2, .c_flags = {"-O2"}});
+  ctx.MaterializeFromCfg(combine_cfg);
+  hooks.RunScheduleInsns();
+  const RtlControlFlowGraph sched_o2 = ctx.DematerializeToCfg(ctx.GetInsns(), RtlPassKind::kSched);
+  EXPECT_EQ(sched_o2.sideband.pointer_regnos, std::vector<int>({72}));
+  ASSERT_TRUE(sched_o2.sideband.reg_live_length.contains(72));
+  EXPECT_EQ(sched_o2.sideband.reg_live_length.at(72), 3);
+  ASSERT_TRUE(sched_o2.sideband.reg_live_length.contains(74));
+  EXPECT_EQ(sched_o2.sideband.reg_live_length.at(74), 3);
+  ASSERT_TRUE(sched_o2.sideband.reg_live_length.contains(73));
+  EXPECT_EQ(sched_o2.sideband.reg_live_length.at(73), -1);
+  EXPECT_FALSE(sched_o2.CompareAgainst(combine_cfg).MatchesExactly());
+
+  const SubfunctionBoundarySnapshot boundary_o2 = hooks.ExecuteSubfunctionBoundary(
+      SubfunctionId::kScheduleBlockSched1, combine_cfg, {}, 2, {"-O2"});
+  EXPECT_EQ(boundary_o2.post_state.sideband.pointer_regnos, std::vector<int>({72}));
+  ASSERT_TRUE(boundary_o2.post_state.sideband.reg_live_length.contains(72));
+  EXPECT_EQ(boundary_o2.post_state.sideband.reg_live_length.at(72), 3);
+  ASSERT_TRUE(boundary_o2.post_state.sideband.reg_live_length.contains(74));
+  EXPECT_EQ(boundary_o2.post_state.sideband.reg_live_length.at(74), 3);
+  ASSERT_TRUE(boundary_o2.post_state.sideband.reg_live_length.contains(73));
+  EXPECT_EQ(boundary_o2.post_state.sideband.reg_live_length.at(73), -1);
+  EXPECT_TRUE(boundary_o2.post_state.CompareAgainst(sched_o2).MatchesExactly());
+
+  // 2. At `-O1` and `-O2 -fno-schedule-insns`, `VerifySched1StageRightInverse`
+  // must NOT invoke `RunScheduleInsns()` (`toplev.c:3028`), so an unscheduled
+  // `.07.sched` snapshot matches an identity `Combine` pre-image.
+  class PassthroughSchedProvider final : public SubfunctionInverseProvider {
+   public:
+    RtlControlFlowGraph InvertScheduleBlock(const RtlControlFlowGraph& x,
+                                            const CompilationProfile&) const override {
+      RtlControlFlowGraph y = x;
+      y.pass = RtlPassKind::kCombine;
+      return y;
+    }
+  };
+  PassthroughSchedProvider passthrough_prov;
+  RightInverseVerifier verifier(&ctx, &hooks, &passthrough_prov);
+
+  RtlControlFlowGraph unscheduled_sched = combine_cfg;
+  unscheduled_sched.pass = RtlPassKind::kSched;
+
+  hooks.ApplyCompilationProfile({.optimize_level = 1, .c_flags = {"-O1"}});
+  EXPECT_TRUE(verifier.VerifySched1StageRightInverse(unscheduled_sched).matches);
+
+  hooks.ApplyCompilationProfile({.optimize_level = 2, .c_flags = {"-O2", "-fno-schedule-insns"}});
+  EXPECT_TRUE(verifier.VerifySched1StageRightInverse(unscheduled_sched).matches);
+
+  hooks.ApplyCompilationProfile({.optimize_level = 0, .c_flags = {"-O0"}});
+  EXPECT_TRUE(verifier.VerifySched1StageRightInverse(unscheduled_sched).matches);
+
+  // At `-O2` (where `flag_schedule_insns != 0`), an unscheduled identity inverse
+  // does NOT match `unscheduled_sched` because `RunScheduleInsns()` reorders it.
+  hooks.ApplyCompilationProfile({.optimize_level = 2, .c_flags = {"-O2"}});
+  EXPECT_FALSE(verifier.VerifySched1StageRightInverse(unscheduled_sched).matches);
+}
+
+TEST(GccHarnessTest, MaterializeFromCfgReallocatesRegNSetsAcrossGrowingFunctions) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  hooks.ApplyCompilationProfile({.optimize_level = 1, .c_flags = {"-O1"}});
+
+  // 1. Run `flow_analysis` on a small function (`max_regno = 74`), which allocates `reg_n_sets`
+  //    inside GCC's `rtl_obstack`.
+  ctx.BeginFunction("small_fn");
+  RtlControlFlowGraph small_cfg;
+  small_cfg.pass = RtlPassKind::kLreg;
+  small_cfg.sideband.max_regno = 74;
+  RtlBasicBlock small_bb;
+  small_bb.id = 0;
+  small_bb.AddPatternOnly("(set (reg:SI 72) (reg:SI 4 a0))");
+  small_bb.AddPatternOnly(
+      "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 72) (const_int 1))) "
+      "(expr_list:REG_DEAD (reg:SI 72) (nil))");
+  small_bb.AddPatternOnly("(use (reg/i:SI 2 v0))");
+  small_cfg.rpo_blocks = {small_bb};
+  Rtx small_head = ctx.MaterializeFromCfg(small_cfg);
+  ASSERT_NE(small_head, nullptr);
+  hooks.RunFlowAnalysis(small_head, 74);
+
+  // 2. Begin a new function with many pseudos (`max_regno = 160`) and populated `reg_n_sets`.
+  //    `BeginFunction` must clear `reg_n_sets` and `MaterializeFromCfg` must allocate a fresh
+  //    buffer rather than writing out-of-bounds into the reset `rtl_obstack`.
+  ctx.BeginFunction("large_fn");
+  RtlControlFlowGraph large_cfg;
+  large_cfg.pass = RtlPassKind::kLreg;
+  large_cfg.sideband.max_regno = 160;
+  RtlBasicBlock large_bb;
+  large_bb.id = 0;
+  large_bb.AddPatternOnly("(set (reg:SI 72) (reg:SI 4 a0))");
+  large_cfg.sideband.reg_n_sets[72] = 1;
+  for (int r = 73; r < 160; ++r) {
+    large_bb.AddPatternOnly(
+        "(set (reg:SI " + std::to_string(r) + ") (plus:SI (reg:SI " + std::to_string(r - 1) +
+        ") (const_int 1))) (expr_list:REG_DEAD (reg:SI " + std::to_string(r - 1) + ") (nil))");
+    large_cfg.sideband.reg_n_sets[r] = 1;
+  }
+  large_bb.AddPatternOnly(
+      "(set (reg/i:SI 2 v0) (reg:SI 159)) (expr_list:REG_DEAD (reg:SI 159) (nil))");
+  large_bb.AddPatternOnly("(use (reg/i:SI 2 v0))");
+  large_cfg.rpo_blocks = {large_bb};
+
+  Rtx large_head = ctx.MaterializeFromCfg(large_cfg);
+  ASSERT_NE(large_head, nullptr);
+  const RtlControlFlowGraph round_tripped = ctx.DematerializeToCfg(large_head, RtlPassKind::kLreg);
+  EXPECT_TRUE(round_tripped.CompareAgainst(large_cfg).MatchesExactly())
+      << round_tripped.CompareAgainst(large_cfg).mismatch_detail;
+}
+
+TEST(GccHarnessTest, BlockAllocResetsRegclassPrefclassAcrossO1Invocations) {
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  hooks.ApplyCompilationProfile({.optimize_level = 1, .c_flags = {"-O1"}});
+
+  // 1. Run `RunLocalAlloc` on a small `-O1` function (`max_regno = 74`), which
+  //    allocates `regclass.c`'s static `prefclass` array on `rtl_obstack`
+  //    (`regclass.c:918`).
+  ctx.BeginFunction("small_lreg_fn");
+  RtlControlFlowGraph small_cfg;
+  small_cfg.pass = RtlPassKind::kLreg;
+  small_cfg.sideband.max_regno = 74;
+  RtlBasicBlock small_bb;
+  small_bb.id = 0;
+  small_bb.AddPatternOnly("(set (reg:SI 72) (reg:SI 4 a0))");
+  small_bb.AddPatternOnly(
+      "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 72) (const_int 1))) "
+      "(expr_list:REG_DEAD (reg:SI 72) (nil))");
+  small_bb.AddPatternOnly("(use (reg/i:SI 2 v0))");
+  small_cfg.rpo_blocks = {small_bb};
+  Rtx small_head = ctx.MaterializeFromCfg(small_cfg);
+  ASSERT_NE(small_head, nullptr);
+  hooks.RunLocalAlloc(small_head);
+
+  // 2. Build a larger `-O1` function (`max_regno = 140`) with chained local
+  //    pseudos and run `ExecuteSubfunctionBoundary(kBlockAlloc)` twice back-to-back.
+  //    Without `regclass_init()` resetting `prefclass = 0` (`toplev.c:2957`,
+  //    `regclass.c:620-623`), `record_reg_classes` (`regclass.c:1299`) reads
+  //    freed/reused `rtl_obstack` bytes through the dangling `prefclass` on
+  //    `pass == 0` under `-O1` (`flag_expensive_optimizations == 0`), causing
+  //    corrupted preferred classes and divergent `reg_renumber` between call 1
+  //    and call 2.
+  RtlControlFlowGraph large_cfg;
+  large_cfg.pass = RtlPassKind::kLreg;
+  large_cfg.sideband.max_regno = 140;
+  RtlBasicBlock large_bb;
+  large_bb.id = 0;
+  large_bb.AddPatternOnly("(set (reg:SI 72) (reg:SI 4 a0))");
+  for (int r = 73; r < 140; ++r) {
+    large_bb.AddPatternOnly(
+        "(set (reg:SI " + std::to_string(r) + ") (plus:SI (reg:SI " + std::to_string(r - 1) +
+        ") (const_int 1))) (expr_list:REG_DEAD (reg:SI " + std::to_string(r - 1) + ") (nil))");
+  }
+  large_bb.AddPatternOnly(
+      "(set (reg/i:SI 2 v0) (reg:SI 139)) (expr_list:REG_DEAD (reg:SI 139) (nil))");
+  large_bb.AddPatternOnly("(use (reg/i:SI 2 v0))");
+  large_cfg.rpo_blocks = {large_bb};
+
+  const SubfunctionBoundarySnapshot ba1 = hooks.ExecuteSubfunctionBoundary(
+      SubfunctionId::kBlockAlloc, large_cfg, {}, /*optimize_level=*/1, {"-O1"});
+  const SubfunctionBoundarySnapshot ba2 = hooks.ExecuteSubfunctionBoundary(
+      SubfunctionId::kBlockAlloc, large_cfg, {}, /*optimize_level=*/1, {"-O1"});
+
+  EXPECT_TRUE(ba1.post_state.CompareAgainst(ba2.post_state).MatchesExactly())
+      << ba1.post_state.CompareAgainst(ba2.post_state).mismatch_detail;
+  EXPECT_EQ(ba1.post_state.sideband.reg_renumber, ba2.post_state.sideband.reg_renumber);
+  ASSERT_FALSE(ba1.post_state.sideband.reg_renumber.empty());
+  // Every chained pseudo `r72..r139` should be combined into a single GPR
+  // quantity and allocated to a valid GPR (`< 32`), never misclassified into
+  // `ST_REGS` or spilled.
+  for (int r = 72; r < 140; ++r) {
+    auto it = ba1.post_state.sideband.reg_renumber.find(r);
+    ASSERT_NE(it, ba1.post_state.sideband.reg_renumber.end()) << "r" << r << " was not allocated";
+    EXPECT_GE(it->second, 0) << "r" << r;
+    EXPECT_LT(it->second, 32) << "r" << r;
+  }
+}
+
+TEST(GccHarnessTest, RunScheduleInsnsPostReloadWithoutPrologueNotesAvoidsStalePrologueSegfault) {
+  // Regression test for `function.c:5454-5455, 5617-5663`: after compiling a
+  // function with a prologue/epilogue (which populates `function.c`'s static
+  // `prologue`/`epilogue` UID arrays), running `RunScheduleInsns` post-reload
+  // on a freshly materialized CFG without `NOTE_INSN_PROLOGUE_END` /
+  // `NOTE_INSN_EPILOGUE_BEG` notes must not segfault when UIDs overlap.
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  const auto trace = hooks.TraceForwardCompilation(
+      R"(
+extern int ext_fn(int x);
+int caller_with_prologue(int a, int b) {
+  int r = ext_fn(a + 1);
+  return r + b;
+}
+)",
+      "caller_with_prologue", {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"}, "stale_prologue_seed");
+  ASSERT_FALSE(trace.stage0_input.machine_words.empty());
+
+  // Materialize a post-reload CFG with enough insns to overlap `prologue` UIDs
+  // and no `NOTE_INSN_PROLOGUE_END` / `NOTE_INSN_EPILOGUE_BEG` notes.
+  RtlControlFlowGraph cfg;
+  cfg.pass = RtlPassKind::kGreg;
+  RtlBasicBlock bb;
+  bb.id = 0;
+  for (int i = 0; i < 40; ++i) {
+    bb.AddPatternOnly("(set (reg:SI 8 t0) (plus:SI (reg:SI 8 t0) (const_int 1)))");
+  }
+  bb.AddPatternOnly("(set (reg/i:SI 2 v0) (plus:SI (reg:SI 8 t0) (reg:SI 4 a0)))");
+  bb.AddPatternOnly("(use (reg/i:SI 2 v0))");
+  cfg.rpo_blocks = {bb};
+
+  hooks.ApplyCompilationProfile({.optimize_level = 2, .c_flags = {"-O2", "-mips2", "-mcpu=r4000"}});
+  Rtx head = ctx.MaterializeFromCfg(cfg);
+  ASSERT_NE(head, nullptr);
+  hooks.RunScheduleInsns(head);
+  const RtlControlFlowGraph post = ctx.DematerializeToCfg(ctx.GetInsns(), RtlPassKind::kSched2);
+  ASSERT_EQ(post.rpo_blocks.size(), 1u);
+  EXPECT_EQ(post.rpo_blocks[0].instructions.size(), bb.instructions.size());
+}
+
+TEST(GccHarnessTest, GlobalAllocSubfunctionSkipsReloadSoTraceMatchesSingleReload) {
+  // Regression test for `global.c:580` (`global_alloc()` invoking `reload()`):
+  // `TraceForwardCompilation` separates `SubfunctionId::kGlobalAlloc` and
+  // `SubfunctionId::kReload`. Wrapping `reload` during `kGlobalAlloc` ensures
+  // `reload()` runs exactly once in `kReload` rather than twice, so
+  // `kGlobalAlloc` -> `kReload` -> `kAlterReg` produces the same `kGreg` RTL
+  // (including stack-slot assignment order for `HI/LO` spills vs unallocated
+  // `ST_REGS` pseudos) as single-call `RunGlobalAlloc()`.
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  const std::vector<std::string> flags = {"-O2", "-mips2", "-mcpu=r4000", "-G", "0"};
+  const FunctionCompilationTrace trace = hooks.TraceForwardCompilation(
+      R"(
+long long mul_widening_spill(int a, int b, int c, int d) {
+  long long p = (long long)a * (long long)b;
+  long long q = (long long)c * (long long)d;
+  long long r = p + 0x123456789abcdef0LL;
+  if (a > 0) {
+    r += q;
+  } else {
+    r -= q;
+  }
+  return r + p;
+}
+)",
+      "mul_widening_spill", flags, "single_reload_global_alloc_parity");
+  ASSERT_TRUE(trace.pass_snapshots.contains(RtlPassKind::kLreg));
+  ASSERT_TRUE(trace.pass_snapshots.contains(RtlPassKind::kGreg));
+
+  const RtlControlFlowGraph& lreg_cfg = trace.pass_snapshots.at(RtlPassKind::kLreg);
+  const RtlControlFlowGraph& traced_greg_cfg = trace.pass_snapshots.at(RtlPassKind::kGreg);
+
+  // Replay single-`reload()` `RunGlobalAlloc()` directly from `lreg_cfg`
+  // (exact path used by real `cc1` and `VerifyGlobalReloadStageRightInverse`).
+  hooks.ApplyCompilationProfile({.optimize_level = 2, .c_flags = flags});
+  Rtx head = ctx.MaterializeFromCfg(lreg_cfg);
+  ASSERT_NE(head, nullptr);
+  hooks.RunGlobalAlloc(head);
+  const RtlControlFlowGraph single_reload_greg =
+      ctx.DematerializeToCfg(ctx.GetInsns(), RtlPassKind::kGreg);
+
+  const auto cmp = traced_greg_cfg.CompareAgainst(single_reload_greg);
+  EXPECT_TRUE(cmp.MatchesExactly()) << cmp.mismatch_detail;
+}
+
+TEST(GccHarnessTest, DematerializePreservesNegativeRegLiveLengthSentinelAndOmitsZero) {
+  // Mirrors `global.c:388` (`reg_live_length[i] != -1`): `DematerializeToCfg`
+  // must preserve `-1` sentinels on phantom `alter_reg` gap pseudos across
+  // subfunction boundaries (`kUpdateEquivRegs` -> `kBlockAlloc` ->
+  // `kGlobalAlloc` -> `kReload`) while still omitting `0` entries.
+  GccContext ctx;
+  ctx.BeginFunction("sentinel_roundtrip");
+
+  RtlControlFlowGraph cfg;
+  cfg.pass = RtlPassKind::kSched;
+  cfg.rpo_blocks.resize(1);
+  cfg.rpo_blocks[0].id = 0;
+  cfg.rpo_blocks[0].AddPatternOnly("(set (reg/i:SI 2 v0) (reg:SI 4 a0))");
+  cfg.rpo_blocks[0].AddPatternOnly("(use (reg/i:SI 2 v0))");
+  cfg.sideband.max_regno = 76;
+  cfg.sideband.reg_n_refs[74] = 2;
+  cfg.sideband.reg_live_length[74] = -1;
+  cfg.sideband.reg_n_refs[75] = 2;
+  cfg.sideband.reg_live_length[75] = 0;
+
+  Rtx head = ctx.MaterializeFromCfg(cfg);
+  ASSERT_NE(head, nullptr);
+  const RtlControlFlowGraph roundtripped = ctx.DematerializeToCfg(head, RtlPassKind::kSched);
+  ASSERT_TRUE(roundtripped.sideband.reg_live_length.contains(74));
+  EXPECT_EQ(roundtripped.sideband.reg_live_length.at(74), -1);
+  EXPECT_FALSE(roundtripped.sideband.reg_live_length.contains(75));
+}
+
+TEST(GccHarnessTest, CombineStatePreservesMultiWordHardRegNSetsAcrossRegScan) {
+  // Regression test for `toplev.c:2983-3034`, `flow.c:2035-2049`, and
+  // `regclass.c:1713, 1782-1791`: real GCC 2.7.2 never runs `reg_scan` between
+  // `flow_analysis` and `combine_instructions`. `reg_scan` zeroes `reg_n_sets`
+  // and recounts only base `REGNO(dest)` without iterating `HARD_REGNO_NREGS`,
+  // which previously clobbered `reg_n_sets[7]` (`$a3`, second word of
+  // `(reg:DF 6 a2)`) from `3` down to `1`. Verify `PrepareCombineState` /
+  // `RunCombineInstructions` / `ExecuteCombinePassGranular` preserve
+  // multi-word hard-reg `reg_n_sets` across `kFlow -> kCombine -> kSched`.
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  const std::vector<std::string> flags = {"-O2", "-mips2", "-mcpu=r4000", "-G", "0"};
+  const FunctionCompilationTrace trace = hooks.TraceForwardCompilation(
+      R"(
+extern double ext_df_callee(int a, double x);
+double df_arg_multiword_nsets(int a, int b, double x) {
+  double r1 = ext_df_callee(a, x);
+  double r2 = ext_df_callee(b, r1 + x);
+  return r1 + r2;
+}
+)",
+      "df_arg_multiword_nsets", flags, "preserve_multiword_reg_n_sets");
+  ASSERT_TRUE(trace.pass_snapshots.contains(RtlPassKind::kFlow));
+  ASSERT_TRUE(trace.pass_snapshots.contains(RtlPassKind::kCombine));
+  ASSERT_TRUE(trace.pass_snapshots.contains(RtlPassKind::kSched));
+
+  const RtlControlFlowGraph& flow_cfg = trace.pass_snapshots.at(RtlPassKind::kFlow);
+  const RtlControlFlowGraph& combine_cfg = trace.pass_snapshots.at(RtlPassKind::kCombine);
+  const RtlControlFlowGraph& sched_cfg = trace.pass_snapshots.at(RtlPassKind::kSched);
+
+  // `$a3` (reg 7) is the second word of `(reg:DF 6 a2)` passed to both calls
+  // (plus incoming argument setup), so `flow_analysis` sets `reg_n_sets[7] >= 2`.
+  ASSERT_TRUE(flow_cfg.sideband.reg_n_sets.contains(7));
+  const int flow_a3_n_sets = flow_cfg.sideband.reg_n_sets.at(7);
+  EXPECT_GE(flow_a3_n_sets, 2);
+
+  // Replay `RunCombineInstructions` (which invokes `PrepareCombineState` when
+  // `LOG_LINKS` exist) directly on materialized `flow_cfg` and verify
+  // `reg_n_sets[7]` is preserved across the harness-only `reg_scan` call and
+  // matches `combine_cfg` (produced via `ExecuteCombinePassGranular`).
+  hooks.ApplyCompilationProfile({.optimize_level = 2, .c_flags = flags});
+  Rtx head = ctx.MaterializeFromCfg(flow_cfg);
+  ASSERT_NE(head, nullptr);
+  hooks.RunCombineInstructions(head, flow_cfg.sideband.max_regno);
+  const RtlControlFlowGraph replayed_combine =
+      ctx.DematerializeToCfg(ctx.GetInsns(), RtlPassKind::kCombine);
+  ASSERT_TRUE(replayed_combine.sideband.reg_n_sets.contains(7));
+  EXPECT_GE(replayed_combine.sideband.reg_n_sets.at(7), 2);
+  EXPECT_EQ(replayed_combine.sideband.reg_n_sets.at(7), flow_a3_n_sets);
+  ASSERT_TRUE(combine_cfg.sideband.reg_n_sets.contains(7));
+  EXPECT_EQ(combine_cfg.sideband.reg_n_sets.at(7), flow_a3_n_sets);
+  ASSERT_TRUE(sched_cfg.sideband.reg_n_sets.contains(7));
+  EXPECT_EQ(sched_cfg.sideband.reg_n_sets.at(7), flow_a3_n_sets);
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::gcc_harness

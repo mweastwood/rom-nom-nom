@@ -387,6 +387,77 @@ TEST_F(InvertBlockAllocTest, CorruptedInverseIsRejectedByRightInverseVerifier) {
   EXPECT_FALSE(res.matches);
 }
 
+TEST_F(InvertBlockAllocTest, RestoredMatchScratchClobberSubtractsHardRegSetAndDeathCounts) {
+  // `flow.c:2046-2047` (`mark_set_1`) and `local-alloc.c:1396-1401`
+  // (`alloc_qty_for_scratch`): a pre-`local_alloc` `(clobber (scratch:SI))`
+  // operand in a MIPS `match_scratch` parallel (such as `fix_truncsfsi2` /
+  // `fix_truncdfsi2`) is not counted in `reg_n_sets[hr]` / `reg_n_deaths[hr]`.
+  // When `InvertBlockAlloc` restores `(clobber (reg:SI hr))` back to
+  // `(clobber (scratch:SI))`, it must subtract the scratch's set/death counts
+  // while leaving unrelated non-scratch counts untouched.
+  const CompilationProfile o2_prof{.optimize_level = 2,
+                                   .c_flags = {"-O2", "-mips2", "-mcpu=r4000"}};
+  auto make_cfg = [](bool is_match_scratch_parallel) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kLreg;
+    cfg.rpo_blocks.resize(1);
+    cfg.rpo_blocks[0].id = 0;
+    cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SF 72) (reg:SF 44 $f12))");
+    if (is_match_scratch_parallel) {
+      cfg.rpo_blocks[0].AddPatternOnly(
+          "(parallel[ (set (reg:SI 73) (fix:SI (reg:SF 72))) "
+          "(clobber (reg:SF 32 $f0)) (clobber (reg:SI 8 t0)) ] ) "
+          "(expr_list:REG_DEAD (reg:SF 72) "
+          "(expr_list:REG_UNUSED (reg:SF 32 $f0) "
+          "(expr_list:REG_UNUSED (reg:SI 8 t0) (nil))))");
+    } else {
+      // Non-scratch single `SET` writing `$t0` directly: not restored to
+      // `(scratch:SI)`, so `reg_n_sets[8]` and `reg_n_deaths[8]` remain intact.
+      cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 8 t0) (const_int 1))");
+      cfg.rpo_blocks[0].AddPatternOnly(
+          "(set (reg:SI 73) (plus:SI (reg:SI 8 t0) (const_int 2))) "
+          "(expr_list:REG_DEAD (reg:SI 8 t0) (nil))");
+    }
+    cfg.rpo_blocks[0].AddPatternOnly(
+        "(set (reg/i:SI 2 v0) (reg:SI 73)) (expr_list:REG_DEAD (reg:SI 73) (nil))");
+    cfg.rpo_blocks[0].AddPatternOnly("(use (reg/i:SI 2 v0))");
+    cfg.sideband.reg_renumber[72] = 44;
+    cfg.sideband.reg_renumber[73] = 2;
+    cfg.sideband.reg_n_sets[8] = 1;
+    cfg.sideband.reg_n_deaths[8] = 1;
+    cfg.sideband.reg_n_sets[32] = 1;
+    cfg.sideband.reg_n_deaths[32] = 1;
+    cfg.sideband.reg_n_sets[2] = 1;
+    return cfg;
+  };
+
+  // Positive: restoring `(clobber (reg:SF 32 $f0))` and `(clobber (reg:SI 8 t0))`
+  // removes their scratch counts while preserving `reg_n_sets[2]`.
+  {
+    const auto lifted = InvertBlockAlloc(make_cfg(/*is_match_scratch_parallel=*/true), o2_prof);
+    ASSERT_TRUE(lifted.ok()) << lifted.status();
+    EXPECT_NE(lifted->rpo_blocks[0].instructions[1].find("(clobber (scratch:SF))"),
+              std::string::npos);
+    EXPECT_NE(lifted->rpo_blocks[0].instructions[1].find("(clobber (scratch:SI))"),
+              std::string::npos);
+    EXPECT_FALSE(lifted->sideband.reg_n_sets.contains(8));
+    EXPECT_FALSE(lifted->sideband.reg_n_deaths.contains(8));
+    EXPECT_FALSE(lifted->sideband.reg_n_sets.contains(32));
+    EXPECT_FALSE(lifted->sideband.reg_n_deaths.contains(32));
+    EXPECT_EQ(lifted->sideband.reg_n_sets.at(2), 1);
+  }
+
+  // Negative: genuine non-scratch `$t0` sets/deaths are preserved verbatim.
+  {
+    const auto lifted = InvertBlockAlloc(make_cfg(/*is_match_scratch_parallel=*/false), o2_prof);
+    ASSERT_TRUE(lifted.ok()) << lifted.status();
+    ASSERT_TRUE(lifted->sideband.reg_n_sets.contains(8));
+    EXPECT_EQ(lifted->sideband.reg_n_sets.at(8), 1);
+    ASSERT_TRUE(lifted->sideband.reg_n_deaths.contains(8));
+    EXPECT_EQ(lifted->sideband.reg_n_deaths.at(8), 1);
+  }
+}
+
 // =============================================================================
 // 4,172-Case Parameterized Round-Trip Verification Suite (Standalone + Fresh)
 // =============================================================================

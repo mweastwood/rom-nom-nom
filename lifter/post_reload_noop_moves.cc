@@ -576,6 +576,165 @@ void RestoreDeletedNoopSharedReturnMove(RtlControlFlowGraph* cfg,
   RecomputePostReloadLiveAtStart(cfg, profile);
 }
 
+// Restores a `sched2`-/`jump2`-deleted noop early-return value copy
+// (`sched.c:4803-4818`, `jump.c:308, 427-433`): when a block `b` branches
+// conditionally to the scalar-return exit block `exit_b` (`(use (reg/i:M ret_hr))`)
+// and another successor `other_b` where `ret_hr` is dead, and `b` computes `ret_hr`
+// without `/i` and reads it strictly before the branch (without the branch itself
+// reading `ret_hr`), GCC originally computed a pseudo `P`, read `P`, and emitted
+// `(set (reg/i:M ret_hr) P)` which became a noop self-move after allocation.
+void RestoreDeletedNoopEarlyReturnValueMoves(RtlControlFlowGraph* cfg,
+                                             const CompilationProfile& profile, bool gp64,
+                                             bool fp64) {
+  const size_t n_blocks = cfg->rpo_blocks.size();
+  if (n_blocks < 3) {
+    return;
+  }
+  const size_t exit_b = n_blocks - 1;
+  const RtlBasicBlock& exit_blk = cfg->rpo_blocks[exit_b];
+  if (!exit_blk.successors.empty() || !exit_blk.addr_vec_targets.empty()) {
+    return;
+  }
+  int ret_hr = -1;
+  RtlMachineMode ret_mode = RtlMachineMode::kNone;
+  for (const std::string& insn_str : exit_blk.instructions) {
+    auto p = ParsePatternAndNotes(insn_str);
+    if (!p.ok()) {
+      return;
+    }
+    if (p->pattern.op == RtlOp::kNote) {
+      continue;
+    }
+    if (ret_hr < 0 && p->pattern.op == RtlOp::kUse && p->pattern.children.size() == 1 &&
+        p->pattern.children[0].IsHardReg() && p->pattern.children[0].flags.integrated) {
+      const int cand_hr = p->pattern.children[0].RegNo();
+      const RtlMachineMode cand_mode = p->pattern.children[0].mode;
+      const bool valid_scalar_ret =
+          (cand_hr == 2 &&
+           (cand_mode == RtlMachineMode::kSi || cand_mode == RtlMachineMode::kDi)) ||
+          (cand_hr == 32 && (cand_mode == RtlMachineMode::kSf || cand_mode == RtlMachineMode::kDf));
+      if (valid_scalar_ret) {
+        ret_hr = cand_hr;
+        ret_mode = cand_mode;
+        continue;
+      }
+    }
+    return;
+  }
+  if (ret_hr < 0) {
+    return;
+  }
+  std::bitset<68> ret_mask;
+  MarkHardRegSpan(ret_hr, ret_mode, gp64, fp64, &ret_mask);
+
+  bool any_inserted = false;
+  for (size_t b = 0; b < exit_b; ++b) {
+    RtlBasicBlock& blk = cfg->rpo_blocks[b];
+    if (blk.successors.size() != 2 || !blk.addr_vec_targets.empty()) {
+      continue;
+    }
+    const size_t s0 = static_cast<size_t>(blk.successors[0]);
+    const size_t s1 = static_cast<size_t>(blk.successors[1]);
+    const size_t other_b = (s0 == exit_b) ? s1 : (s1 == exit_b ? s0 : n_blocks);
+    if (other_b >= n_blocks || other_b == exit_b) {
+      continue;
+    }
+    bool live_in_other = false;
+    if (const auto it = cfg->sideband.basic_block_live_at_start.find(static_cast<int>(other_b));
+        it != cfg->sideband.basic_block_live_at_start.end()) {
+      for (int r : it->second) {
+        if (r >= 0 && r < 68 && ret_mask.test(static_cast<size_t>(r))) {
+          live_in_other = true;
+          break;
+        }
+      }
+    }
+    if (live_in_other) {
+      continue;
+    }
+
+    std::optional<size_t> jump_idx;
+    for (size_t rev = blk.instructions.size(); rev > 0; --rev) {
+      auto p = ParsePatternAndNotes(blk.instructions[rev - 1]);
+      if (!p.ok()) {
+        jump_idx.reset();
+        break;
+      }
+      if (p->pattern.op == RtlOp::kNote) {
+        continue;
+      }
+      if (IsCondJumpExpr(p->pattern)) {
+        const InsnSchedSummary jsum = SummarizeInsnForSched2(blk.instructions[rev - 1], gp64, fp64);
+        if (jsum.valid && (jsum.read_regs & ret_mask).none()) {
+          jump_idx = rev - 1;
+        }
+      }
+      break;
+    }
+    if (!jump_idx.has_value() || *jump_idx == 0) {
+      continue;
+    }
+
+    bool saw_read = false;
+    bool already_has_copy = false;
+    bool def_is_volatil = false;
+    bool matched_def = false;
+    for (size_t rev = *jump_idx; rev > 0; --rev) {
+      const size_t i = rev - 1;
+      auto p = ParsePatternAndNotes(blk.instructions[i]);
+      if (!p.ok()) {
+        break;
+      }
+      if (p->pattern.op == RtlOp::kNote) {
+        continue;
+      }
+      if (p->pattern.IsSet() && p->pattern.SetDest().IsHardReg() &&
+          p->pattern.SetSrc().IsHardReg() && p->pattern.SetDest().RegNo() == ret_hr &&
+          p->pattern.SetSrc().RegNo() == ret_hr && p->pattern.SetDest().mode == ret_mode &&
+          p->pattern.SetSrc().mode == ret_mode && p->pattern.SetDest().flags.integrated) {
+        already_has_copy = true;
+        break;
+      }
+      const InsnSchedSummary isum = SummarizeInsnForSched2(blk.instructions[i], gp64, fp64);
+      if (!isum.valid || isum.is_call) {
+        break;
+      }
+      if ((isum.written_regs & ret_mask).any()) {
+        if (saw_read && p->pattern.IsSet() && p->pattern.SetDest().IsHardReg() &&
+            p->pattern.SetDest().RegNo() == ret_hr && p->pattern.SetDest().mode == ret_mode &&
+            !p->pattern.SetDest().flags.integrated && !p->pattern.SetSrc().IsReg()) {
+          def_is_volatil = p->pattern.SetDest().flags.volatil;
+          matched_def = true;
+        }
+        break;
+      }
+      if (p->pattern.op != RtlOp::kUse && (isum.read_regs & ret_mask).any()) {
+        saw_read = true;
+      }
+    }
+    if (already_has_copy || !matched_def) {
+      continue;
+    }
+
+    RtlPatternAndNotes ret_move;
+    const RtlExpr src_reg = MakeGccHardReg(ret_mode, ret_hr, RtlFlags{.volatil = def_is_volatil});
+    ret_move.pattern =
+        RtlExpr::MakeSet(MakeGccHardReg(ret_mode, ret_hr, RtlFlags{.integrated = true}), src_reg);
+    ret_move.reg_notes.push_back(RtlRegNote{
+        .kind = RtlMachineMode::kRegDead,
+        .list_op = RtlOp::kExprList,
+        .datum = src_reg,
+    });
+    blk.instructions.insert(blk.instructions.begin() + static_cast<ptrdiff_t>(*jump_idx),
+                            ret_move.ToGccPrintRtlString());
+    blk.SyncRtlInsnsFromInstructions();
+    any_inserted = true;
+  }
+  if (any_inserted) {
+    RecomputePostReloadLiveAtStart(cfg, profile);
+  }
+}
+
 struct NaturalLoopInfo {
   size_t header = 0;
   std::vector<bool> members;
@@ -1479,6 +1638,102 @@ bool MatchesLocalAllocEntryFirstInsnMovstrsiCaseF(const RtlControlFlowGraph& cfg
   return false;
 }
 
+// Detects multi-block mutated incoming scalar ABI parameters (`$a0..$a3`,
+// `$f12`, `$f14`) whose entry `function.c:assign_parms` (`function.c:3629-3681`)
+// copy `(set (reg:M p_arg) (reg:M arg_hr))` was coalesced back to `arg_hr` by
+// `global_alloc` (`global.c:962-1085`) and subsequently deleted as a noop
+// self-move by `sched.c:4804-4821` or `jump.c:410-435`.
+// Restoring the entry self-move under `flags.RunsSched1()` reconstructs
+// `reg_n_sets[p_arg] >= 2` so `sched.c:2469-2501` (`birthing_insn_p`) matches
+// GCC 2.7.2, while guarding `local-alloc.c:2158-2210` (`find_free_reg`) so no
+// block-local pseudo in `live_web` can steal `arg_hr` before `global_alloc`.
+bool MatchesMutatedWebArgAssignParmsCaseG(
+    const RtlControlFlowGraph& cfg, const std::vector<bool>& live_web,
+    const std::vector<std::vector<RtlPatternAndNotes>>& blk_parsed,
+    const std::vector<std::vector<InsnSchedSummary>>& blk_sums, const ParsedCompilerFlags& flags,
+    bool b0_needs_new_preheader, int arg_hr, RtlMachineMode arg_mode, int span) {
+  if (!flags.RunsSched1() || b0_needs_new_preheader) {
+    return false;
+  }
+  if (arg_mode != RtlMachineMode::kSi && arg_mode != RtlMachineMode::kDi &&
+      arg_mode != RtlMachineMode::kSf && arg_mode != RtlMachineMode::kDf) {
+    return false;
+  }
+  const bool is_fpr_class = (arg_hr >= 32 && arg_hr < 64);
+  const int arg_order_idx = LookupCallerAllocOrderIndex(arg_hr, is_fpr_class);
+  if (arg_order_idx < 0) {
+    return false;
+  }
+
+  const size_t n = cfg.rpo_blocks.size();
+  const int class_first = is_fpr_class ? 32 : 2;
+  const int class_end = is_fpr_class ? 64 : 26;
+  bool has_rmw_mutation_in_web = false;
+
+  for (size_t b = 0; b < n; ++b) {
+    if (!live_web[b]) {
+      continue;
+    }
+    bool cur_live = true;
+    for (size_t i = 0; i < blk_parsed[b].size() && cur_live; ++i) {
+      const RtlPatternAndNotes& pn = blk_parsed[b][i];
+      const InsnSchedSummary& s = blk_sums[b][i];
+      bool reads_arg = false;
+      bool writes_arg = false;
+      for (int w = 0; w < span; ++w) {
+        if (s.read_regs.test(static_cast<size_t>(arg_hr + w))) {
+          reads_arg = true;
+        }
+        if (s.written_regs.test(static_cast<size_t>(arg_hr + w))) {
+          writes_arg = true;
+        }
+      }
+
+      // Guard `local-alloc.c:2158-2210`: if any block-local pseudo in `b` while
+      // `arg_hr` is live was assigned a higher-ordered caller reg or callee-saved
+      // reg in the same class, freeing `arg_hr` during `local-alloc` would let
+      // `local-alloc` steal `arg_hr` before `global_alloc` runs.
+      const int integrated_dst = (pn.pattern.IsSet() && pn.pattern.SetDest().IsHardReg() &&
+                                  pn.pattern.SetDest().flags.integrated)
+                                     ? pn.pattern.SetDest().RegNo()
+                                     : -1;
+      for (int hr = class_first; hr < class_end; ++hr) {
+        if ((hr >= arg_hr && hr < arg_hr + span) || hr == integrated_dst ||
+            !s.written_regs.test(static_cast<size_t>(hr))) {
+          continue;
+        }
+        bool is_global_hr = BlockLiveInContains(cfg, b, hr);
+        if (!is_global_hr) {
+          for (size_t succ : cfg.rpo_blocks[b].successors) {
+            if (succ < n && BlockLiveInContains(cfg, succ, hr)) {
+              is_global_hr = true;
+              break;
+            }
+          }
+        }
+        if (!is_global_hr) {
+          const int hr_order_idx = LookupCallerAllocOrderIndex(hr, is_fpr_class);
+          if (hr_order_idx < 0 || hr_order_idx > arg_order_idx) {
+            return false;
+          }
+        }
+      }
+
+      if (writes_arg) {
+        if (reads_arg && !HasRegDeadForRegno(pn, arg_hr)) {
+          has_rmw_mutation_in_web = true;
+        } else {
+          cur_live = false;
+        }
+      } else if (HasRegDeadForRegno(pn, arg_hr)) {
+        cur_live = false;
+      }
+    }
+  }
+
+  return has_rmw_mutation_in_web;
+}
+
 // Reverses `jump.c:jump_optimize` (`noop_moves = 1`, line 432) and
 // `sched.c:schedule_insns` (`reload_completed != 0`) deletion of
 // `(set (reg:M arg_hr) (reg:M arg_hr))` on incoming scalar ABI parameters
@@ -1540,7 +1795,12 @@ void RestoreDeletedNoopArgPreferenceMoves(RtlControlFlowGraph* cfg,
   const bool b0_needs_new_preheader = !preds[0].empty();
 
   static constexpr std::array<int, 8> kAbiArgRegs = {4, 5, 6, 7, 44, 45, 46, 47};
-  std::vector<std::pair<int, RtlMachineMode>> b0_restored_args;
+  struct RestoredB0Arg {
+    int hr = -1;
+    RtlMachineMode mode = RtlMachineMode::kNone;
+    bool attach_reg_dead = true;
+  };
+  std::vector<RestoredB0Arg> b0_restored_args;
   std::vector<std::tuple<size_t, int, RtlMachineMode>> preheader_restored_args;
   std::bitset<64> consumed_arg_words;
 
@@ -1581,7 +1841,11 @@ void RestoreDeletedNoopArgPreferenceMoves(RtlControlFlowGraph* cfg,
                                                     arg_hr)) {
       consumed_arg_words.set(static_cast<size_t>(arg_hr));
       consumed_arg_words.set(static_cast<size_t>(arg_hr + 1));
-      b0_restored_args.emplace_back(arg_hr, RtlMachineMode::kDi);
+      // Case E's subword reads are strictly `SImode`, so `InvertAlterReg` leaves
+      // `(set (reg:DI arg_hr) (reg:DI arg_hr))` as a hard-reg self-set. Omit
+      // `REG_DEAD` (`flow.c:2507-2550` [`flow.c:2511`] / `sched.c:2872`) so `.07.sched` stays
+      // valid.
+      b0_restored_args.push_back({arg_hr, RtlMachineMode::kDi, /*attach_reg_dead=*/false});
       continue;
     }
 
@@ -1650,7 +1914,7 @@ void RestoreDeletedNoopArgPreferenceMoves(RtlControlFlowGraph* cfg,
         for (int w = 0; w < span; ++w) {
           consumed_arg_words.set(static_cast<size_t>(arg_hr + w));
         }
-        b0_restored_args.emplace_back(arg_hr, arg_mode);
+        b0_restored_args.push_back({arg_hr, arg_mode, /*attach_reg_dead=*/true});
       }
       continue;
     }
@@ -1742,7 +2006,7 @@ void RestoreDeletedNoopArgPreferenceMoves(RtlControlFlowGraph* cfg,
           MatchesLocalAllocEntryFirstInsnMovstrsiCaseF(*cfg, blk_parsed[0], blk_sums[0], *b0_pos,
                                                        arg_hr)) {
         consumed_arg_words.set(static_cast<size_t>(arg_hr));
-        b0_restored_args.emplace_back(arg_hr, arg_mode);
+        b0_restored_args.push_back({arg_hr, arg_mode, /*attach_reg_dead=*/true});
       }
       continue;
     }
@@ -1753,29 +2017,34 @@ void RestoreDeletedNoopArgPreferenceMoves(RtlControlFlowGraph* cfg,
 
     if (MatchesLocalAllocMultiBlockArgSuggCaseC(*cfg, live_web, blk_parsed, blk_sums, gp64, fp64,
                                                 arg_hr, span)) {
-      b0_restored_args.emplace_back(arg_hr, arg_mode);
+      b0_restored_args.push_back({arg_hr, arg_mode, /*attach_reg_dead=*/true});
       continue;
     }
 
-    if ((n < 3 && !b0_needs_new_preheader) || loops.empty()) {
-      continue;
-    }
-
-    if (!written_in_web) {
-      if (MatchesUnmodifiedLoopArgPreferenceCaseA(*cfg, live_web, blk_parsed, blk_sums,
-                                                  written_anywhere, loops, any_in_loop, arg_hr,
-                                                  arg_mode, span)) {
-        b0_restored_args.emplace_back(arg_hr, arg_mode);
+    if ((n >= 3 || b0_needs_new_preheader) && !loops.empty()) {
+      if (!written_in_web) {
+        if (MatchesUnmodifiedLoopArgPreferenceCaseA(*cfg, live_web, blk_parsed, blk_sums,
+                                                    written_anywhere, loops, any_in_loop, arg_hr,
+                                                    arg_mode, span)) {
+          b0_restored_args.push_back({arg_hr, arg_mode, /*attach_reg_dead=*/true});
+        }
+        continue;
       }
-      continue;
+
+      const std::optional<size_t> pre_b = FindSequentialLoopPreheaderArgCopyCaseB(
+          *cfg, live_web, preds, blk_parsed, blk_sums, written_anywhere, loops, any_in_loop,
+          check_sched2_multi_cycle, arg_hr, arg_mode, span);
+      if (pre_b.has_value()) {
+        b0_restored_args.push_back({arg_hr, arg_mode, /*attach_reg_dead=*/true});
+        preheader_restored_args.emplace_back(*pre_b, arg_hr, arg_mode);
+        continue;
+      }
     }
 
-    const std::optional<size_t> pre_b = FindSequentialLoopPreheaderArgCopyCaseB(
-        *cfg, live_web, preds, blk_parsed, blk_sums, written_anywhere, loops, any_in_loop,
-        check_sched2_multi_cycle, arg_hr, arg_mode, span);
-    if (pre_b.has_value()) {
-      b0_restored_args.emplace_back(arg_hr, arg_mode);
-      preheader_restored_args.emplace_back(*pre_b, arg_hr, arg_mode);
+    if (written_in_web &&
+        MatchesMutatedWebArgAssignParmsCaseG(*cfg, live_web, blk_parsed, blk_sums, flags,
+                                             b0_needs_new_preheader, arg_hr, arg_mode, span)) {
+      b0_restored_args.push_back({arg_hr, arg_mode, /*attach_reg_dead=*/true});
     }
   }
 
@@ -1783,14 +2052,16 @@ void RestoreDeletedNoopArgPreferenceMoves(RtlControlFlowGraph* cfg,
     return;
   }
 
-  auto make_noop_self_move = [](int hr, RtlMachineMode mode) {
+  auto make_noop_self_move = [](int hr, RtlMachineMode mode, bool attach_reg_dead = true) {
     RtlPatternAndNotes pn;
     pn.pattern = RtlExpr::MakeSet(MakeGccHardReg(mode, hr), MakeGccHardReg(mode, hr));
-    pn.reg_notes.push_back(RtlRegNote{
-        .kind = RtlMachineMode::kRegDead,
-        .list_op = RtlOp::kExprList,
-        .datum = MakeGccHardReg(mode, hr),
-    });
+    if (attach_reg_dead) {
+      pn.reg_notes.push_back(RtlRegNote{
+          .kind = RtlMachineMode::kRegDead,
+          .list_op = RtlOp::kExprList,
+          .datum = MakeGccHardReg(mode, hr),
+      });
+    }
     return FormatInsnWithoutCallFusage(pn);
   };
 
@@ -1805,8 +2076,8 @@ void RestoreDeletedNoopArgPreferenceMoves(RtlControlFlowGraph* cfg,
           (skip_block_end && is_block_end)) {
         continue;
       }
-      preheader_insns.push_back(
-          make_noop_self_move(b0_restored_args[k].first, b0_restored_args[k].second));
+      preheader_insns.push_back(make_noop_self_move(
+          b0_restored_args[k].hr, b0_restored_args[k].mode, b0_restored_args[k].attach_reg_dead));
     }
     if (!preheader_insns.empty()) {
       for (RtlBasicBlock& blk : cfg->rpo_blocks) {
@@ -1856,7 +2127,7 @@ void RestoreDeletedNoopArgPreferenceMoves(RtlControlFlowGraph* cfg,
           (skip_block_end && is_block_end)) {
         continue;
       }
-      const int target_order = LookupAbiArgCanonicalOrder(b0_restored_args[k].first);
+      const int target_order = LookupAbiArgCanonicalOrder(b0_restored_args[k].hr);
       size_t ins_idx = *b0_pos;
       while (ins_idx < b0.instructions.size()) {
         auto p = ParsePatternAndNotes(b0.instructions[ins_idx]);
@@ -1876,9 +2147,9 @@ void RestoreDeletedNoopArgPreferenceMoves(RtlControlFlowGraph* cfg,
         }
         break;
       }
-      b0.instructions.insert(
-          b0.instructions.begin() + static_cast<ptrdiff_t>(ins_idx),
-          make_noop_self_move(b0_restored_args[k].first, b0_restored_args[k].second));
+      b0.instructions.insert(b0.instructions.begin() + static_cast<ptrdiff_t>(ins_idx),
+                             make_noop_self_move(b0_restored_args[k].hr, b0_restored_args[k].mode,
+                                                 b0_restored_args[k].attach_reg_dead));
       b0_modified = true;
       any_inserted = true;
     }
@@ -2100,6 +2371,457 @@ void RestoreSched2PreScheduleCallArgNoopMoves(RtlControlFlowGraph* cfg,
   }
 }
 
+// Restores post-call/libcall return-value self-moves `(set (reg:M 2 v0) (reg:M 2 v0))`
+// `(expr_list:REG_DEAD (reg:M 2 v0) (nil))` originally emitted as
+// `(set (reg:M P) (reg:M 2 v0))` by `calls.c:479` (`expand_call`) /
+// `optabs.c:2554` (`emit_libcall_block`) and deleted after `reload` by
+// `sched.c:4803-4821` (`schedule_insns`, `if (reload_completed)`). Restoring
+// the self-move allows Stage 4/5 (`InvertAlterReg` / `InvertReload`) to lift
+// the post-call value web into a pseudo `P` (`reg_renumber[P] = 2`), preventing
+// an illegal self-setting `(set (reg/i:M 2 v0) ...)` with `REG_DEAD (reg:M 2 v0)`
+// (`flow.c:2506-2515`, `sched.c:2872-2906`) after `InvertReload` folds an
+// `"=&d"` earlyclobber output reload or across a post-call return RMW chain.
+void RestoreSched2PreScheduleCallReturnNoopMoves(RtlControlFlowGraph* cfg,
+                                                 const CompilationProfile& profile, bool gp64,
+                                                 bool fp64) {
+  const size_t n = cfg->rpo_blocks.size();
+  bool any_inserted = false;
+  for (size_t b = 0; b < n; ++b) {
+    RtlBasicBlock& blk = cfg->rpo_blocks[b];
+    const size_t m = blk.instructions.size();
+    if (m < 2) {
+      continue;
+    }
+    std::vector<RtlPatternAndNotes> parsed;
+    std::vector<InsnSchedSummary> sums;
+    parsed.reserve(m);
+    sums.reserve(m);
+    bool ok = true;
+    for (const std::string& pat_s : blk.instructions) {
+      auto p = ParsePatternAndNotes(pat_s);
+      if (!p.ok()) {
+        ok = false;
+        break;
+      }
+      sums.push_back(SummarizeInsnForSched2(pat_s, gp64, fp64));
+      parsed.push_back(std::move(*p));
+    }
+    if (!ok) {
+      continue;
+    }
+
+    // Collect `(insert_pos, mode)` insertions in ascending `insert_pos` order.
+    std::vector<std::pair<size_t, RtlMachineMode>> insertions;
+    for (size_t call_i = 0; call_i + 1 < m; ++call_i) {
+      if (!sums[call_i].is_call) {
+        continue;
+      }
+      const RtlExpr* call_set = ExtractSingleSetInParallelOrSet(parsed[call_i].pattern);
+      if (call_set == nullptr || !call_set->SetDest().IsHardReg() ||
+          call_set->SetDest().RegNo() != 2 ||
+          (call_set->SetDest().mode != RtlMachineMode::kSi &&
+           call_set->SetDest().mode != RtlMachineMode::kDi)) {
+        continue;
+      }
+      const RtlMachineMode ret_mode = call_set->SetDest().mode;
+      int next_hr = -1;
+      RtlMachineMode next_mode = RtlMachineMode::kNone;
+      if (IsLeadingNoopSelfMoveForReg(parsed[call_i + 1], &next_hr, &next_mode) && next_hr == 2) {
+        continue;
+      }
+      std::bitset<68> ret_span;
+      MarkHardRegSpan(2, ret_mode, gp64, fp64, &ret_span);
+
+      bool matched = false;
+      std::optional<size_t> first_use_idx;
+      for (size_t k = call_i + 1; k < m; ++k) {
+        if (sums[k].is_call || IsAnyJumpOrReturnTopExpr(parsed[k].pattern)) {
+          break;
+        }
+        const bool reads_ret = (sums[k].read_regs & ret_span).any();
+        const bool writes_ret = (sums[k].written_regs & ret_span).any();
+        if (!reads_ret && !writes_ret) {
+          continue;
+        }
+        if (!reads_ret && writes_ret) {
+          break;
+        }
+        const RtlExpr* ks = ExtractSingleSetInParallelOrSet(parsed[k].pattern);
+        if (ks == nullptr || !ks->SetDest().IsHardReg()) {
+          break;
+        }
+        const bool has_dead_v0 = HasRegDeadForRegno(parsed[k], 2);
+
+        // Pattern 1: post-call RMW chain in `2 v0` ending in `(set (reg/i:M 2 v0) ...)`
+        // carrying `REG_DEAD (reg:M 2 v0)`.
+        if (ks->SetDest().RegNo() == 2 && ks->SetDest().mode == ret_mode) {
+          if (ks->SetDest().flags.integrated) {
+            if (has_dead_v0) {
+              if (!first_use_idx.has_value()) {
+                first_use_idx = k;
+              }
+              matched = true;
+            }
+            break;
+          }
+          if (!has_dead_v0) {
+            if (!first_use_idx.has_value()) {
+              first_use_idx = k;
+            }
+            continue;
+          }
+          break;
+        }
+
+        // Pattern 2: `"=&d"` earlyclobber `DI` parallel op reading `(reg:DI 2 v0)`
+        // with `REG_DEAD (reg:DI 2 v0)`, followed immediately by output reload
+        // `(set (reg/i:DI 2 v0) (reg:DI scratch_hr))`.
+        if (ret_mode == RtlMachineMode::kDi && has_dead_v0 && !first_use_idx.has_value() &&
+            parsed[k].pattern.op == RtlOp::kParallel && ks->SetDest().mode == RtlMachineMode::kDi &&
+            !ks->SetDest().flags.integrated && ks->SetDest().RegNo() != 2 && k + 1 < m) {
+          const RtlOp rop = ks->SetSrc().op;
+          const bool is_di_op =
+              (rop == RtlOp::kPlus || rop == RtlOp::kMinus || rop == RtlOp::kAshift ||
+               rop == RtlOp::kAshiftrt || rop == RtlOp::kLshiftrt);
+          const RtlExpr& mv = parsed[k + 1].pattern;
+          bool mv_has_equiv_or_equal = false;
+          for (const RtlRegNote& note : parsed[k + 1].reg_notes) {
+            if (note.kind == RtlMachineMode::kRegEquiv || note.kind == RtlMachineMode::kRegEqual) {
+              mv_has_equiv_or_equal = true;
+              break;
+            }
+          }
+          if (is_di_op && !mv_has_equiv_or_equal && mv.IsSet() && mv.children.size() == 2 &&
+              mv.SetDest().IsHardReg() && mv.SetDest().flags.integrated &&
+              mv.SetDest().RegNo() == 2 && mv.SetDest().mode == RtlMachineMode::kDi &&
+              mv.SetSrc().IsHardReg() && mv.SetSrc().RegNo() == ks->SetDest().RegNo() &&
+              mv.SetSrc().mode == RtlMachineMode::kDi) {
+            first_use_idx = k;
+            matched = true;
+          }
+        }
+        break;
+      }
+
+      if (matched) {
+        // Place after any independent non-memory instructions between `call_i`
+        // and `first_use_idx`: in `sched1`, `call_i -> non-mem` is a 0-cost
+        // `REG_DEP_ANTI` (`mips.h:2946`), whereas `call_i -> (set P_ret 2 v0)`
+        // is a 1-cost `REG_DEP_TRUE` (`sched.c`), so `sched1` schedules the
+        // non-memory instruction ahead of `(set P_ret 2 v0)`. Conversely, a
+        // memory load after `call_i` also has a 1-cost `REG_DEP_TRUE` from the
+        // call, so the return copy stays immediately after `call_i` unless
+        // `mips.md:157-159` (`r3000` load `ready_cost = 2`) makes a load
+        // feeding `first_use_idx` win priority over the 1-cycle copy.
+        size_t insert_pos = call_i + 1;
+        if (first_use_idx.has_value() && *first_use_idx > call_i + 1) {
+          // Mirrors `mips.md:153-159`: `r3000`/`r4600`/`r4650` have load
+          // `ready_cost = 2` (vs `3` on `r4000`/`r6000`).
+          bool has_explicit_cpu = false;
+          bool is_two_cycle_load_cpu = false;
+          for (const std::string& flag : profile.c_flags) {
+            if (flag == "-mcpu=r3000" || flag == "-mcpu=r4600" || flag == "-mcpu=r4650") {
+              has_explicit_cpu = true;
+              is_two_cycle_load_cpu = true;
+            } else if (flag.rfind("-mcpu=", 0) == 0) {
+              has_explicit_cpu = true;
+              is_two_cycle_load_cpu = false;
+            } else if (flag == "-mips1" && !has_explicit_cpu) {
+              is_two_cycle_load_cpu = true;
+            }
+          }
+          const std::bitset<68> first_use_reads = sums[*first_use_idx].read_regs;
+          for (size_t j = call_i + 1; j < *first_use_idx; ++j) {
+            bool has_mem = false;
+            parsed[j].pattern.Visit([&](const RtlExpr& node) {
+              if (node.op == RtlOp::kMem) {
+                has_mem = true;
+              }
+            });
+            const bool is_non_mem_indep = !has_mem;
+            const bool is_two_cycle_feeding_load = is_two_cycle_load_cpu &&
+                                                   HasMultiCycleReadyLatency(parsed[j].pattern) &&
+                                                   (sums[j].written_regs & first_use_reads).any();
+            if (is_non_mem_indep || is_two_cycle_feeding_load) {
+              insert_pos = j + 1;
+            }
+          }
+        }
+        insertions.emplace_back(insert_pos, ret_mode);
+      }
+    }
+
+    if (insertions.empty()) {
+      continue;
+    }
+    if (blk.rtl_insns.size() != blk.instructions.size()) {
+      blk.SyncRtlInsnsFromInstructions();
+    }
+    std::vector<std::string> new_insns;
+    std::vector<RtlInsn> new_rtl_insns;
+    new_insns.reserve(m + insertions.size());
+    new_rtl_insns.reserve(m + insertions.size());
+    size_t ins_cur = 0;
+    for (size_t i = 0; i < m; ++i) {
+      while (ins_cur < insertions.size() && insertions[ins_cur].first == i) {
+        const RtlMachineMode mode = insertions[ins_cur].second;
+        RtlPatternAndNotes mv;
+        mv.pattern = RtlExpr::MakeSet(MakeGccHardReg(mode, 2), MakeGccHardReg(mode, 2));
+        mv.reg_notes.push_back(RtlRegNote{
+            .kind = RtlMachineMode::kRegDead,
+            .list_op = RtlOp::kExprList,
+            .datum = MakeGccHardReg(mode, 2),
+        });
+        std::string mv_s = FormatInsnWithoutCallFusage(mv);
+        RtlInsn rinsn;
+        rinsn.canonical_pattern = mv_s;
+        rinsn.is_synthetic_rtl_expansion = true;
+        new_insns.push_back(std::move(mv_s));
+        new_rtl_insns.push_back(std::move(rinsn));
+        any_inserted = true;
+        ++ins_cur;
+      }
+      new_insns.push_back(blk.instructions[i]);
+      new_rtl_insns.push_back(blk.rtl_insns[i]);
+    }
+    blk.instructions = std::move(new_insns);
+    blk.rtl_insns = std::move(new_rtl_insns);
+  }
+  if (any_inserted) {
+    RecomputePostReloadLiveAtStart(cfg, profile);
+  }
+}
+
+// Reverses `sched.c:4803-4818` (`schedule_insns` deleting post-reload no-op
+// self-moves before `schedule_block`) for `local-alloc.c:1317-1352`-tied
+// `emit_no_conflict_block` (`optabs.c:2485-2525`) sign-extend sequences:
+// restores the deleted `(set (reg:DI dh) (reg:DI dh))` (`REG_RETVAL` +
+// `REG_EQUAL (sign_extend:DI (reg:SI src_reg))`) closing move and, when
+// `src_reg` is an incoming block-0 ABI parameter read before the clobber, the
+// deleted `function.c:assign_parms` entry parameter self-move
+// `(set (reg:SI src_reg) (reg:SI src_reg)) (REG_DEAD (reg:SI src_reg))`.
+void RestoreSched2PreScheduleNoConflictSignExtendNoopMoves(RtlControlFlowGraph* cfg,
+                                                           const CompilationProfile& profile,
+                                                           bool gp64, bool fp64) {
+  if (gp64) {
+    return;
+  }
+  bool any_inserted = false;
+  for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
+    RtlBasicBlock& blk = cfg->rpo_blocks[b];
+    const size_t m = blk.instructions.size();
+    if (m < 3) {
+      continue;
+    }
+    std::vector<RtlPatternAndNotes> parsed;
+    parsed.reserve(m);
+    bool parse_ok = true;
+    for (size_t i = 0; i < m; ++i) {
+      auto p = ParsePatternAndNotes(blk.instructions[i]);
+      if (!p.ok()) {
+        parse_ok = false;
+        break;
+      }
+      parsed.push_back(std::move(*p));
+    }
+    if (!parse_ok) {
+      continue;
+    }
+
+    struct PendingNoConflictRestore {
+      size_t retval_insert_pos = 0;
+      int dh = -1;
+      int src_reg = -1;
+      bool need_entry_copy = false;
+      bool is_zero_extend = false;
+    };
+    std::vector<PendingNoConflictRestore> restores;
+
+    for (size_t c = 0; c < m; ++c) {
+      const RtlPatternAndNotes& cpn = parsed[c];
+      if (cpn.pattern.op != RtlOp::kClobber || cpn.pattern.children.size() != 1 ||
+          !cpn.pattern.children[0].IsHardReg() ||
+          cpn.pattern.children[0].mode != RtlMachineMode::kDi) {
+        continue;
+      }
+      const bool has_libcall =
+          std::any_of(cpn.reg_notes.begin(), cpn.reg_notes.end(),
+                      [](const RtlRegNote& n) { return n.kind == RtlMachineMode::kRegLibcall; });
+      if (!has_libcall) {
+        continue;
+      }
+      const int dh = cpn.pattern.children[0].RegNo();
+      if (dh < 2 || dh > 24 || (dh % 2) != 0) {
+        continue;
+      }
+
+      int src_reg = -1;
+      std::optional<size_t> word1_idx;
+      std::optional<size_t> word0_idx;
+      bool is_zero_extend = false;
+      bool already_has_retval = false;
+      for (size_t k = c + 1; k < m; ++k) {
+        const RtlPatternAndNotes& kpn = parsed[k];
+        if (std::any_of(kpn.reg_notes.begin(), kpn.reg_notes.end(),
+                        [](const RtlRegNote& n) { return n.kind == RtlMachineMode::kRegRetval; })) {
+          already_has_retval = true;
+          break;
+        }
+        if (kpn.pattern.IsSet() && kpn.pattern.SetDest().op == RtlOp::kSubreg &&
+            kpn.pattern.SetDest().mode == RtlMachineMode::kSi &&
+            !kpn.pattern.SetDest().children.empty() &&
+            kpn.pattern.SetDest().children[0].IsHardReg() &&
+            kpn.pattern.SetDest().children[0].mode == RtlMachineMode::kDi &&
+            kpn.pattern.SetDest().children[0].RegNo() == dh) {
+          int nc_reg = -1;
+          for (const RtlRegNote& n : kpn.reg_notes) {
+            if (n.kind == RtlMachineMode::kRegNoConflict && n.datum.IsHardReg() &&
+                n.datum.mode == RtlMachineMode::kSi) {
+              nc_reg = n.datum.RegNo();
+              break;
+            }
+          }
+          if (nc_reg >= 0 && (dh == nc_reg || dh + 1 == nc_reg)) {
+            if (kpn.pattern.SetDest().int_val == 1 && kpn.pattern.SetSrc().IsHardReg() &&
+                kpn.pattern.SetSrc().mode == RtlMachineMode::kSi &&
+                kpn.pattern.SetSrc().RegNo() == nc_reg && !word1_idx.has_value()) {
+              word1_idx = k;
+              src_reg = nc_reg;
+            } else if (kpn.pattern.SetDest().int_val == 0 && !word0_idx.has_value() &&
+                       kpn.pattern.SetSrc().op == RtlOp::kAshiftrt &&
+                       kpn.pattern.SetSrc().children.size() == 2 &&
+                       kpn.pattern.SetSrc().children[0].IsHardReg() &&
+                       kpn.pattern.SetSrc().children[0].mode == RtlMachineMode::kSi &&
+                       kpn.pattern.SetSrc().children[0].RegNo() == nc_reg &&
+                       kpn.pattern.SetSrc().children[1].IsConstInt() &&
+                       kpn.pattern.SetSrc().children[1].int_val == 31) {
+              word0_idx = k;
+              src_reg = nc_reg;
+              is_zero_extend = false;
+            } else if (kpn.pattern.SetDest().int_val == 0 && !word0_idx.has_value() &&
+                       kpn.pattern.SetSrc().IsConstInt() && kpn.pattern.SetSrc().int_val == 0) {
+              word0_idx = k;
+              src_reg = nc_reg;
+              is_zero_extend = true;
+            }
+          }
+        }
+        if (word1_idx.has_value() && word0_idx.has_value()) {
+          break;
+        }
+      }
+      if (already_has_retval || !word1_idx.has_value() || !word0_idx.has_value() || src_reg < 0) {
+        continue;
+      }
+      const size_t last_ext = std::max(*word1_idx, *word0_idx);
+      for (size_t k = last_ext + 1; k < m; ++k) {
+        const RtlPatternAndNotes& kpn = parsed[k];
+        if (std::any_of(kpn.reg_notes.begin(), kpn.reg_notes.end(),
+                        [](const RtlRegNote& n) { return n.kind == RtlMachineMode::kRegRetval; })) {
+          already_has_retval = true;
+          break;
+        }
+        if (kpn.pattern.op != RtlOp::kNote) {
+          break;
+        }
+      }
+      if (already_has_retval) {
+        continue;
+      }
+      bool need_entry_copy = false;
+      if (b == 0 && src_reg >= 4 && src_reg <= 7) {
+        bool read_before = false;
+        bool def_before = false;
+        for (size_t k = 0; k < c; ++k) {
+          const InsnSchedSummary s = SummarizeInsnForSched2(blk.instructions[k], gp64, fp64);
+          if (s.written_regs.test(static_cast<size_t>(src_reg))) {
+            def_before = true;
+            break;
+          }
+          if (s.read_regs.test(static_cast<size_t>(src_reg))) {
+            read_before = true;
+          }
+        }
+        need_entry_copy = read_before && !def_before;
+      }
+      restores.push_back(PendingNoConflictRestore{
+          .retval_insert_pos = last_ext + 1,
+          .dh = dh,
+          .src_reg = src_reg,
+          .need_entry_copy = need_entry_copy,
+          .is_zero_extend = is_zero_extend,
+      });
+    }
+    if (restores.empty()) {
+      continue;
+    }
+
+    const std::optional<size_t> b0_pos = (b == 0) ? FindEntryBodyInsertPos(blk) : std::nullopt;
+    std::vector<std::pair<size_t, std::string>> insertions;
+    for (const PendingNoConflictRestore& r : restores) {
+      if (r.need_entry_copy && b0_pos.has_value()) {
+        RtlPatternAndNotes entry_mv;
+        entry_mv.pattern = RtlExpr::MakeSet(MakeGccHardReg(RtlMachineMode::kSi, r.src_reg),
+                                            MakeGccHardReg(RtlMachineMode::kSi, r.src_reg));
+        entry_mv.reg_notes.push_back(RtlRegNote{
+            .kind = RtlMachineMode::kRegDead,
+            .list_op = RtlOp::kExprList,
+            .datum = MakeGccHardReg(RtlMachineMode::kSi, r.src_reg),
+        });
+        insertions.emplace_back(*b0_pos, FormatInsnWithoutCallFusage(entry_mv));
+      }
+      RtlPatternAndNotes retval_mv;
+      retval_mv.pattern = RtlExpr::MakeSet(MakeGccHardReg(RtlMachineMode::kDi, r.dh),
+                                           MakeGccHardReg(RtlMachineMode::kDi, r.dh));
+      retval_mv.reg_notes.push_back(RtlRegNote{
+          .kind = RtlMachineMode::kRegRetval,
+          .list_op = RtlOp::kInsnList,
+          .datum = RtlExpr::MakeNil(),
+      });
+      RtlExpr ext_expr;
+      ext_expr.op = r.is_zero_extend ? RtlOp::kZeroExtend : RtlOp::kSignExtend;
+      ext_expr.mode = RtlMachineMode::kDi;
+      ext_expr.children.push_back(MakeGccHardReg(RtlMachineMode::kSi, r.src_reg));
+      retval_mv.reg_notes.push_back(RtlRegNote{
+          .kind = RtlMachineMode::kRegEqual,
+          .list_op = RtlOp::kExprList,
+          .datum = std::move(ext_expr),
+      });
+      insertions.emplace_back(r.retval_insert_pos, FormatInsnWithoutCallFusage(retval_mv));
+    }
+    std::stable_sort(insertions.begin(), insertions.end(),
+                     [](const auto& a, const auto& b_i) { return a.first < b_i.first; });
+    if (blk.rtl_insns.size() != blk.instructions.size()) {
+      blk.SyncRtlInsnsFromInstructions();
+    }
+    std::vector<std::string> new_insns;
+    std::vector<RtlInsn> new_rtl_insns;
+    new_insns.reserve(m + insertions.size());
+    new_rtl_insns.reserve(m + insertions.size());
+    size_t ins_cur = 0;
+    for (size_t i = 0; i <= m; ++i) {
+      while (ins_cur < insertions.size() && insertions[ins_cur].first == i) {
+        RtlInsn rinsn;
+        rinsn.canonical_pattern = insertions[ins_cur].second;
+        rinsn.is_synthetic_rtl_expansion = true;
+        new_insns.push_back(insertions[ins_cur].second);
+        new_rtl_insns.push_back(std::move(rinsn));
+        any_inserted = true;
+        ++ins_cur;
+      }
+      if (i < m) {
+        new_insns.push_back(blk.instructions[i]);
+        new_rtl_insns.push_back(blk.rtl_insns[i]);
+      }
+    }
+    blk.instructions = std::move(new_insns);
+    blk.rtl_insns = std::move(new_rtl_insns);
+  }
+  if (any_inserted) {
+    RecomputePostReloadLiveAtStart(cfg, profile);
+  }
+}
+
 }  // namespace
 
 void RestoreSched2DeletedNoopMoves(RtlControlFlowGraph* cfg, const CompilationProfile& profile) {
@@ -2114,6 +2836,7 @@ void RestoreSched2DeletedNoopMoves(RtlControlFlowGraph* cfg, const CompilationPr
   bool fp64 = false;
   DetectMipsRegisterWidthFlags(*cfg, &profile, &gp64, &fp64);
   RestoreDeletedNoopSharedReturnMove(cfg, profile);
+  RestoreDeletedNoopEarlyReturnValueMoves(cfg, profile, gp64, fp64);
   RestoreDeletedNoopArgPreferenceMoves(cfg, profile, flags, gp64, fp64,
                                        NoopSelfMoveStage::kSched2NonBlockEndOnly);
 }
@@ -2133,6 +2856,8 @@ void RestoreSched2PreScheduleDeletedNoopMoves(RtlControlFlowGraph* cfg,
   RestoreDeletedNoopArgPreferenceMoves(cfg, profile, flags, gp64, fp64,
                                        NoopSelfMoveStage::kSched2PreScheduleInsnsOnly);
   RestoreSched2PreScheduleCallArgNoopMoves(cfg, profile, gp64, fp64);
+  RestoreSched2PreScheduleCallReturnNoopMoves(cfg, profile, gp64, fp64);
+  RestoreSched2PreScheduleNoConflictSignExtendNoopMoves(cfg, profile, gp64, fp64);
 }
 
 void RestoreJump2DeletedNoopMoves(RtlControlFlowGraph* cfg, const CompilationProfile& profile) {
@@ -2148,11 +2873,65 @@ void RestoreJump2DeletedNoopMoves(RtlControlFlowGraph* cfg, const CompilationPro
   DetectMipsRegisterWidthFlags(*cfg, &profile, &gp64, &fp64);
   if (!flags.RunsSched2()) {
     RestoreDeletedNoopSharedReturnMove(cfg, profile);
+    RestoreDeletedNoopEarlyReturnValueMoves(cfg, profile, gp64, fp64);
     RestoreDeletedNoopArgPreferenceMoves(cfg, profile, flags, gp64, fp64, NoopSelfMoveStage::kAll);
+    RestoreSched2PreScheduleNoConflictSignExtendNoopMoves(cfg, profile, gp64, fp64);
   } else {
     RestoreDeletedNoopArgPreferenceMoves(cfg, profile, flags, gp64, fp64,
                                          NoopSelfMoveStage::kJump2BlockEndOnly);
   }
+}
+
+std::vector<int> PredictRestoredEntryArgSelfMoveRegs(const RtlControlFlowGraph& cfg,
+                                                     const CompilationProfile& profile) {
+  std::vector<int> restored;
+  if (cfg.rpo_blocks.empty()) {
+    return restored;
+  }
+  const ParsedCompilerFlags flags = ParseCompilationProfileFlags(profile);
+  if (flags.opt_level <= 0) {
+    return restored;
+  }
+  bool gp64 = false;
+  bool fp64 = false;
+  DetectMipsRegisterWidthFlags(cfg, &profile, &gp64, &fp64);
+
+  RtlControlFlowGraph scratch = cfg;
+  if (scratch.sideband.basic_block_live_at_start.empty()) {
+    RecomputePostReloadLiveAtStart(&scratch, profile);
+  }
+  if (!flags.RunsSched2()) {
+    RestoreDeletedNoopArgPreferenceMoves(&scratch, profile, flags, gp64, fp64,
+                                         NoopSelfMoveStage::kAll);
+  } else {
+    RestoreDeletedNoopArgPreferenceMoves(&scratch, profile, flags, gp64, fp64,
+                                         NoopSelfMoveStage::kJump2BlockEndOnly);
+    RestoreDeletedNoopArgPreferenceMoves(&scratch, profile, flags, gp64, fp64,
+                                         NoopSelfMoveStage::kSched2PreScheduleInsnsOnly);
+  }
+  if (scratch.rpo_blocks.size() != cfg.rpo_blocks.size()) {
+    return restored;
+  }
+  const std::optional<size_t> b0_pos = FindEntryBodyInsertPos(scratch.rpo_blocks[0]);
+  if (!b0_pos.has_value()) {
+    return restored;
+  }
+  for (size_t i = *b0_pos; i < scratch.rpo_blocks[0].instructions.size(); ++i) {
+    auto p = ParsePatternAndNotes(scratch.rpo_blocks[0].instructions[i]);
+    if (!p.ok()) {
+      break;
+    }
+    if (p->pattern.op == RtlOp::kNote) {
+      continue;
+    }
+    int hr = -1;
+    RtlMachineMode mode = RtlMachineMode::kNone;
+    if (!IsLeadingNoopSelfMoveForReg(*p, &hr, &mode)) {
+      break;
+    }
+    restored.push_back(hr);
+  }
+  return restored;
 }
 
 }  // namespace rom_nom_nom::lifter

@@ -168,7 +168,9 @@ bool IsMipsMatchScratchParallel(const RtlExpr& parallel_expr) {
 }
 
 bool RestoreScratchClobbersInInsn(RtlPatternAndNotes* parsed, bool gp64, bool fp64,
-                                  absl::flat_hash_set<int>* erased_hard_regs) {
+                                  absl::flat_hash_set<int>* erased_hard_regs,
+                                  absl::flat_hash_map<int, int>* restored_scratch_set_counts,
+                                  absl::flat_hash_map<int, int>* restored_scratch_death_counts) {
   if (ContainsCallUnspecVolatileOrAsm(parsed->pattern)) {
     return false;
   }
@@ -201,6 +203,7 @@ bool RestoreScratchClobbersInInsn(RtlPatternAndNotes* parsed, bool gp64, bool fp
         const int span = HardRegSpanCount(regno, mode, raw_mode, gp64, fp64);
         for (int k = regno; k < regno + span && k < kMipsFirstPseudoRegister; ++k) {
           erased_hard_regs->insert(k);
+          (*restored_scratch_set_counts)[k] += 1;
         }
         restored_scratches.push_back(RestoredScratchClobber{
             .regno = regno,
@@ -226,6 +229,7 @@ bool RestoreScratchClobbersInInsn(RtlPatternAndNotes* parsed, bool gp64, bool fp
         if (!restored.consumed_in_notes && restored.regno == note.datum.RegNo() &&
             restored.mode == note.datum.mode) {
           note.datum = RtlExpr::MakeScratch(restored.mode);
+          (*restored_scratch_death_counts)[restored.regno] += 1;
           restored.consumed_in_notes = true;
           break;
         }
@@ -392,6 +396,8 @@ absl::StatusOr<RtlControlFlowGraph> InvertBlockAlloc(const RtlControlFlowGraph& 
   absl::flat_hash_map<int, std::pair<RtlMachineMode, std::string>> pseudo_modes;
   absl::flat_hash_set<int> explicit_hard_regs;
   absl::flat_hash_set<int> erased_hard_regs;
+  absl::flat_hash_map<int, int> restored_scratch_set_counts;
+  absl::flat_hash_map<int, int> restored_scratch_death_counts;
   if (out.sideband.frame_pointer_needed) {
     explicit_hard_regs.insert(kFramePointerRegno);
   }
@@ -440,7 +446,9 @@ absl::StatusOr<RtlControlFlowGraph> InvertBlockAlloc(const RtlControlFlowGraph& 
       }
 
       if (flags.opt_level > 0 &&
-          RestoreScratchClobbersInInsn(&(*parsed), gp64, fp64, &erased_hard_regs)) {
+          RestoreScratchClobbersInInsn(&(*parsed), gp64, fp64, &erased_hard_regs,
+                                       &restored_scratch_set_counts,
+                                       &restored_scratch_death_counts)) {
         pat_str = FormatGccPrintRtlPatternAndNotes(parsed->pattern, parsed->reg_notes,
                                                    parsed->bracketed_notes, /*call_fusage=*/{});
         modified_block = true;
@@ -465,6 +473,28 @@ absl::StatusOr<RtlControlFlowGraph> InvertBlockAlloc(const RtlControlFlowGraph& 
   }
 
   if (flags.opt_level > 0) {
+    // `flow.c:2046-2047` (`mark_set_1`) and `local-alloc.c:1396-1401`
+    // (`block_alloc` / `alloc_qty_for_scratch`): pre-`local_alloc`
+    // `(clobber (scratch:M))` operands are not hard-register `SET`/`CLOBBER`s
+    // and are never counted in `reg_n_sets[hr]` / `reg_n_deaths[hr]`. Remove
+    // the counts attributed to scratch hard regs restored back to `(scratch:M)`.
+    for (const auto& [hr, cnt] : restored_scratch_set_counts) {
+      if (const auto it = out.sideband.reg_n_sets.find(hr); it != out.sideband.reg_n_sets.end()) {
+        it->second -= cnt;
+        if (it->second <= 0) {
+          out.sideband.reg_n_sets.erase(it);
+        }
+      }
+    }
+    for (const auto& [hr, cnt] : restored_scratch_death_counts) {
+      if (const auto it = out.sideband.reg_n_deaths.find(hr);
+          it != out.sideband.reg_n_deaths.end()) {
+        it->second -= cnt;
+        if (it->second <= 0) {
+          out.sideband.reg_n_deaths.erase(it);
+        }
+      }
+    }
     if (out.sideband.epilogue_delay_pattern.has_value() &&
         !out.sideband.epilogue_delay_pattern->empty()) {
       if (auto ep = ParsePatternAndNotes(*out.sideband.epilogue_delay_pattern); ep.ok()) {

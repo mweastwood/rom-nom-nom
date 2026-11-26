@@ -1768,7 +1768,11 @@ RightInverseResult RightInverseVerifier::VerifySched1StageRightInverse(
       [this, &profile](const RtlControlFlowGraph& x) {
         return inverses_->InvertScheduleBlock(x, profile);
       },
-      [](GccContext* /*ctx*/, FunctionHooks* hooks) { hooks->RunScheduleInsns(); },
+      [](GccContext* /*ctx*/, FunctionHooks* hooks) {
+        if (optimize > 0 && flag_schedule_insns != 0) {
+          hooks->RunScheduleInsns();
+        }
+      },
       RtlPassKind::kSched);
 }
 

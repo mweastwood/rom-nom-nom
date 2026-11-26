@@ -2,6 +2,7 @@
 #define LIFTER_RTL_LIVENESS_H_
 
 #include "core/rtl_cfg.h"
+#include "core/rtl_expr.h"
 
 namespace rom_nom_nom::lifter {
 
@@ -66,6 +67,23 @@ struct RtlLivenessOptions {
 // `profile`.
 void ReconstructRtlLiveness(RtlControlFlowGraph* cfg, const CompilationProfile& profile,
                             const RtlLivenessOptions& options = {});
+
+// Reorders liveness notes (`REG_DEAD` and `REG_UNUSED`) on `*pn` into either
+// `sched.c:attach_deaths_insn` order (`sched_note_order == true`, `sched.c:2779-3018`)
+// or `flow.c:mark_used_regs` / `mark_set_regs` order (`sched_note_order == false`,
+// `flow.c:1907-2676`), while preserving `REG_UNUSED` order (`sched.c:3573`) and
+// non-liveness notes before and after the liveness note span.
+bool CanonicalizeInsnLivenessNoteOrder(RtlPatternAndNotes* pn, bool sched_note_order,
+                                       bool gp64 = false, bool fp64 = false,
+                                       bool reload_completed = false);
+
+// Applies `CanonicalizeInsnLivenessNoteOrder` across every instruction (and
+// `SEQUENCE` sub-instruction) of `cfg`.
+void CanonicalizeCfgLivenessNoteOrder(RtlControlFlowGraph* cfg, bool sched_note_order,
+                                      bool gp64 = false, bool fp64 = false,
+                                      bool reload_completed = false);
+void CanonicalizeCfgLivenessNoteOrder(RtlControlFlowGraph* cfg, const CompilationProfile& profile,
+                                      bool sched_note_order, bool reload_completed = false);
 
 }  // namespace rom_nom_nom::lifter
 

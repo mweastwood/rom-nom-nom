@@ -449,14 +449,11 @@ void MarkUsedRegs(const FlowEnv& env, const RtlExpr& expr, const RegBitSet& need
           x = &x->children[0];
           continue;
         }
-        if (env.reload_completed && x->children[0].RegNo() < kMipsFirstPseudoRegister &&
-            (x->int_val != 0 || x->mode != x->children[0].mode)) {
-          const int resolved_regno = x->children[0].RegNo() + static_cast<int>(x->int_val);
-          RtlExpr synth = RtlExpr::MakeReg(x->mode, resolved_regno, x->children[0].flags);
-          MarkUsedRegs(env, synth, needed, live, final_pass, loop_depth, is_call, working_pn,
-                       mutable_stats);
-          return;
-        }
+        // Mirror `flow.c:2387-2406` (`mark_used_regs`, `case SUBREG:` ->
+        // `x = SUBREG_REG (x)`) and `sched.c:2937-2942` (`attach_deaths`,
+        // `case SUBREG:` -> `attach_deaths (XEXP (x, 0), insn, set_p)`):
+        // both pre-reload and post-reload passes unwrap `SUBREG` directly to
+        // its inner `REG` without narrowing multi-word hard registers.
         x = &x->children[0];
         [[fallthrough]];
       }
@@ -623,24 +620,25 @@ void StepSingleInsnBackward(const FlowEnv& env, RtlPatternAndNotes* pn, bool is_
   RegBitSet live(env.nregs);
 
   if (!IsStackPopConstPattern(pn->pattern)) {
-    MarkSetRegs(env, pn->pattern, *old_live, &dead, final_pass, loop_depth,
-                final_pass ? &working_pn : nullptr, mutable_stats);
+    bool is_reload_libcall_clobber = false;
     if (env.reload_completed && pn->pattern.op == RtlOp::kClobber) {
       // Pre-reload `emit_no_conflict_block` (`optabs.c:2488,2521`) emits a standalone
       // `(clobber (reg:M target))` tagged with `REG_LIBCALL`. When `global_alloc` coalesces
       // a `REG_NO_CONFLICT` input register into one subword of `target`, that input subword
-      // remains live across the `CLOBBER` in GCC's pre-reload `flow` live sets.
-      bool has_libcall_note = false;
+      // remains live across the `CLOBBER` in GCC's pre-reload `flow` live sets, and `flow.c`
+      // never attaches a partial-word `REG_UNUSED` note to the pre-reload pseudo `CLOBBER`.
       for (const RtlRegNote& note : pn->reg_notes) {
         if (note.kind == RtlMachineMode::kRegLibcall) {
-          has_libcall_note = true;
+          is_reload_libcall_clobber = true;
           break;
         }
       }
-      if (has_libcall_note) {
-        for (size_t w = 0; w < dead.words.size(); ++w) {
-          dead.words[w] &= ~old_live->words[w];
-        }
+    }
+    MarkSetRegs(env, pn->pattern, *old_live, &dead, final_pass, loop_depth,
+                (final_pass && !is_reload_libcall_clobber) ? &working_pn : nullptr, mutable_stats);
+    if (is_reload_libcall_clobber) {
+      for (size_t w = 0; w < dead.words.size(); ++w) {
+        dead.words[w] &= ~old_live->words[w];
       }
     }
     MarkUsedRegs(env, pn->pattern, *old_live, &live, final_pass, loop_depth, is_call,
@@ -1288,7 +1286,7 @@ void ReconstructRtlLiveness(RtlControlFlowGraph* cfg, const CompilationProfile& 
       } else {
         cfg->sideband.reg_n_deaths.erase(ph.regno);
       }
-      if (ph.live_length > 0) {
+      if (ph.live_length != 0) {
         cfg->sideband.reg_live_length[ph.regno] = ph.live_length;
       }
       cfg->sideband.max_regno = std::max(cfg->sideband.max_regno, ph.regno + 1);
@@ -1713,6 +1711,438 @@ void ReconstructRtlLiveness(RtlControlFlowGraph* cfg, const CompilationProfile& 
   }
 
   restore_saved_phantoms();
+}
+
+bool CanonicalizeInsnLivenessNoteOrder(RtlPatternAndNotes* pn, bool sched_note_order, bool gp64,
+                                       bool fp64, bool reload_completed) {
+  if (pn == nullptr || pn->reg_notes.empty()) {
+    return false;
+  }
+
+  std::optional<size_t> first_liveness_pos;
+  for (size_t i = 0; i < pn->reg_notes.size(); ++i) {
+    const RtlMachineMode kind = pn->reg_notes[i].kind;
+    if (kind == RtlMachineMode::kRegDead || kind == RtlMachineMode::kRegUnused) {
+      first_liveness_pos = i;
+      break;
+    }
+  }
+  if (!first_liveness_pos.has_value()) {
+    return false;
+  }
+
+  std::vector<RtlRegNote> prefix_non_liveness;
+  std::vector<RtlRegNote> existing_dead;
+  std::vector<RtlRegNote> existing_unused;
+  std::vector<RtlRegNote> suffix_non_liveness;
+  for (size_t i = 0; i < pn->reg_notes.size(); ++i) {
+    const RtlRegNote& note = pn->reg_notes[i];
+    if (note.kind == RtlMachineMode::kRegDead) {
+      if (note.datum.IsReg() || note.datum.IsMem()) {
+        existing_dead.push_back(note);
+      } else if (i < *first_liveness_pos) {
+        prefix_non_liveness.push_back(note);
+      } else {
+        suffix_non_liveness.push_back(note);
+      }
+    } else if (note.kind == RtlMachineMode::kRegUnused) {
+      existing_unused.push_back(note);
+    } else if (i < *first_liveness_pos) {
+      prefix_non_liveness.push_back(note);
+    } else {
+      suffix_non_liveness.push_back(note);
+    }
+  }
+
+  auto reg_span_len = [&](int regno, RtlMachineMode mode) -> int {
+    if (regno < 0 || regno >= kMipsFirstPseudoRegister) {
+      return 1;
+    }
+    return std::max(1, MipsHardRegNregs(regno, mode, gp64, fp64));
+  };
+
+  // `sched.c:3573` ("Only unlink REG_DEAD notes; leave REG_UNUSED notes alone")
+  // preserves the incoming relative order of `REG_UNUSED` notes verbatim.
+  std::vector<RtlRegNote> reordered_unused = std::move(existing_unused);
+
+  std::vector<RtlRegNote> reordered_dead;
+  if (existing_dead.size() >= 2) {
+    std::vector<bool> dead_matched(existing_dead.size(), false);
+    absl::flat_hash_set<int> attached_regnos;
+
+    auto visit_reg_read = [&](int regno, RtlMachineMode eff_mode) {
+      if (regno < 0) {
+        return;
+      }
+      const int span = reg_span_len(regno, eff_mode);
+      bool all_attached = true;
+      for (int j = 0; j < span; ++j) {
+        if (!attached_regnos.contains(regno + j)) {
+          all_attached = false;
+          break;
+        }
+      }
+      if (all_attached) {
+        return;
+      }
+      for (size_t k = 0; k < existing_dead.size(); ++k) {
+        if (!dead_matched[k] && existing_dead[k].datum.IsReg() &&
+            existing_dead[k].datum.RegNo() == regno &&
+            reg_span_len(regno, existing_dead[k].datum.mode) == span) {
+          dead_matched[k] = true;
+          for (int j = 0; j < span; ++j) {
+            attached_regnos.insert(regno + j);
+          }
+          reordered_dead.insert(reordered_dead.begin(), existing_dead[k]);
+          return;
+        }
+      }
+      if (regno < kMipsFirstPseudoRegister && span > 1) {
+        for (int j = span - 1; j >= 0; --j) {
+          if (attached_regnos.contains(regno + j)) {
+            continue;
+          }
+          for (size_t k = 0; k < existing_dead.size(); ++k) {
+            if (!dead_matched[k] && existing_dead[k].datum.IsReg() &&
+                existing_dead[k].datum.RegNo() == regno + j) {
+              dead_matched[k] = true;
+              const int nspan = reg_span_len(regno + j, existing_dead[k].datum.mode);
+              for (int m = 0; m < nspan; ++m) {
+                attached_regnos.insert(regno + j + m);
+              }
+              reordered_dead.insert(reordered_dead.begin(), existing_dead[k]);
+              break;
+            }
+          }
+        }
+      }
+    };
+
+    if (sched_note_order) {
+      // Mirrors `sched.c:2779-3018` (`attach_deaths` / `attach_deaths_insn`).
+      auto attach_sched = [&](const auto& self, const RtlExpr& x, bool set_p) -> void {
+        switch (x.op) {
+          case RtlOp::kLabelRef:
+          case RtlOp::kSymbolRef:
+          case RtlOp::kConstInt:
+          case RtlOp::kConst:
+          case RtlOp::kConstDouble:
+          case RtlOp::kPc:
+          case RtlOp::kAddrVec:
+          case RtlOp::kAddrDiffVec:
+          case RtlOp::kAsmInput:
+          case RtlOp::kCc0:
+          case RtlOp::kNote:
+          case RtlOp::kScratch:
+          case RtlOp::kClobber:
+            return;
+          case RtlOp::kReg:
+            if (!set_p) {
+              visit_reg_read(x.RegNo(), x.mode);
+            }
+            return;
+          case RtlOp::kMem:
+            if (!x.children.empty()) {
+              self(self, x.children[0], false);
+            }
+            return;
+          case RtlOp::kSubreg:
+            if (!x.children.empty()) {
+              // Mirrors `sched.c:2937-2942` (`attach_deaths`, `case SUBREG:`).
+              self(self, x.children[0], set_p);
+            }
+            return;
+          case RtlOp::kStrictLowPart:
+            if (!x.children.empty()) {
+              self(self, x.children[0], set_p);
+            }
+            return;
+          case RtlOp::kZeroExtract:
+          case RtlOp::kSignExtract:
+            if (x.children.size() >= 1) {
+              self(self, x.children[0], set_p);
+            }
+            if (x.children.size() >= 2) {
+              self(self, x.children[1], false);
+            }
+            if (x.children.size() >= 3) {
+              self(self, x.children[2], false);
+            }
+            return;
+          default:
+            if (IsVectorFormattedOp(x.op)) {
+              for (const RtlExpr& ch : x.children) {
+                self(self, ch, false);
+              }
+            } else {
+              for (size_t i = x.children.size(); i > 0; --i) {
+                self(self, x.children[i - 1], false);
+              }
+            }
+            return;
+        }
+      };
+
+      const RtlExpr& pat = pn->pattern;
+      if (pat.op == RtlOp::kSet && pat.children.size() >= 2) {
+        attach_sched(attach_sched, pat.SetSrc(), false);
+        attach_sched(attach_sched, pat.SetDest(), true);
+      } else if (pat.IsParallel()) {
+        for (size_t i = pat.children.size(); i > 0; --i) {
+          const RtlExpr& elem = pat.children[i - 1];
+          if (elem.op == RtlOp::kSet && elem.children.size() >= 2) {
+            attach_sched(attach_sched, elem.SetSrc(), false);
+            attach_sched(attach_sched, elem.SetDest(), true);
+          } else if (elem.op != RtlOp::kClobber) {
+            attach_sched(attach_sched, elem, false);
+          }
+        }
+      } else if (pat.op == RtlOp::kClobber) {
+        if (!pat.children.empty() && pat.children[0].IsMem() && !pat.children[0].children.empty()) {
+          attach_sched(attach_sched, pat.children[0].children[0], false);
+        }
+      } else {
+        attach_sched(attach_sched, pat, false);
+      }
+      for (const RtlExpr& fu : pn->call_fusage) {
+        if (!fu.children.empty()) {
+          attach_sched(attach_sched, fu.children[0], fu.op == RtlOp::kClobber);
+        }
+      }
+    } else {
+      // Mirrors `flow.c:2338-2676` (`mark_used_regs`).
+      auto visit_flow = [&](const auto& self, const RtlExpr& expr) -> void {
+        const RtlExpr* x = &expr;
+        while (true) {
+          switch (x->op) {
+            case RtlOp::kLabelRef:
+            case RtlOp::kSymbolRef:
+            case RtlOp::kConstInt:
+            case RtlOp::kConst:
+            case RtlOp::kConstDouble:
+            case RtlOp::kPc:
+            case RtlOp::kAddrVec:
+            case RtlOp::kAddrDiffVec:
+            case RtlOp::kAsmInput:
+            case RtlOp::kCc0:
+            case RtlOp::kNote:
+            case RtlOp::kScratch:
+              return;
+            case RtlOp::kClobber:
+              if (!x->children.empty() && x->children[0].IsMem() &&
+                  !x->children[0].children.empty()) {
+                self(self, x->children[0].children[0]);
+              }
+              return;
+            case RtlOp::kSubreg:
+              if (x->children.empty()) {
+                return;
+              }
+              if (!x->children[0].IsReg()) {
+                x = &x->children[0];
+                continue;
+              }
+              // Mirrors `flow.c:2387-2405` (`mark_used_regs`, `case SUBREG:`).
+              visit_reg_read(x->children[0].RegNo(), x->children[0].mode);
+              return;
+            case RtlOp::kReg:
+              visit_reg_read(x->RegNo(), x->mode);
+              return;
+            case RtlOp::kSet: {
+              if (x->children.size() < 2) {
+                return;
+              }
+              const RtlExpr& test_dst = x->SetDest();
+              const RtlExpr& set_src = x->SetSrc();
+              if (test_dst.IsMem()) {
+                if (!test_dst.children.empty()) {
+                  self(self, test_dst.children[0]);
+                }
+                x = &set_src;
+                continue;
+              }
+              const RtlExpr* inner = &test_dst;
+              bool mark_dest = false;
+              while (inner->op == RtlOp::kStrictLowPart || inner->op == RtlOp::kZeroExtract ||
+                     inner->op == RtlOp::kSignExtract || inner->IsSubreg()) {
+                if (inner->IsSubreg() && !inner->children.empty() &&
+                    ((reload_completed && inner->children[0].IsReg() &&
+                      inner->children[0].RegNo() < kMipsFirstPseudoRegister) ||
+                     !(RegWordsSize(inner->children[0].mode, gp64) >
+                       RegWordsSize(inner->mode, gp64)))) {
+                } else {
+                  mark_dest = true;
+                }
+                if (inner->children.empty()) {
+                  break;
+                }
+                inner = &inner->children[0];
+              }
+              if (inner->IsReg() && inner->RegNo() != kMipsArgPointerRegno) {
+                if (mark_dest) {
+                  self(self, set_src);
+                  x = &test_dst;
+                  continue;
+                }
+                x = &set_src;
+                continue;
+              }
+              break;
+            }
+            default:
+              break;
+          }
+          if (x->children.empty()) {
+            return;
+          }
+          if (IsVectorFormattedOp(x->op)) {
+            for (const RtlExpr& ch : x->children) {
+              self(self, ch);
+            }
+            return;
+          }
+          for (size_t i = x->children.size(); i > 1; --i) {
+            self(self, x->children[i - 1]);
+          }
+          x = &x->children[0];
+        }
+      };
+
+      visit_flow(visit_flow, pn->pattern);
+      for (const RtlExpr& fu : pn->call_fusage) {
+        if (fu.op == RtlOp::kUse && !fu.children.empty()) {
+          visit_flow(visit_flow, fu.children[0]);
+        }
+      }
+    }
+
+    std::vector<RtlRegNote> merged_dead;
+    merged_dead.reserve(existing_dead.size());
+    size_t matched_cursor = 0;
+    for (size_t k = 0; k < existing_dead.size(); ++k) {
+      if (dead_matched[k] && matched_cursor < reordered_dead.size()) {
+        merged_dead.push_back(std::move(reordered_dead[matched_cursor++]));
+      } else {
+        merged_dead.push_back(std::move(existing_dead[k]));
+      }
+    }
+    while (matched_cursor < reordered_dead.size()) {
+      merged_dead.push_back(std::move(reordered_dead[matched_cursor++]));
+    }
+    reordered_dead = std::move(merged_dead);
+  } else {
+    reordered_dead = std::move(existing_dead);
+  }
+
+  std::vector<RtlRegNote> new_notes;
+  new_notes.reserve(pn->reg_notes.size());
+  for (RtlRegNote& n : prefix_non_liveness) {
+    new_notes.push_back(std::move(n));
+  }
+  for (RtlRegNote& n : reordered_dead) {
+    new_notes.push_back(std::move(n));
+  }
+  for (RtlRegNote& n : reordered_unused) {
+    new_notes.push_back(std::move(n));
+  }
+  for (RtlRegNote& n : suffix_non_liveness) {
+    new_notes.push_back(std::move(n));
+  }
+
+  if (new_notes.size() == pn->reg_notes.size()) {
+    bool identical = true;
+    for (size_t i = 0; i < new_notes.size(); ++i) {
+      if (new_notes[i].kind != pn->reg_notes[i].kind ||
+          new_notes[i].list_op != pn->reg_notes[i].list_op ||
+          new_notes[i].datum != pn->reg_notes[i].datum) {
+        identical = false;
+        break;
+      }
+    }
+    if (identical) {
+      return false;
+    }
+  }
+
+  pn->reg_notes = std::move(new_notes);
+  return true;
+}
+
+void CanonicalizeCfgLivenessNoteOrder(RtlControlFlowGraph* cfg, bool sched_note_order, bool gp64,
+                                      bool fp64, bool reload_completed) {
+  if (cfg == nullptr) {
+    return;
+  }
+  for (RtlBasicBlock& blk : cfg->rpo_blocks) {
+    bool block_changed = false;
+    std::vector<std::optional<std::vector<RtlExpr>>> saved_fusage(blk.instructions.size());
+    for (size_t i = 0; i < blk.instructions.size(); ++i) {
+      if (i < blk.rtl_insns.size() && blk.rtl_insns[i].has_explicit_call_fusage) {
+        saved_fusage[i] = blk.rtl_insns[i].call_fusage;
+      }
+      auto parsed = ParsePatternAndNotes(blk.instructions[i]);
+      if (!parsed.ok()) {
+        continue;
+      }
+      if (saved_fusage[i].has_value() && !parsed->has_explicit_call_fusage) {
+        parsed->has_explicit_call_fusage = true;
+        parsed->call_fusage = *saved_fusage[i];
+      }
+      if (parsed->pattern.op == RtlOp::kSequence && parsed->pattern.children.size() == 2) {
+        auto h = RtlPatternAndNotes::FromSequenceSubInsn(parsed->pattern.children[0]);
+        auto s = RtlPatternAndNotes::FromSequenceSubInsn(parsed->pattern.children[1]);
+        if (h.ok() && s.ok()) {
+          const RtlExpr h_wrap = parsed->pattern.children[0];
+          const RtlExpr s_wrap = parsed->pattern.children[1];
+          const bool ch_h = CanonicalizeInsnLivenessNoteOrder(&(*h), sched_note_order, gp64, fp64,
+                                                              reload_completed);
+          const bool ch_s = CanonicalizeInsnLivenessNoteOrder(&(*s), sched_note_order, gp64, fp64,
+                                                              reload_completed);
+          if (ch_h || ch_s) {
+            if (h_wrap.op == RtlOp::kCallInsn) {
+              h->reg_notes.clear();
+              h->has_explicit_call_fusage = false;
+              h->call_fusage.clear();
+            }
+            blk.instructions[i] =
+                RtlExpr::MakeSequence({
+                                          RtlExpr::MakeInsnWrapper(h_wrap.op, h_wrap.flags, *h),
+                                          RtlExpr::MakeInsnWrapper(s_wrap.op, s_wrap.flags, *s),
+                                      })
+                    .ToGccPrintRtlString();
+            block_changed = true;
+          }
+        }
+        continue;
+      }
+      if (CanonicalizeInsnLivenessNoteOrder(&(*parsed), sched_note_order, gp64, fp64,
+                                            reload_completed)) {
+        blk.instructions[i] = FormatGccPrintRtlPatternAndNotes(
+            parsed->pattern, parsed->reg_notes, parsed->bracketed_notes, /*call_fusage=*/{});
+        block_changed = true;
+      }
+    }
+    if (block_changed) {
+      blk.SyncRtlInsnsFromInstructions();
+      for (size_t i = 0; i < blk.rtl_insns.size() && i < saved_fusage.size(); ++i) {
+        if (saved_fusage[i].has_value() && !blk.rtl_insns[i].has_explicit_call_fusage) {
+          blk.rtl_insns[i].has_explicit_call_fusage = true;
+          blk.rtl_insns[i].call_fusage = std::move(*saved_fusage[i]);
+        }
+      }
+    }
+  }
+}
+
+void CanonicalizeCfgLivenessNoteOrder(RtlControlFlowGraph* cfg, const CompilationProfile& profile,
+                                      bool sched_note_order, bool reload_completed) {
+  if (cfg == nullptr) {
+    return;
+  }
+  bool gp64 = false;
+  bool fp64 = false;
+  DetectMipsRegisterWidthFlags(*cfg, &profile, &gp64, &fp64);
+  CanonicalizeCfgLivenessNoteOrder(cfg, sched_note_order, gp64, fp64, reload_completed);
 }
 
 }  // namespace rom_nom_nom::lifter

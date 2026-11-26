@@ -472,79 +472,111 @@ void ReconstructO0NoConflictAndMixedDiSubregs(
       if (end_idx >= blk.size()) {
         continue;
       }
+      // If `end_idx` itself overwrites `(reg:DI hr)` (e.g. a `plus:DI` /
+      // `minus:DI` / `ashift:DI` RMW), the old `no_conflict` value is dead
+      // after `end_idx` regardless of subsequent uses of `hr`.
+      const RtlExpr& end_pat = blk[end_idx].pattern;
+      const RtlExpr* end_set = end_pat.IsSet() ? &end_pat
+                               : (end_pat.op == RtlOp::kParallel && !end_pat.children.empty() &&
+                                  end_pat.children[0].IsSet())
+                                   ? &end_pat.children[0]
+                                   : nullptr;
+      const bool end_overwrites_di = end_set != nullptr && end_set->SetDest().IsHardReg() &&
+                                     end_set->SetDest().RegNo() == hr &&
+                                     end_set->SetDest().mode == RtlMachineMode::kDi;
       bool used_after = false;
-      for (size_t j = end_idx + 1; j < blk.size(); ++j) {
+      bool killed_lo = end_overwrites_di;
+      bool killed_hi = end_overwrites_di;
+      for (size_t j = end_idx + 1; j < blk.size() && !(killed_lo && killed_hi); ++j) {
         const RtlExpr& jpat = blk[j].pattern;
         if (IsCallPattern(jpat)) {
           for (const RtlExpr& fu : blk[j].call_fusage) {
-            if (expr_mentions_hard_pair(fu, hr)) {
-              used_after = true;
-            }
+            fu.Visit([&](const RtlExpr& n) {
+              if (!n.IsHardReg()) {
+                return;
+              }
+              const int r = n.RegNo();
+              const int nw =
+                  (n.mode == RtlMachineMode::kDi || n.mode == RtlMachineMode::kDf) ? 2 : 1;
+              if (!killed_lo && r <= hr && hr < r + nw) {
+                used_after = true;
+              }
+              if (!killed_hi && r <= hr + 1 && hr + 1 < r + nw) {
+                used_after = true;
+              }
+            });
           }
           break;
         }
-        if (jpat.IsSet() && jpat.SetDest().IsHardReg() && jpat.SetDest().RegNo() == hr &&
-            jpat.SetDest().mode == RtlMachineMode::kDi &&
-            !expr_mentions_hard_pair(jpat.SetSrc(), hr)) {
-          break;
-        }
-        if (expr_mentions_hard_pair(jpat, hr)) {
-          used_after = true;
-          break;
+        auto check_reads = [&](const RtlExpr& sub) {
+          sub.Visit([&](const RtlExpr& n) {
+            if (!n.IsHardReg()) {
+              return;
+            }
+            const int r = n.RegNo();
+            const int nw = (n.mode == RtlMachineMode::kDi || n.mode == RtlMachineMode::kDf) ? 2 : 1;
+            if (!killed_lo && r <= hr && hr < r + nw) {
+              used_after = true;
+            }
+            if (!killed_hi && r <= hr + 1 && hr + 1 < r + nw) {
+              used_after = true;
+            }
+          });
+        };
+        auto check_elem = [&](const RtlExpr& elem) {
+          if (elem.IsSet()) {
+            check_reads(elem.SetSrc());
+            if (!elem.SetDest().IsHardReg()) {
+              check_reads(elem.SetDest());
+            }
+          } else if (elem.op != RtlOp::kClobber) {
+            check_reads(elem);
+          }
+        };
+        auto kill_elem = [&](const RtlExpr& elem) {
+          const RtlExpr* dst = nullptr;
+          if (elem.IsSet()) {
+            dst = &elem.SetDest();
+          } else if (elem.op == RtlOp::kClobber && !elem.children.empty()) {
+            dst = &elem.children[0];
+          }
+          if (dst != nullptr && dst->IsHardReg()) {
+            const int r = dst->RegNo();
+            const int nw =
+                (dst->mode == RtlMachineMode::kDi || dst->mode == RtlMachineMode::kDf) ? 2 : 1;
+            if (r <= hr && hr < r + nw) {
+              killed_lo = true;
+            }
+            if (r <= hr + 1 && hr + 1 < r + nw) {
+              killed_hi = true;
+            }
+          }
+        };
+        if (jpat.op == RtlOp::kParallel) {
+          for (const RtlExpr& elem : jpat.children) {
+            check_elem(elem);
+          }
+          if (used_after) {
+            break;
+          }
+          for (const RtlExpr& elem : jpat.children) {
+            kill_elem(elem);
+          }
+        } else {
+          check_elem(jpat);
+          if (used_after) {
+            break;
+          }
+          kill_elem(jpat);
         }
       }
       if (used_after) {
         continue;
       }
-      auto reg_used_after_pair = [&](int target_r) {
-        for (size_t j = i + 2; j < blk.size(); ++j) {
-          const RtlExpr& jpat = blk[j].pattern;
-          if (IsCallPattern(jpat)) {
-            for (const RtlExpr& fu : blk[j].call_fusage) {
-              if (fu.ContainsReg(target_r)) {
-                return true;
-              }
-            }
-            return false;
-          }
-          if (jpat.IsSet() && jpat.SetDest().IsHardReg() && jpat.SetDest().RegNo() == target_r &&
-              !jpat.SetSrc().ContainsReg(target_r)) {
-            return false;
-          }
-          if (jpat.ContainsReg(target_r)) {
-            return true;
-          }
-        }
-        return false;
-      };
-      size_t clob_pos = i;
-      const RtlExpr* hi_set = (p0.SetDest().RegNo() == hr) ? &p0 : &p1;
-      const RtlExpr* lo_set = (p0.SetDest().RegNo() == hr) ? &p1 : &p0;
-      if (i > start_i && hi_set->SetSrc().IsHardReg() &&
-          hi_set->SetSrc().mode == RtlMachineMode::kSi) {
-        const int sign_hr = hi_set->SetSrc().RegNo();
-        const RtlExpr& prev1 = blk[i - 1].pattern;
-        if (sign_hr >= 2 && sign_hr <= 25 && sign_hr != hr && sign_hr != hr + 1 &&
-            !IsCallPattern(prev1) && prev1.IsSet() && prev1.SetDest().IsHardReg() &&
-            prev1.SetDest().RegNo() == sign_hr && prev1.SetDest().mode == RtlMachineMode::kSi &&
-            prev1.SetSrc().op == RtlOp::kAshiftrt && prev1.SetSrc().children.size() == 2 &&
-            prev1.SetSrc().children[0].IsHardReg() &&
-            prev1.SetSrc().children[1].op == RtlOp::kConstInt &&
-            prev1.SetSrc().children[1].int_val == 31 && !lo_set->SetSrc().ContainsReg(sign_hr) &&
-            !reg_used_after_pair(sign_hr)) {
-          clob_pos = i - 1;
-          const int src_hr = prev1.SetSrc().children[0].RegNo();
-          if (clob_pos > start_i && lo_set->SetSrc().IsMem() && src_hr >= 2 && src_hr <= 25 &&
-              src_hr != hr && src_hr != hr + 1 && !reg_used_after_pair(src_hr)) {
-            const RtlExpr& prev2 = blk[clob_pos - 1].pattern;
-            if (!IsCallPattern(prev2) && prev2.IsSet() && prev2.SetDest().IsHardReg() &&
-                prev2.SetDest().RegNo() == src_hr && prev2.SetDest().mode == RtlMachineMode::kSi &&
-                prev2.SetSrc() == lo_set->SetSrc()) {
-              --clob_pos;
-            }
-          }
-        }
-      }
+      // `optabs.c:2445-2488` (`emit_no_conflict_block`) always emits all setup
+      // insns that do not store into words of `target` before `(clobber target)`,
+      // placing `(clobber target)` immediately ahead of the first word store.
+      const size_t clob_pos = i;
       RtlPatternAndNotes self_mv;
       self_mv.pattern = RtlExpr::MakeSet(MakeGccHardReg(RtlMachineMode::kDi, hr),
                                          MakeGccHardReg(RtlMachineMode::kDi, hr));
@@ -604,11 +636,11 @@ void WrapO0NoConflictBlockDiSubregs(size_t prologue_end,
   }
 }
 
-void WrapTrialO0DiSubregs(size_t prologue_end,
-                          std::vector<std::vector<RtlPatternAndNotes>>* trial_blocks) {
-  WrapO0NoConflictBlockDiSubregs(prologue_end, trial_blocks);
-  for (size_t b = 0; b < trial_blocks->size(); ++b) {
-    auto& blk = (*trial_blocks)[b];
+void WrapO0SingleBlockDiSubregs(size_t prologue_end,
+                                std::vector<std::vector<RtlPatternAndNotes>>* blocks) {
+  WrapO0NoConflictBlockDiSubregs(prologue_end, blocks);
+  for (size_t b = 0; b < blocks->size(); ++b) {
+    auto& blk = (*blocks)[b];
     const size_t start_i = (b == 0) ? prologue_end : 0;
     for (size_t i = start_i; i < blk.size(); ++i) {
       RtlExpr* set0 = blk[i].pattern.IsSet() ? &blk[i].pattern
@@ -647,48 +679,175 @@ void WrapTrialO0DiSubregs(size_t prologue_end,
           break;
         }
       }
-      if (!has_si_subword || end_idx >= blk.size()) {
+      if (has_si_subword && end_idx < blk.size()) {
+        bool used_after = false;
+        for (size_t j = end_idx + 1; j < blk.size(); ++j) {
+          const RtlExpr& jpat = blk[j].pattern;
+          if (IsCallPattern(jpat)) {
+            for (const RtlExpr& fu : blk[j].call_fusage) {
+              if (fu.ContainsReg(hr) || fu.ContainsReg(hr + 1)) {
+                used_after = true;
+              }
+            }
+            break;
+          }
+          if (jpat.op == RtlOp::kUse) {
+            continue;
+          }
+          if (jpat.IsSet() && jpat.SetDest().IsHardReg() && jpat.SetDest().RegNo() == hr &&
+              jpat.SetDest().mode == RtlMachineMode::kDi && !jpat.SetSrc().ContainsReg(hr) &&
+              !jpat.SetSrc().ContainsReg(hr + 1)) {
+            break;
+          }
+          if (jpat.ContainsReg(hr) || jpat.ContainsReg(hr + 1)) {
+            used_after = true;
+            break;
+          }
+        }
+        if (!used_after) {
+          for (size_t j = i + 1; j < end_idx; ++j) {
+            if (blk[j].pattern.op == RtlOp::kUse) {
+              continue;
+            }
+            blk[j].pattern.Mutate([&](RtlExpr& n) {
+              if (n.IsHardReg() && (n.RegNo() == hr || n.RegNo() == hr + 1) &&
+                  n.mode == RtlMachineMode::kSi && !n.flags.integrated) {
+                n = RtlExpr::MakeSubreg(RtlMachineMode::kSi,
+                                        MakeGccHardReg(RtlMachineMode::kDi, hr, di_flags),
+                                        n.RegNo() - hr);
+              }
+            });
+          }
+          continue;
+        }
+      }
+
+      // Case B (`final.c:1933, 2095-2107` `alter_subreg` on `operand_subword`
+      // consumers such as `muldi3`): a single-block computed `(reg:DI hr)`
+      // definition whose subsequent uses read BOTH words (`hr` and `hr + 1`)
+      // as `SI` subwords across distinct instructions before either word is
+      // overwritten. Exclude plain `MEM` loads and single-insn `SI` ops on
+      // `(hr, hr + 1)` so two adjacent `SI` argument loads folded into `movdi`
+      // feeding `(plus:SI (reg:SI hr) (reg:SI hr+1))` stay independent.
+      if (set0->SetSrc().IsMem()) {
         continue;
       }
-      bool used_after = false;
-      for (size_t j = end_idx + 1; j < blk.size(); ++j) {
+      size_t first_word0_j = blk.size();
+      size_t first_word1_j = blk.size();
+      bool bad_read = false;
+      size_t last_read_j = i;
+      for (size_t j = i + 1; j < blk.size(); ++j) {
         const RtlExpr& jpat = blk[j].pattern;
-        if (IsCallPattern(jpat)) {
-          for (const RtlExpr& fu : blk[j].call_fusage) {
-            if (fu.ContainsReg(hr) || fu.ContainsReg(hr + 1)) {
-              used_after = true;
-            }
-          }
+        if (IsCallPattern(jpat) || IsControlTransferPattern(jpat)) {
           break;
         }
         if (jpat.op == RtlOp::kUse) {
           continue;
         }
-        if (jpat.IsSet() && jpat.SetDest().IsHardReg() && jpat.SetDest().RegNo() == hr &&
-            jpat.SetDest().mode == RtlMachineMode::kDi && !jpat.SetSrc().ContainsReg(hr) &&
-            !jpat.SetSrc().ContainsReg(hr + 1)) {
-          break;
-        }
-        if (jpat.ContainsReg(hr) || jpat.ContainsReg(hr + 1)) {
-          used_after = true;
-          break;
-        }
-      }
-      if (used_after) {
-        continue;
-      }
-      for (size_t j = i + 1; j < end_idx; ++j) {
-        if (blk[j].pattern.op == RtlOp::kUse) {
-          continue;
-        }
-        blk[j].pattern.Mutate([&](RtlExpr& n) {
-          if (n.IsHardReg() && (n.RegNo() == hr || n.RegNo() == hr + 1) &&
-              n.mode == RtlMachineMode::kSi && !n.flags.integrated) {
-            n = RtlExpr::MakeSubreg(RtlMachineMode::kSi,
-                                    MakeGccHardReg(RtlMachineMode::kDi, hr, di_flags),
-                                    n.RegNo() - hr);
+        bool j_read_pair = false;
+        auto scan_reads = [&](const RtlExpr& sub) {
+          sub.Visit([&](const RtlExpr& n) {
+            if (!n.IsHardReg()) {
+              return;
+            }
+            const int r = n.RegNo();
+            const int nw = (n.mode == RtlMachineMode::kDi || n.mode == RtlMachineMode::kDf) ? 2 : 1;
+            if (r + nw <= hr || r > hr + 1) {
+              return;
+            }
+            if (n.mode == RtlMachineMode::kSi && !n.flags.integrated) {
+              if (r == hr) {
+                first_word0_j = std::min(first_word0_j, j);
+              } else {
+                first_word1_j = std::min(first_word1_j, j);
+              }
+              j_read_pair = true;
+            } else {
+              bad_read = true;
+            }
+          });
+        };
+        bool j_writes_pair = false;
+        auto check_elem = [&](const RtlExpr& elem) {
+          if (elem.IsSet()) {
+            scan_reads(elem.SetSrc());
+            if (!elem.SetDest().IsHardReg()) {
+              scan_reads(elem.SetDest());
+            } else {
+              const int r = elem.SetDest().RegNo();
+              const int nw = (elem.SetDest().mode == RtlMachineMode::kDi ||
+                              elem.SetDest().mode == RtlMachineMode::kDf)
+                                 ? 2
+                                 : 1;
+              if (r < hr + 2 && hr < r + nw) {
+                j_writes_pair = true;
+              }
+            }
+          } else if (elem.op == RtlOp::kClobber && !elem.children.empty() &&
+                     elem.children[0].IsHardReg()) {
+            const int r = elem.children[0].RegNo();
+            const int nw = (elem.children[0].mode == RtlMachineMode::kDi ||
+                            elem.children[0].mode == RtlMachineMode::kDf)
+                               ? 2
+                               : 1;
+            if (r < hr + 2 && hr < r + nw) {
+              j_writes_pair = true;
+            }
+          } else {
+            scan_reads(elem);
           }
-        });
+        };
+        if (jpat.op == RtlOp::kParallel) {
+          for (const RtlExpr& elem : jpat.children) {
+            check_elem(elem);
+          }
+        } else {
+          check_elem(jpat);
+        }
+        if (bad_read) {
+          break;
+        }
+        if (j_read_pair) {
+          last_read_j = j;
+        }
+        if (j_writes_pair) {
+          break;
+        }
+      }
+      if (!bad_read && first_word0_j < blk.size() && first_word1_j < blk.size() &&
+          first_word0_j != first_word1_j && last_read_j > i) {
+        auto wrap_reads = [&](RtlExpr& sub) {
+          sub.Mutate([&](RtlExpr& n) {
+            if (n.IsHardReg() && (n.RegNo() == hr || n.RegNo() == hr + 1) &&
+                n.mode == RtlMachineMode::kSi && !n.flags.integrated) {
+              n = RtlExpr::MakeSubreg(RtlMachineMode::kSi,
+                                      MakeGccHardReg(RtlMachineMode::kDi, hr, di_flags),
+                                      n.RegNo() - hr);
+            }
+          });
+        };
+        auto wrap_elem = [&](RtlExpr& elem) {
+          if (elem.IsSet()) {
+            wrap_reads(elem.children[1]);
+            if (!elem.children[0].IsHardReg()) {
+              wrap_reads(elem.children[0]);
+            }
+          } else if (elem.op != RtlOp::kClobber) {
+            wrap_reads(elem);
+          }
+        };
+        for (size_t j = i + 1; j <= last_read_j; ++j) {
+          if (blk[j].pattern.op == RtlOp::kUse) {
+            continue;
+          }
+          if (blk[j].pattern.op == RtlOp::kParallel) {
+            for (RtlExpr& elem : blk[j].pattern.children) {
+              wrap_elem(elem);
+            }
+          } else {
+            wrap_elem(blk[j].pattern);
+          }
+        }
       }
     }
   }
@@ -1905,6 +2064,108 @@ void FoldTrialO0ReloadScratchesAndMulsidi3Spills(const O0PrologueInfo& pinfo, bo
             oidx.erase(oidx.begin() + static_cast<ptrdiff_t>(i + 1));
             continue;
           }
+          // `reload1.c:emit_reload_insns` (`SECONDARY_INPUT_RELOAD_CLASS` for
+          // `MD_REGS` -> `MEM` on `movdi`): when `stupid.c` allocates a
+          // `mulsidi3`/`umulsidi3` pseudo to `64 hi` and the sole use stores it
+          // to `MEM`, `reload` inserts `(set (reg:DI scr) (reg:DI 64 hi))`
+          // ahead of the store using a reload spill GPR. Collapse that reload
+          // back into the store so `SolveO0ScopesOnModel` does not treat the
+          // reload scratch GPR as an `obey_regdecls` user pseudo.
+          if (next_stores_dst_to_mem && dst_reg.IsPseudoReg() &&
+              dst_reg.mode == RtlMachineMode::kDi && !trial_use_pseudos.contains(dst_reg.RegNo()) &&
+              trial_ref_counts[dst_reg.RegNo()] == 2 && blk[i + 2].pattern.SetSrc() == dst_reg &&
+              !blk[i + 2].pattern.SetDest().ContainsReg(dst_reg.RegNo())) {
+            blk[i + 2].pattern.children[1] = blk[i].pattern.children[0].SetDest();
+            m->reg_renumber.erase(dst_reg.RegNo());
+            m->pseudo_modes.erase(dst_reg.RegNo());
+            blk.erase(blk.begin() + static_cast<ptrdiff_t>(i + 1));
+            oidx.erase(oidx.begin() + static_cast<ptrdiff_t>(i + 1));
+            continue;
+          }
+        }
+      }
+      // `reload1.c:emit_reload_insns` earlyclobber `=&d` output reload on
+      // 32-bit `DImode` multi-word patterns that strictly carry `&d` in
+      // `config/mips/mips.md`: `adddi3_internal_1` (`mips.md:407-411`, 2 reg
+      // operands with `"=d,&d"` / `"0,d"` / `"d,d"` — requiring `&d` only when
+      // `dst_hr != op1_hr`) and variable-shift `ashldi3_internal` (`3722-3727`),
+      // `ashrdi3_internal` (`3949-3954`), `lshrdi3_internal` (`4174-4179`)
+      // where shift count `children[1]` is a `REG` (not `CONST_INT`). When
+      // `stupid.c` allocates `dst` overlapping an input operand, `reload` writes
+      // the `parallel` into a fresh `GR_REGS` reload register `scr` and copies
+      // `(set (reg:DI dst) (reg:DI scr))`. Collapse `scr` back into `dst` in
+      // `TrialO0Model` so `SolveO0ScopesOnModel` does not mistake the reload
+      // scratch pair for an `obey_regdecls` user pseudo.
+      if (!gp64 && blk[i].pattern.op == RtlOp::kParallel && !blk[i].pattern.children.empty() &&
+          blk[i].pattern.children[0].IsSet() &&
+          blk[i].pattern.children[0].SetDest().IsPseudoReg() &&
+          blk[i].pattern.children[0].SetDest().mode == RtlMachineMode::kDi &&
+          blk[i].pattern.children[0].SetSrc().mode == RtlMachineMode::kDi) {
+        const RtlExpr& di_src = blk[i].pattern.children[0].SetSrc();
+        const RtlOp di_op = di_src.op;
+        const bool is_adddi_reg_reg =
+            di_op == RtlOp::kPlus && di_src.children.size() == 2 && di_src.children[0].IsReg() &&
+            !di_src.children[0].IsArgPointerReg() && di_src.children[1].IsReg() &&
+            !di_src.children[1].IsArgPointerReg();
+        const bool is_var_shift_di =
+            (di_op == RtlOp::kAshift || di_op == RtlOp::kAshiftrt || di_op == RtlOp::kLshiftrt) &&
+            di_src.children.size() == 2 && di_src.children[0].IsReg() &&
+            !di_src.children[0].IsArgPointerReg() && di_src.children[1].IsReg() &&
+            !di_src.children[1].IsArgPointerReg();
+        const bool is_earlyclobber_di = is_adddi_reg_reg || is_var_shift_di;
+        const int scr_p = blk[i].pattern.children[0].SetDest().RegNo();
+        if (is_earlyclobber_di && !trial_use_pseudos.contains(scr_p) &&
+            trial_ref_counts[scr_p] == 2 && blk[i + 1].pattern.IsSet() &&
+            blk[i + 1].pattern.SetDest().IsReg() &&
+            !blk[i + 1].pattern.SetDest().IsArgPointerReg() &&
+            !blk[i + 1].pattern.SetDest().flags.integrated &&
+            blk[i + 1].pattern.SetDest().mode == RtlMachineMode::kDi &&
+            blk[i + 1].pattern.SetSrc().IsPseudoReg() &&
+            blk[i + 1].pattern.SetSrc().RegNo() == scr_p) {
+          const RtlExpr dst_reg = blk[i + 1].pattern.SetDest();
+          const int scr_hr = m->reg_renumber.contains(scr_p) ? m->reg_renumber[scr_p] : -1;
+          const int dst_hr =
+              (dst_reg.RegNo() < kFirstPseudoRegister)
+                  ? dst_reg.RegNo()
+                  : (m->reg_renumber.contains(dst_reg.RegNo()) ? m->reg_renumber[dst_reg.RegNo()]
+                                                               : -1);
+          if (scr_hr >= 2 && scr_hr <= 24 && dst_hr >= 2 && dst_hr <= 24 && scr_hr != dst_hr) {
+            bool dst_overlaps_input = false;
+            di_src.Visit([&](const RtlExpr& n) {
+              if (n.op == RtlOp::kReg && !n.IsArgPointerReg()) {
+                const int nhr =
+                    (n.RegNo() < kFirstPseudoRegister)
+                        ? n.RegNo()
+                        : (m->reg_renumber.contains(n.RegNo()) ? m->reg_renumber.at(n.RegNo())
+                                                               : -1);
+                if (nhr >= 0) {
+                  const int nnw =
+                      (n.mode == RtlMachineMode::kDi || n.mode == RtlMachineMode::kDf) ? 2 : 1;
+                  if (nhr < dst_hr + 2 && dst_hr < nhr + nnw) {
+                    dst_overlaps_input = true;
+                  }
+                }
+              }
+            });
+            if (dst_overlaps_input && is_adddi_reg_reg) {
+              const int op1_r = di_src.children[0].RegNo();
+              const int op1_hr =
+                  (op1_r < kFirstPseudoRegister)
+                      ? op1_r
+                      : (m->reg_renumber.contains(op1_r) ? m->reg_renumber.at(op1_r) : -1);
+              if (op1_hr == dst_hr) {
+                dst_overlaps_input = false;
+              }
+            }
+            if (dst_overlaps_input) {
+              blk[i].pattern.children[0].children[0] = dst_reg;
+              m->reg_renumber.erase(scr_p);
+              m->pseudo_modes.erase(scr_p);
+              blk.erase(blk.begin() + static_cast<ptrdiff_t>(i + 1));
+              oidx.erase(oidx.begin() + static_cast<ptrdiff_t>(i + 1));
+              continue;
+            }
+          }
         }
       }
       if (i + 2 < blk.size() && blk[i].pattern.op == RtlOp::kParallel &&
@@ -2072,7 +2333,7 @@ TrialO0Model BuildTrialO0PseudoModel(
       }
     }
   }
-  WrapTrialO0DiSubregs(/*prologue_end=*/0, &m.blocks);
+  WrapO0SingleBlockDiSubregs(/*prologue_end=*/0, &m.blocks);
 
   // Partition non-ABI hard-register occurrences into connected def-use webs via
   // forward reaching definitions across `cfg.rpo_blocks`.
@@ -2790,7 +3051,14 @@ O0StupidTimeline BuildO0StupidTimeline(bool gp64, bool fp64, const TrialO0Model&
   for (size_t b = model.blocks.size(); b-- > 0;) {
     for (size_t i = model.blocks[b].size(); i-- > 0;) {
       const int suid = insn_suids[b][i];
-      tl.after_hr[suid] = regs_live;
+      // `stupid.c:207-209`: OR `regs_live` into `after_insn_hard_regs[suid]`
+      // rather than overwriting, preserving bits already set at `suid` by a
+      // following `CLOBBER` (`stupid.c:457-459`).
+      for (int h = 0; h < 68; ++h) {
+        if (regs_live[h]) {
+          tl.after_hr[suid][h] = true;
+        }
+      }
       const RtlPatternAndNotes& pn = model.blocks[b][i];
       mark_refs(mark_refs, pn.pattern, suid, b, i);
       if (IsCallPattern(pn.pattern)) {
@@ -2806,8 +3074,12 @@ O0StupidTimeline BuildO0StupidTimeline(bool gp64, bool fp64, const TrialO0Model&
         }
       }
       if (i == 0 && b > 0 && suid >= 2) {
-        tl.after_hr[suid - 1] = regs_live;
-        tl.after_hr[suid - 2] = regs_live;
+        for (int h = 0; h < 68; ++h) {
+          if (regs_live[h]) {
+            tl.after_hr[suid - 1][h] = true;
+            tl.after_hr[suid - 2][h] = true;
+          }
+        }
       }
     }
   }
@@ -3433,7 +3705,7 @@ void ReconstructO0FinalScanDeletions(RtlControlFlowGraph* cfg, const Compilation
   ReconstructO0PrecomputedCallArgSelfMoves(pinfo.prologue_end, gp64, fp64, &all_blocks);
   ReconstructO0CallReturnSelfMoves(pinfo, gp64, fp64, &all_blocks);
   ReconstructO0ObeyRegdeclsScopeUses(*cfg, pinfo, gp64, fp64, &all_blocks);
-  WrapO0NoConflictBlockDiSubregs(pinfo.prologue_end, &all_blocks);
+  WrapO0SingleBlockDiSubregs(pinfo.prologue_end, &all_blocks);
 
   for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
     RtlBasicBlock& blk = cfg->rpo_blocks[b];

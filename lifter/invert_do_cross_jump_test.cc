@@ -1163,6 +1163,1012 @@ TEST_F(InvertDoCrossJumpTest, FixScratchWitnessLocalRmwBoundaryAndPrologueSaveMd
   EXPECT_TRUE(md_res.matches) << md_res.diff_detail;
 }
 
+TEST_F(InvertDoCrossJumpTest, MinimumOneCrossJumpRequiresMatchingPredEquivForSingleSharedStore) {
+  const CompilationProfile o1_profile = {.optimize_level = 1,
+                                         .c_flags = {"-O1", "-mips2", "-mcpu=r4000", "-Wa,-g"}};
+  hooks_.ApplyCompilationProfile(o1_profile);
+
+  // 1. Positive case (`jump.c:1978` `minimum = 1` + `FunctionLocalStaticSequenceId` pattern):
+  //    Join block `B3` has 1 shareable store `(set (mem [s_next]) v0)` before an active
+  //    `REG_EQUIV`-stopped epilogue head, and BOTH predecessors' defs of `v0` already carry
+  //    matching `REG_EQUIV (mem [s_next])`. `InvertDoCrossJump` duplicates the store into both
+  //    predecessors and round-trips through `do_cross_jump`.
+  RtlControlFlowGraph matching_equiv_cfg;
+  matching_equiv_cfg.pass = RtlPassKind::kJump2;
+  matching_equiv_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {"(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) "
+                 "(label_ref L0) (pc))) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))"},
+                {2, 1}),
+      MakeBlock(1, false,
+                {
+                    "(set (reg:SI 2 v0) (const_int 1)) "
+                    "(expr_list:REG_EQUIV (mem:SI (symbol_ref:SI (\"s_next\"))) (nil))",
+                    "(set (pc) (label_ref L1))",
+                },
+                {3}),
+      MakeBlock(2, true,
+                {
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 5 a1) (const_int 1))) "
+                    "(expr_list:REG_EQUIV (mem:SI (symbol_ref:SI (\"s_next\"))) "
+                    "(expr_list:REG_DEAD (reg:SI 5 a1) (nil)))",
+                },
+                {3}),
+      MakeBlock(3, true,
+                {
+                    "(set (mem:SI (symbol_ref:SI (\"s_next\"))) (reg:SI 2 v0)) "
+                    "(expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+                    "(set (reg:SI 3 v1) (mem:SI (symbol_ref:SI (\"s_inv\")))) "
+                    "(expr_list:REG_EQUIV (mem:SI (symbol_ref:SI (\"s_inv\"))) (nil))",
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 3 v1) (const_int 1))) "
+                    "(expr_list:REG_DEAD (reg:SI 3 v1) (nil))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  matching_equiv_cfg.sideband.basic_block_live_at_start = {
+      {0, {4, 5}}, {1, {}}, {2, {5}}, {3, {2}}};
+  const RtlControlFlowGraph lifted_match = InvertDoCrossJump(matching_equiv_cfg, o1_profile);
+  ASSERT_EQ(lifted_match.rpo_blocks.size(), 4u);
+  EXPECT_EQ(lifted_match.rpo_blocks[1].instructions.size(), 3u);
+  EXPECT_EQ(lifted_match.rpo_blocks[2].instructions.size(), 2u);
+  const RightInverseResult match_res = verifier_.VerifyDoCrossJumpRightInverse(matching_equiv_cfg);
+  EXPECT_TRUE(match_res.matches) << match_res.diff_detail;
+
+  // 2. Negative case (`GeneralizedCrossJump*` pattern): when fallthrough predecessor `B2` lacks a
+  //    matching `REG_EQUIV (mem [s_next])` on its def of `v0`, duplicating the store into `B2`
+  //    would synthesize a spurious `REG_EQUIV` in `update_equiv_regs`; leave the store in `B3`.
+  RtlControlFlowGraph missing_equiv_cfg = matching_equiv_cfg;
+  missing_equiv_cfg.rpo_blocks[2] =
+      MakeBlock(2, true,
+                {
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 5 a1) (const_int 1))) "
+                    "(expr_list:REG_DEAD (reg:SI 5 a1) (nil))",
+                },
+                {3});
+  const RtlControlFlowGraph lifted_miss = InvertDoCrossJump(missing_equiv_cfg, o1_profile);
+  ASSERT_EQ(lifted_miss.rpo_blocks.size(), 4u);
+  EXPECT_EQ(lifted_miss.rpo_blocks[1].instructions.size(), 2u);
+  EXPECT_EQ(lifted_miss.rpo_blocks[2].instructions.size(), 1u);
+  const RightInverseResult miss_res = verifier_.VerifyDoCrossJumpRightInverse(missing_equiv_cfg);
+  EXPECT_TRUE(miss_res.matches) << miss_res.diff_detail;
+}
+
+TEST_F(InvertDoCrossJumpTest, UnCrossJumpChainedPureFallthroughStoreTailsPositiveAndNegative) {
+  const CompilationProfile o2_profile = {.optimize_level = 2,
+                                         .c_flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-O2"}};
+  hooks_.ApplyCompilationProfile(o2_profile);
+
+  // Build exact 2-level chained pure fallthrough store tail with a labeled exit block:
+  //   B0 -> {B8, B1} (keeps exit label alive during `jump_optimize`),
+  //   B1 -> {B3, B2}; B3 -> {B5, B4};
+  //   B2 (uncond jump -> B6), B4 (uncond jump -> B7), B5 (fallthrough -> B6),
+  //   B6 (4-insn pure store tail, fallthrough -> B7),
+  //   B7 (1-insn pure store tail, fallthrough -> B8),
+  //   B8 (labeled `return_internal` `PARALLEL` exit, or uncond jump to B9 in negative case).
+  auto build_cfg = [](bool uncond_jump_next, bool load_in_b2, bool tail_kills_v0) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kJump2;
+    cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {"(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 99)) "
+                   "(label_ref L4) (pc)))"},
+                  {8, 1}),
+        MakeBlock(1, false,
+                  {"(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) "
+                   "(label_ref L0) (pc)))"},
+                  {3, 2}),
+        MakeBlock(
+            2, false,
+            {
+                load_in_b2 ? "(set (reg:QI 2 v0) (mem:QI (symbol_ref:SI (\"g_ext\"))))"
+                           : "(set (reg:QI 2 v0) (const_int 19)) "
+                             "(expr_list:REG_EQUIV (mem:QI (symbol_ref:SI (\"g_c3\"))) (nil))",
+                "(set (pc) (label_ref L2))",
+            },
+            {6}),
+        MakeBlock(3, true,
+                  {"(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 1)) "
+                   "(label_ref L1) (pc))) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))"},
+                  {5, 4}),
+        MakeBlock(4, false,
+                  {
+                      "(set (reg:QI 2 v0) (const_int 21)) "
+                      "(expr_list:REG_EQUIV (mem:QI (symbol_ref:SI (\"g_c5\"))) (nil))",
+                      "(set (pc) (label_ref L3))",
+                  },
+                  {7}),
+        MakeBlock(5, true,
+                  {
+                      "(set (reg:QI 2 v0) (const_int 20)) "
+                      "(expr_list:REG_EQUIV (mem:QI (symbol_ref:SI (\"g_c3\"))) (nil))",
+                  },
+                  {6}),
+        MakeBlock(6, true,
+                  {
+                      "(set (mem:QI (symbol_ref:SI (\"g_c3\"))) (reg:QI 2 v0)) "
+                      "(expr_list:REG_DEAD (reg:QI 2 v0) (nil))",
+                      "(set (reg:QI 2 v0) (const_int 22))",
+                      "(set (mem:QI (symbol_ref:SI (\"g_c4\"))) (reg:QI 2 v0)) "
+                      "(expr_list:REG_DEAD (reg:QI 2 v0) (nil))",
+                      "(set (reg:QI 2 v0) (const_int 23))",
+                  },
+                  {7}),
+        MakeBlock(7, true,
+                  {
+                      tail_kills_v0 ? "(set (mem:QI (symbol_ref:SI (\"g_c5\"))) (reg:QI 2 v0)) "
+                                      "(expr_list:REG_DEAD (reg:QI 2 v0) (nil))"
+                                    : "(set (mem:QI (symbol_ref:SI (\"g_c5\"))) (reg:QI 2 v0))",
+                  },
+                  {8}),
+        MakeBlock(8, true,
+                  {
+                      uncond_jump_next ? "(set (pc) (label_ref L5))"
+                                       : "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  uncond_jump_next ? std::vector<size_t>{9} : std::vector<size_t>{}),
+    };
+    cfg.sideband.basic_block_live_at_start = {
+        {0, {4}}, {1, {4}}, {2, {}}, {3, {4}}, {4, {}}, {5, {}}, {6, {2}}, {7, {2}}, {8, {}},
+    };
+    if (uncond_jump_next) {
+      cfg.rpo_blocks.push_back(
+          MakeBlock(9, true, {"(parallel[ (return) (use (reg:SI 31 ra)) ] )"}, {}));
+      cfg.sideband.basic_block_live_at_start[9] = {};
+    }
+    return cfg;
+  };
+
+  // 1. Positive (`jump.c:1978, 2371-2560`, `sched.c:1488, 2428`, `mips.md:161`):
+  //    both `B7` and `B6` unwind cleanly into `{B2, B4, B5}` and round-trip via `do_cross_jump`.
+  const RtlControlFlowGraph pos_cfg =
+      build_cfg(/*uncond_jump_next=*/false, /*load_in_b2=*/false, /*tail_kills_v0=*/true);
+  const RtlControlFlowGraph lifted_pos = InvertDoCrossJump(pos_cfg, o2_profile);
+  EXPECT_EQ(lifted_pos.rpo_blocks.size(), 7u) << lifted_pos.FormatSummary();
+  const RightInverseResult pos_res = verifier_.VerifyDoCrossJumpRightInverse(pos_cfg);
+  EXPECT_TRUE(pos_res.matches) << pos_res.diff_detail;
+
+  // 2. Negative (unconditional jump head in `B8`): `B7` is NOT unwound because `next_b` (`B8`)
+  //    starts with an unconditional jump that `jump_optimize` threads past.
+  const RtlControlFlowGraph uncond_next_cfg =
+      build_cfg(/*uncond_jump_next=*/true, /*load_in_b2=*/false, /*tail_kills_v0=*/true);
+  const RtlControlFlowGraph lifted_uncond_next = InvertDoCrossJump(uncond_next_cfg, o2_profile);
+  EXPECT_GE(lifted_uncond_next.rpo_blocks.size(), 9u) << lifted_uncond_next.FormatSummary();
+
+  // 3. Negative (multi-cycle memory load in `B2` under `-O2` `sched2`): `B6` is NOT unwound
+  //    because `B2` is not unit-latency ALU/store.
+  const RtlControlFlowGraph load_pred_cfg =
+      build_cfg(/*uncond_jump_next=*/false, /*load_in_b2=*/true, /*tail_kills_v0=*/true);
+  const RtlControlFlowGraph lifted_load_pred = InvertDoCrossJump(load_pred_cfg, o2_profile);
+  EXPECT_EQ(lifted_load_pred.rpo_blocks.size(), 8u) << lifted_load_pred.FormatSummary();
+
+  // 4. Negative (missing `REG_DEAD` on `B7[0]`): `B7` is NOT unwound.
+  const RtlControlFlowGraph no_dead_cfg =
+      build_cfg(/*uncond_jump_next=*/false, /*load_in_b2=*/false, /*tail_kills_v0=*/false);
+  const RtlControlFlowGraph lifted_no_dead = InvertDoCrossJump(no_dead_cfg, o2_profile);
+  EXPECT_EQ(lifted_no_dead.rpo_blocks.size(), 8u) << lifted_no_dead.FormatSummary();
+}
+
+TEST_F(InvertDoCrossJumpTest, RestoreNoopMovesConsumedDeathsRestoresSingleDeadOnPointerLoadRmw) {
+  auto make_cfg = [](bool b2_has_label) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kJump2;
+    cfg.rpo_blocks = {
+        MakeBlock(0, false, {"(set (reg:SI 3 v1) (const_int 0))"}, {1}),
+        MakeBlock(1, true,
+                  {
+                      "(set (reg:SI 3 v1) (plus:SI (reg:SI 3 v1) (const_int 1)))",
+                      "(set (reg:SI 2 v0) (ashift:SI (reg:SI 3 v1) (const_int 2)))",
+                      "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 4 a0))) "
+                      "(expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+                      "(set (reg:SI 2 v0) (mem:SI (reg:SI 2 v0)))",
+                      "(set (pc) (if_then_else (ne:SI (reg:SI 2 v0) (reg:SI 5 a1)) "
+                      "(label_ref L1) (pc)))",
+                  },
+                  {3, 2}),
+        MakeBlock(2, b2_has_label,
+                  {
+                      "(set (reg/i:SI 2 v0) (reg:SI 3 v1)) "
+                      "(expr_list:REG_DEAD (reg:SI 3 v1) (nil))",
+                      "(set (pc) (label_ref L2))",
+                  },
+                  {5}),
+        MakeBlock(3, true,
+                  {
+                      "(set (pc) (if_then_else (ge:SI (reg:SI 2 v0) (const_int 0)) "
+                      "(label_ref L0) (pc))) (expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+                  },
+                  {1, 4}),
+        MakeBlock(4, false, {"(set (reg/i:SI 2 v0) (const_int -1))"}, {5}),
+        MakeBlock(5, true,
+                  {
+                      "(use (reg/i:SI 2 v0))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    cfg.sideband.basic_block_live_at_start = {
+        {0, {4, 5}}, {1, {3, 4, 5}}, {2, {3}}, {3, {2, 3, 4, 5}}, {4, {}}, {5, {2}},
+    };
+    return cfg;
+  };
+
+  // Positive: label-less fallthrough `B2` setting `$v0 = $v1` restores ONE
+  // `REG_DEAD (reg:SI 2 v0)` onto un-noted pointer-load self-RMW `B1[3]` and
+  // does NOT duplicate `REG_DEAD 2 v0` onto `B1[2]` (`jump.c:452-459`).
+  const RtlControlFlowGraph unlabelled_cfg = make_cfg(/*b2_has_label=*/false);
+  const RtlControlFlowGraph lifted_pos = InvertDoCrossJump(unlabelled_cfg);
+  ASSERT_EQ(lifted_pos.rpo_blocks.size(), 6u);
+  EXPECT_EQ(lifted_pos.rpo_blocks[1].instructions[2],
+            "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 4 a0))) "
+            "(expr_list:REG_DEAD (reg:SI 2 v0) (nil))");
+  EXPECT_EQ(lifted_pos.rpo_blocks[1].instructions[3],
+            "(set (reg:SI 2 v0) (mem:SI (reg:SI 2 v0))) "
+            "(expr_list:REG_DEAD (reg:SI 2 v0) (nil))");
+  const RightInverseResult pos_res = verifier_.VerifyDoCrossJumpRightInverse(unlabelled_cfg);
+  EXPECT_TRUE(pos_res.matches) << pos_res.diff_detail;
+
+  // Negative: a `CODE_LABEL` before `B2` blocks `jump.c:453`, so `B1[3]` is
+  // left untouched.
+  const RtlControlFlowGraph labelled_cfg = make_cfg(/*b2_has_label=*/true);
+  const RtlControlFlowGraph lifted_neg = InvertDoCrossJump(labelled_cfg);
+  ASSERT_EQ(lifted_neg.rpo_blocks.size(), 6u);
+  EXPECT_EQ(lifted_neg.rpo_blocks[1].instructions[3], "(set (reg:SI 2 v0) (mem:SI (reg:SI 2 v0)))");
+}
+
+TEST_F(InvertDoCrossJumpTest, RestoresDeletedNoopCallArgMoveAcrossFallthroughCondBranch) {
+  auto make_cfg = [](bool b1_has_label, bool b2_reads_a0, bool b1_writes_a1) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kJump2;
+    cfg.sideband.outgoing_args_size = 16;
+    cfg.sideband.basic_block_live_at_start[0] = {4, 5, 6, 29, 31};
+    std::vector<std::string> b1_insns;
+    if (b1_writes_a1) {
+      b1_insns.push_back(
+          "(set (reg:SI 5 a1) (reg:SI 6 a2)) (expr_list:REG_DEAD (reg:SI 6 a2) (nil))");
+    }
+    b1_insns.push_back(
+        "(parallel[ (call (mem:SI (symbol_ref:SI (\"left_fn\"))) (const_int 16)) "
+        "(clobber (reg:SI 31 ra)) ] )");
+    b1_insns.push_back("(set (pc) (label_ref L1))");
+
+    std::vector<std::string> b2_insns;
+    if (b2_reads_a0) {
+      b2_insns.push_back(
+          "(set (reg:SI 5 a1) (plus:SI (reg:SI 4 a0) (const_int 1))) "
+          "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+    } else {
+      b2_insns.push_back("(set (reg:SI 4 a0) (reg:SI 16 s0))");
+      b2_insns.push_back(
+          "(set (reg:SI 5 a1) (reg:SI 6 a2)) (expr_list:REG_DEAD (reg:SI 6 a2) (nil))");
+    }
+    b2_insns.push_back(
+        "(parallel[ (call (mem:SI (symbol_ref:SI (\"right_fn\"))) (const_int 16)) "
+        "(clobber (reg:SI 31 ra)) ] )");
+
+    cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (reg:SI 29 sp) (minus:SI (reg:SI 29 sp) (const_int 24)))",
+                      "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 16))) (reg:SI 16 s0))",
+                      "(set (reg:SI 16 s0) (reg:SI 4 a0))",
+                      "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))) (reg:SI 31 ra))",
+                      "(set (pc) (if_then_else (eq:SI (reg:SI 5 a1) (const_int 0)) "
+                      "(label_ref L0) (pc)))",
+                  },
+                  {2, 1}),
+        MakeBlock(1, b1_has_label, std::move(b1_insns), {3}),
+        MakeBlock(2, true, std::move(b2_insns), {3}),
+        MakeBlock(3, true,
+                  {
+                      "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 16 s0) (const_int 4))) "
+                      "(expr_list:REG_DEAD (reg:SI 16 s0) (nil))",
+                      "(use (reg/i:SI 2 v0))",
+                      "(set (reg:SI 31 ra) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))))",
+                      "(set (reg:SI 16 s0) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 16))))",
+                      "(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int 24)))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    return cfg;
+  };
+
+  // Positive: label-less fallthrough B1 writes `$a1` before the call while B2
+  // overwrites `$a0`, so `jump.c:434-465` + `reload.c:find_equiv_reg:5413-5590`
+  // deleted `(set (reg:SI 4 a0) (reg:SI 16 s0))` and stripped `REG_DEAD 4` from B0.
+  const RtlControlFlowGraph pos_cfg =
+      make_cfg(/*b1_has_label=*/false, /*b2_reads_a0=*/false, /*b1_writes_a1=*/true);
+  const RtlControlFlowGraph pos_pre = InvertDoCrossJump(pos_cfg);
+  ASSERT_EQ(pos_pre.rpo_blocks.size(), 4u);
+  EXPECT_EQ(pos_pre.rpo_blocks[0].instructions[2],
+            "(set (reg:SI 16 s0) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+  ASSERT_EQ(pos_pre.rpo_blocks[1].instructions.size(), 4u);
+  EXPECT_EQ(pos_pre.rpo_blocks[1].instructions[0], "(set (reg:SI 4 a0) (reg:SI 16 s0))");
+  EXPECT_EQ(pos_pre.rpo_blocks[1].instructions[1],
+            "(set (reg:SI 5 a1) (reg:SI 6 a2)) (expr_list:REG_DEAD (reg:SI 6 a2) (nil))");
+  const RightInverseResult pos_res = [&]() {
+    RtlControlFlowGraph with_fusage = pos_cfg;
+    with_fusage.rpo_blocks[1].rtl_insns[1].has_explicit_call_fusage = true;
+    with_fusage.rpo_blocks[1].rtl_insns[1].call_fusage = {
+        RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kSi, 5)),
+        RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kSi, 4)),
+    };
+    with_fusage.rpo_blocks[2].rtl_insns[2].has_explicit_call_fusage = true;
+    with_fusage.rpo_blocks[2].rtl_insns[2].call_fusage = {
+        RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kSi, 5)),
+        RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kSi, 4)),
+    };
+    return verifier_.VerifyDoCrossJumpRightInverse(with_fusage);
+  }();
+  EXPECT_TRUE(pos_res.matches) << pos_res.diff_detail;
+
+  // Negative 1: a `CODE_LABEL` at B1 stops `reload.c:find_equiv_reg:5416`.
+  const RtlControlFlowGraph neg_label =
+      InvertDoCrossJump(make_cfg(/*b1_has_label=*/true, /*b2_reads_a0=*/false,
+                                 /*b1_writes_a1=*/true));
+  EXPECT_EQ(neg_label.rpo_blocks[0].instructions[2], "(set (reg:SI 16 s0) (reg:SI 4 a0))");
+  EXPECT_EQ(neg_label.rpo_blocks[1].instructions.size(), 3u);
+
+  // Negative 2: `$a0` live-in to taken branch B2 means B0's copy did not kill `$a0`.
+  const RtlControlFlowGraph neg_live_taken =
+      InvertDoCrossJump(make_cfg(/*b1_has_label=*/false, /*b2_reads_a0=*/true,
+                                 /*b1_writes_a1=*/true));
+  EXPECT_EQ(neg_live_taken.rpo_blocks[0].instructions[2], "(set (reg:SI 16 s0) (reg:SI 4 a0))");
+  EXPECT_EQ(neg_live_taken.rpo_blocks[1].instructions.size(), 3u);
+
+  // Negative 3: 0-arg call in B1 without explicit `call_fusage` or higher arg write.
+  const RtlControlFlowGraph neg_zero_arg =
+      InvertDoCrossJump(make_cfg(/*b1_has_label=*/false, /*b2_reads_a0=*/false,
+                                 /*b1_writes_a1=*/false));
+  EXPECT_EQ(neg_zero_arg.rpo_blocks[0].instructions[2], "(set (reg:SI 16 s0) (reg:SI 4 a0))");
+  EXPECT_EQ(neg_zero_arg.rpo_blocks[1].instructions.size(), 2u);
+}
+
+TEST_F(InvertDoCrossJumpTest, UncrossJumpTailMoveRespectsFormerCodeLabelBarrierForRegDead) {
+  // Mirrors `jump.c:434-465` (`if (noop_moves)` + line 453 `CODE_LABEL` barrier):
+  // when `InvertDoCrossJump` duplicates a cross-jumped tail starting with
+  // `(set (reg:SI 4 a0) (reg:SI 8 t0))` + `CALL` into `pred_b`, the copied tail
+  // originally lived behind `join_b`'s `CODE_LABEL`. Scanning backward past that
+  // copied-tail boundary must treat it as a `CODE_LABEL` shield and prepend a
+  // compensating `(REG_DEAD a0)` onto the preceding consumer of `$a0` in `pred_b`
+  // (so `jump2`'s `remove_death` consumes one note and preserves the original).
+  auto count_substr = [](const std::string& haystack, std::string_view needle) {
+    int count = 0;
+    size_t pos = 0;
+    while ((pos = haystack.find(needle, pos)) != std::string::npos) {
+      ++count;
+      pos += needle.size();
+    }
+    return count;
+  };
+  RtlControlFlowGraph cross_cfg;
+  cross_cfg.pass = RtlPassKind::kJump2;
+  cross_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (pc) (if_then_else (eq:SI (reg:SI 5 a1) (const_int 0)) "
+                    "(label_ref L0) (pc)))",
+                },
+                {2, 1}),
+      MakeBlock(1, false,
+                {
+                    "(set (reg:SI 8 t0) (plus:SI (reg:SI 4 a0) (const_int 1))) "
+                    "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                    "(set (pc) (label_ref L1))",
+                },
+                {3}),
+      MakeBlock(2, true,
+                {
+                    "(set (reg:SI 8 t0) (plus:SI (reg:SI 6 a2) (const_int 2)))",
+                },
+                {3}),
+      MakeBlock(3, true,
+                {
+                    "(set (reg:SI 4 a0) (reg:SI 8 t0)) (expr_list:REG_DEAD (reg:SI 8 t0) (nil))",
+                    "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"callee\"))) "
+                    "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 5)))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  cross_cfg.rpo_blocks[3].rtl_insns[1].has_explicit_call_fusage = true;
+  cross_cfg.rpo_blocks[3].rtl_insns[1].call_fusage = {
+      RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kSi, 4)),
+  };
+  cross_cfg.sideband.basic_block_live_at_start = {
+      {0, {4, 5, 6}},
+      {1, {4}},
+      {2, {6}},
+      {3, {8}},
+  };
+  const CompilationProfile o2_prof{.optimize_level = 2,
+                                   .c_flags = {"-O2", "-mips2", "-mcpu=r4000"}};
+  const RtlControlFlowGraph lifted = InvertDoCrossJump(cross_cfg, o2_prof);
+  ASSERT_GE(lifted.rpo_blocks.size(), 4u);
+  // Positive: in `B1` (which received the un-cross-jumped tail), the producer
+  // `(set (reg:SI 8 t0) (plus:SI (reg:SI 4 a0) (const_int 1)))` preceding the
+  // former `CODE_LABEL` boundary gets a compensating second `(REG_DEAD a0)`,
+  // and replaying `jump2` (`do_cross_jump`) matches `cross_cfg` exactly.
+  ASSERT_GE(lifted.rpo_blocks[1].instructions.size(), 3u) << lifted.FormatSummary();
+  EXPECT_EQ(count_substr(lifted.rpo_blocks[1].instructions[0], "REG_DEAD (reg:SI 4 a0)"), 2)
+      << lifted.FormatSummary();
+  const RightInverseResult pos_res = verifier_.VerifyDoCrossJumpRightInverse(cross_cfg);
+  EXPECT_TRUE(pos_res.matches) << pos_res.diff_detail;
+
+  // Negative 1: without cross-jumping (a single straight-line block with no former
+  // `CODE_LABEL` barrier between the read of `$a0` and `(set a0 t0)`), the
+  // instruction does NOT receive a compensating second `REG_DEAD` note.
+  RtlControlFlowGraph flat_cfg;
+  flat_cfg.pass = RtlPassKind::kJump2;
+  flat_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 8 t0) (plus:SI (reg:SI 4 a0) (const_int 1))) "
+                    "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                    "(set (reg:SI 4 a0) (reg:SI 8 t0)) (expr_list:REG_DEAD (reg:SI 8 t0) (nil))",
+                    "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"callee\"))) "
+                    "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 5)))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  flat_cfg.rpo_blocks[0].rtl_insns[2].has_explicit_call_fusage = true;
+  flat_cfg.rpo_blocks[0].rtl_insns[2].call_fusage = {
+      RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kSi, 4)),
+  };
+  flat_cfg.sideband.basic_block_live_at_start = {{0, {4}}};
+  const RtlControlFlowGraph lifted_flat = InvertDoCrossJump(flat_cfg, o2_prof);
+  ASSERT_EQ(lifted_flat.rpo_blocks.size(), 1u);
+  EXPECT_EQ(count_substr(lifted_flat.rpo_blocks[0].instructions[0], "REG_DEAD (reg:SI 4 a0)"), 1)
+      << lifted_flat.FormatSummary();
+
+  // Negative 2: an intervening `CALL_INSN` whose `call_fusage` already consumes
+  // `$a0` (`flow.c:1303-1315`) absorbs `jump.c:455`'s `remove_death` scan so an
+  // earlier `(REG_DEAD (reg:SI 4 a0))` in `B1` is NOT duplicated.
+  RtlControlFlowGraph fusage_shield_cfg = cross_cfg;
+  fusage_shield_cfg.rpo_blocks[1].instructions.insert(
+      fusage_shield_cfg.rpo_blocks[1].instructions.begin() + 1,
+      "(parallel[ (call (mem:SI (symbol_ref:SI (\"pre_call\"))) (const_int 16)) "
+      "(clobber (reg:SI 31 ra)) ] )");
+  fusage_shield_cfg.rpo_blocks[1].SyncRtlInsnsFromInstructions();
+  fusage_shield_cfg.rpo_blocks[1].rtl_insns[1].has_explicit_call_fusage = true;
+  fusage_shield_cfg.rpo_blocks[1].rtl_insns[1].call_fusage = {
+      RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kSi, 4)),
+  };
+  const RtlControlFlowGraph lifted_fusage = InvertDoCrossJump(fusage_shield_cfg, o2_prof);
+  ASSERT_GE(lifted_fusage.rpo_blocks.size(), 4u);
+  EXPECT_EQ(count_substr(lifted_fusage.rpo_blocks[1].instructions[0], "REG_DEAD (reg:SI 4 a0)"), 1)
+      << lifted_fusage.FormatSummary();
+}
+
+TEST_F(InvertDoCrossJumpTest, MultiCyclePreCallOpNotUnCrossJumpedIntoMultiCyclePred) {
+  CompilationProfile o2_prof;
+  o2_prof.optimize_level = 2;
+  o2_prof.c_flags = {"-O2", "-mcpu=r4000", "-Wa,-g"};
+
+  // Negative (Fix 42B): under `runs_sched2`, a join block starting with a
+  // multi-cycle pre-call FP op (`add.s $f12`) independent of a multi-cycle
+  // predecessor's definitions must NOT be un-cross-jumped into the predecessor.
+  auto make_cfg = [](bool pred_is_multicycle) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kJump2;
+    cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {"(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) "
+                   "(label_ref L2) (pc)))"},
+                  {2, 1}),
+        MakeBlock(1, false,
+                  {pred_is_multicycle
+                       ? "(set (reg:SF 52 $f20) (mult:SF (reg:SF 54 $f22) (reg:SF 56 $f24)))"
+                       : "(set (reg:SI 16 s0) (plus:SI (reg:SI 16 s0) (const_int 1)))",
+                   "(set (pc) (label_ref L3))"},
+                  {3}),
+        MakeBlock(2, true, {"(set (reg:SI 16 s0) (plus:SI (reg:SI 16 s0) (const_int 2)))"}, {3}),
+        MakeBlock(3, true,
+                  {"(set (reg:SF 44 $f12) (plus:SF (reg:SF 32 $f0) (reg:SF 34 $f2)))",
+                   "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"callee\"))) "
+                   "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+                   "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 16 s0)))",
+                   "(use (reg/i:SI 2 v0))", "(parallel[ (return) (use (reg:SI 31 ra)) ] )"},
+                  {}),
+    };
+    cfg.rpo_blocks[3].rtl_insns[1].has_explicit_call_fusage = true;
+    cfg.rpo_blocks[3].rtl_insns[1].call_fusage = {
+        RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kSf, 44)),
+    };
+    cfg.sideband.basic_block_live_at_start = {
+        {0, {4, 16, 32, 34, 54, 56}},
+        {1, {16, 32, 34, 54, 56}},
+        {2, {16, 32, 34}},
+        {3, {16, 32, 34}},
+    };
+    return cfg;
+  };
+
+  const RtlControlFlowGraph kept =
+      InvertDoCrossJump(make_cfg(/*pred_is_multicycle=*/true), o2_prof);
+  ASSERT_EQ(kept.rpo_blocks.size(), 4u);
+  EXPECT_EQ(kept.rpo_blocks[1].instructions.size(), 2u) << kept.FormatSummary();
+  EXPECT_EQ(kept.rpo_blocks[3].instructions.size(), 5u) << kept.FormatSummary();
+
+  // Positive: when every predecessor is single-cycle ALU, un-cross-jumping proceeds.
+  const RtlControlFlowGraph uncrossed =
+      InvertDoCrossJump(make_cfg(/*pred_is_multicycle=*/false), o2_prof);
+  ASSERT_EQ(uncrossed.rpo_blocks.size(), 4u);
+  EXPECT_GT(uncrossed.rpo_blocks[1].instructions.size(), 2u) << uncrossed.FormatSummary();
+}
+
+TEST_F(InvertDoCrossJumpTest, FpConsumerCrossJumpPrefixUnCrossJumpsAndSinksStage1GprAlu) {
+  CompilationProfile o2_prof;
+  o2_prof.optimize_level = 2;
+  o2_prof.c_flags = {"-O2", "-mcpu=r4000", "-Wa,-g"};
+
+  // Positive (Fix 42G): join block prefix `[addu v1, v0, 17 ; add.s $f2, $f0, $f2]`
+  // kills `$f0` defined by multi-cycle `mul.s` in both predecessors, and `B2`
+  // hoisted `mul.s` ahead of independent `xor v0`. Verify `InvertDoCrossJump`
+  // duplicates both instructions into `B1`/`B2` and sinks `B2[0]` (`lui v0`)
+  // past `[li.s $f0 ; mul.s $f0]` to right before `ori v0`.
+  auto make_diamond_cfg = [](bool hoist_mul_in_b2) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kJump2;
+    std::vector<std::string> b2_insns;
+    if (hoist_mul_in_b2) {
+      b2_insns = {
+          "(set (reg:SI 2 v0) (const_int 324468736))",
+          "(set (reg:SF 32 $f0) (const_double:SF (cc0) 0 1071644672))",
+          "(set (reg:SF 32 $f0) (mult:SF (reg:SF 34 $f2) (reg:SF 32 $f0))) "
+          "(expr_list:REG_DEAD (reg:SF 34 $f2) (expr_list:REG_DEAD (reg:SF 32 $f0) (nil)))",
+          "(set (reg:SI 2 v0) (ior:SI (reg:SI 2 v0) (const_int 39903)))",
+          "(set (reg:SF 34 $f2) (const_double:SF (cc0) 0 1072693248))",
+          "(set (reg:SI 2 v0) (xor:SI (reg:SI 4 a0) (reg:SI 2 v0))) "
+          "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+      };
+    } else {
+      b2_insns = {
+          "(set (reg:SI 2 v0) (const_int 324468736))",
+          "(set (reg:SI 2 v0) (ior:SI (reg:SI 2 v0) (const_int 39903)))",
+          "(set (reg:SI 2 v0) (xor:SI (reg:SI 4 a0) (reg:SI 2 v0))) "
+          "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+          "(set (reg:SF 32 $f0) (const_double:SF (cc0) 0 1071644672))",
+          "(set (reg:SF 32 $f0) (mult:SF (reg:SF 34 $f2) (reg:SF 32 $f0))) "
+          "(expr_list:REG_DEAD (reg:SF 34 $f2) (expr_list:REG_DEAD (reg:SF 32 $f0) (nil)))",
+          "(set (reg:SF 34 $f2) (const_double:SF (cc0) 0 1072693248))",
+      };
+    }
+    cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {"(set (pc) (if_then_else (ge:SI (reg:SI 4 a0) (const_int 0)) "
+                   "(label_ref L2) (pc)))"},
+                  {2, 1}),
+        MakeBlock(
+            1, false,
+            {"(set (reg:SF 32 $f0) (const_double:SF (cc0) 0 1071644672))",
+             "(set (reg:SI 2 v0) (neg:SI (reg:SI 4 a0))) "
+             "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+             "(set (reg:SF 32 $f0) (mult:SF (reg:SF 34 $f2) (reg:SF 32 $f0))) "
+             "(expr_list:REG_DEAD (reg:SF 34 $f2) (expr_list:REG_DEAD (reg:SF 32 $f0) (nil)))",
+             "(set (reg:SF 34 $f2) (const_double:SF (cc0) 0 1072693248))",
+             "(set (pc) (label_ref L3))"},
+            {3}),
+        MakeBlock(2, true, std::move(b2_insns), {3}),
+        MakeBlock(3, true,
+                  {"(set (reg:SI 3 v1) (plus:SI (reg:SI 2 v0) (const_int 17))) "
+                   "(expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+                   "(set (reg:SF 34 $f2) (plus:SF (reg:SF 32 $f0) (reg:SF 34 $f2))) "
+                   "(expr_list:REG_DEAD (reg:SF 32 $f0) (nil))",
+                   "(set (reg/i:SF 32 $f0) (reg:SF 34 $f2))", "(use (reg/i:SF 32 $f0))",
+                   "(parallel[ (return) (use (reg:SI 31 ra)) ] )"},
+                  {}),
+    };
+    cfg.sideband.basic_block_live_at_start = {
+        {0, {4, 34}},
+        {1, {4, 34}},
+        {2, {4, 34}},
+        {3, {2, 32, 34}},
+    };
+    return cfg;
+  };
+
+  const RtlControlFlowGraph pos =
+      InvertDoCrossJump(make_diamond_cfg(/*hoist_mul_in_b2=*/true), o2_prof);
+  ASSERT_EQ(pos.rpo_blocks.size(), 4u);
+  ASSERT_EQ(pos.rpo_blocks[2].instructions.size(), 8u) << pos.FormatSummary();
+  EXPECT_NE(pos.rpo_blocks[2].instructions[0].find("const_double:SF"), std::string::npos)
+      << pos.FormatSummary();
+  EXPECT_NE(pos.rpo_blocks[2].instructions[2].find("(const_int 324468736)"), std::string::npos)
+      << pos.FormatSummary();
+  EXPECT_NE(pos.rpo_blocks[2].instructions[7].find("(plus:SF (reg:SF 32 $f0)"), std::string::npos)
+      << pos.FormatSummary();
+
+  // Negative: when neither predecessor hoisted `mul.s` ahead of an independent
+  // 1-cycle integer ALU op, the prefix is not un-cross-jumped.
+  const RtlControlFlowGraph neg =
+      InvertDoCrossJump(make_diamond_cfg(/*hoist_mul_in_b2=*/false), o2_prof);
+  ASSERT_EQ(neg.rpo_blocks.size(), 4u);
+  EXPECT_EQ(neg.rpo_blocks[2].instructions.size(), 6u) << neg.FormatSummary();
+}
+
+TEST_F(InvertDoCrossJumpTest, RestoresCalleeSavedFprArgCopyIntoPostRaXferStallAndGuardsO32Gap) {
+  CompilationProfile mips1_o2;
+  mips1_o2.optimize_level = 2;
+  mips1_o2.c_flags = {"-O2", "-mips1", "-funsigned-char", "-Wa,-O2"};
+
+  // Positive (Fix 42C + 42H-5): when an FPR->GPR arg copy (`$a2 <- $f24`) and a
+  // GPR arg copy (`$a0 <- $s1`) are restored in a block with an unfilled post-`$ra`
+  // `const_double -> FP arith` stall slot, `$a0 <- $s1` sits ahead of `sw $ra`
+  // while `$a2 <- $f24` fills the 1-cycle `xfer` stall slot between `li.s` and
+  // `mul.s`. Negative: O32 `$a1` (`reg 5`) alignment gap is NOT restored when
+  // `$a2` is an 8-byte `DFmode` arg.
+  RtlControlFlowGraph cfg;
+  cfg.pass = RtlPassKind::kJump2;
+  cfg.sideband.frame_size_bytes = 64;
+  cfg.sideband.saved_gpr_regnos = {16, 17, 31};
+  cfg.sideband.saved_fpr_regnos = {56};
+  cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int -64)))",
+                    "(set (mem:DF (plus:SI (reg:SI 29 sp) (const_int 48))) (reg:DF 56 $f24))",
+                    "(set (reg:DF 56 $f24) (reg:DF 6 a2))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 36))) (reg:SI 17 s1))",
+                    "(set (reg:SI 17 s1) (reg:SI 4 a0))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 32))) (reg:SI 16 s0))",
+                    "(set (reg:SI 16 s0) (reg:SI 5 a1))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 40))) (reg:SI 31 ra))",
+                    "(set (reg:SF 32 $f0) (const_double:SF (cc0) 0 1071644672))",
+                    "(set (reg:SF 32 $f0) (mult:SF (reg:SF 34 $f2) (reg:SF 32 $f0)))",
+                    "(set (mem:SF (plus:SI (reg:SI 29 sp) (const_int 16))) (reg:SF 32 $f0))",
+                    "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"callee\"))) "
+                    "(const_int 24))) (clobber (reg:SI 31 ra)) ] )",
+                    "(set (reg:DF 32 $f0) (plus:DF (reg:DF 56 $f24) (reg:DF 56 $f24)))",
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 17 s1)))",
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 16 s0)))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  cfg.rpo_blocks[0].rtl_insns[11].has_explicit_call_fusage = true;
+  cfg.rpo_blocks[0].rtl_insns[11].call_fusage = {
+      RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kSi, 4)),
+      RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kDf, 6)),
+  };
+  cfg.sideband.basic_block_live_at_start = {{0, {4, 5, 6, 7, 34}}};
+
+  const RtlControlFlowGraph lifted = InvertDoCrossJump(cfg, mips1_o2);
+  ASSERT_EQ(lifted.rpo_blocks.size(), 1u);
+  int idx_a0 = -1;
+  int idx_ra = -1;
+  int idx_lis = -1;
+  int idx_a2 = -1;
+  int idx_muls = -1;
+  bool saw_a1 = false;
+  for (size_t i = 0; i < lifted.rpo_blocks[0].instructions.size(); ++i) {
+    const std::string& s = lifted.rpo_blocks[0].instructions[i];
+    if (s.find("(set (reg:SI 4 a0) (reg:SI 17 s1))") != std::string::npos) idx_a0 = i;
+    if (s.find("(reg:SI 31 ra))") != std::string::npos && s.find("mem:SI") != std::string::npos) {
+      idx_ra = i;
+    }
+    if (s.find("const_double:SF") != std::string::npos) idx_lis = i;
+    if (s.find("(set (reg:DF 6 a2) (reg:DF 56 $f24))") != std::string::npos) idx_a2 = i;
+    if (s.find("mult:SF") != std::string::npos) idx_muls = i;
+    if (s.find("(set (reg:SI 5 a1) (reg:SI 16 s0))") != std::string::npos) saw_a1 = true;
+  }
+  EXPECT_GE(idx_a0, 0) << lifted.FormatSummary();
+  EXPECT_LT(idx_a0, idx_ra) << lifted.FormatSummary();
+  EXPECT_EQ(idx_a2, idx_lis + 1) << lifted.FormatSummary();
+  EXPECT_EQ(idx_muls, idx_a2 + 1) << lifted.FormatSummary();
+  EXPECT_FALSE(saw_a1) << lifted.FormatSummary();
+}
+
+TEST_F(InvertDoCrossJumpTest,
+       RestoreNoopMovesConsumedDeathsPlacesSingleNoteOnDyingReadNotDuplicateOnEarlierInsn) {
+  auto count_substr = [](const std::string& haystack, std::string_view needle) {
+    int count = 0;
+    size_t pos = 0;
+    while ((pos = haystack.find(needle, pos)) != std::string::npos) {
+      ++count;
+      pos += needle.size();
+    }
+    return count;
+  };
+  const CompilationProfile o2_prof{2, {"-O2", "-mips2", "-mcpu=r4000"}, {}};
+
+  // Positive (`flow.c:1670`, `jump.c:452-459`): when `$f6` dies at insn 1, is
+  // reloaded from a constant at insn 2, read at insn 3, and overwritten by
+  // `(set $f6 $s3)` at insn 4, `RestoreNoopMovesConsumedDeaths` attaches a
+  // single `REG_DEAD $f6` to insn 3 rather than stacking duplicates on insn 1.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kJump2;
+    cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (reg:SF 38 $f6) (const_double:SF (cc0) 0 1071644672))",
+                      "(set (reg:SF 34 $f2) (mult:SF (reg:SF 44 $f12) (reg:SF 38 $f6))) "
+                      "(expr_list:REG_DEAD (reg:SF 38 $f6) (nil))",
+                      "(set (reg:SF 38 $f6) (const_double:SF (cc0) 0 1070596096))",
+                      "(set (reg:SF 32 $f0) (mult:SF (reg:SF 44 $f12) (reg:SF 38 $f6)))",
+                      "(set (reg:SF 38 $f6) (reg:SF 19 s3))",
+                      "(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 32 $f0) (reg:SF 38 $f6)))",
+                      "(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 32 $f0) (reg:SF 34 $f2)))",
+                      "(use (reg/i:SF 32 $f0))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    const RtlControlFlowGraph lifted = InvertDoCrossJump(cfg, o2_prof);
+    ASSERT_EQ(lifted.rpo_blocks.size(), 1u);
+    EXPECT_EQ(count_substr(lifted.rpo_blocks[0].instructions[1], "REG_DEAD (reg:SF 38 $f6)"), 1)
+        << lifted.FormatSummary();
+    EXPECT_EQ(count_substr(lifted.rpo_blocks[0].instructions[3], "REG_DEAD (reg:SF 38 $f6)"), 1)
+        << lifted.FormatSummary();
+  }
+
+  // Negative: when the intervening consumer of `$f6` already carries
+  // `REG_DEAD (mem:SF ...)` (a spill-slot reload consumer), it must NOT receive
+  // an extra `REG_DEAD $f6` that `sched2` would duplicate as a second `MEM` death.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kJump2;
+    cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (reg:SF 38 $f6) (const_double:SF (cc0) 0 1071644672))",
+                      "(set (reg:SF 34 $f2) (mult:SF (reg:SF 44 $f12) (reg:SF 38 $f6))) "
+                      "(expr_list:REG_DEAD (reg:SF 38 $f6) (nil))",
+                      "(set (reg:SF 38 $f6) (mem:SF (plus:SI (reg:SI 29 sp) (const_int 36))))",
+                      "(set (reg:SF 32 $f0) (plus:SF (reg:SF 32 $f0) (reg:SF 38 $f6))) "
+                      "(expr_list:REG_DEAD (mem:SF (plus:SI (reg:SI 29 sp) (const_int 36))) (nil))",
+                      "(set (reg:SF 38 $f6) (reg:SF 19 s3))",
+                      "(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 32 $f0) (reg:SF 38 $f6)))",
+                      "(use (reg/i:SF 32 $f0))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    const RtlControlFlowGraph lifted = InvertDoCrossJump(cfg, o2_prof);
+    ASSERT_EQ(lifted.rpo_blocks.size(), 1u);
+    EXPECT_EQ(count_substr(lifted.rpo_blocks[0].instructions[3], "REG_DEAD (reg:SF 38 $f6)"), 0)
+        << lifted.FormatSummary();
+  }
+}
+
+TEST_F(InvertDoCrossJumpTest, CallArgGuardPreventsOverUncrossJumpingSharedCallPrefix) {
+  // Mirrors `jump.c:1978` + `SelectSched2SafeSharedPrefixLen`: when a shared
+  // join block starts with a call-bearing prefix (`last_call_idx > 0`) and
+  // neither predecessor feeds any live MIPS ABI call-arg register surviving
+  // into the call, duplicating the prefix requires every predecessor to feed
+  // `shared_insns[0]` directly.
+  auto make_cfg = [](bool b1_feeds_shared_first, bool b1_feeds_call_arg) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kJump2;
+    std::vector<std::string> b1_insns;
+    if (b1_feeds_call_arg) {
+      b1_insns.push_back("(set (reg:SI 4 a0) (const_int 7))");
+    }
+    if (b1_feeds_shared_first) {
+      b1_insns.push_back("(set (reg:SI 16 s0) (const_int 1))");
+    } else {
+      b1_insns.push_back("(set (reg:SI 17 s1) (const_int 1))");
+    }
+    b1_insns.push_back("(set (pc) (label_ref L1))");
+
+    std::vector<std::string> b2_insns;
+    if (b1_feeds_call_arg) {
+      b2_insns.push_back("(set (reg:SI 4 a0) (const_int 8))");
+    }
+    b2_insns.push_back("(set (reg:SI 16 s0) (const_int 2))");
+    cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (pc) (if_then_else (eq:SI (reg:SI 5 a1) (const_int 0)) "
+                      "(label_ref L0) (pc)))",
+                  },
+                  {2, 1}),
+        MakeBlock(1, false, std::move(b1_insns), {3}),
+        MakeBlock(2, true, std::move(b2_insns), {3}),
+        MakeBlock(3, true,
+                  {
+                      "(set (reg:SI 5 a1) (plus:SI (reg:SI 16 s0) (const_int 3)))",
+                      "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"callee\"))) "
+                      "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+                      "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 16 s0)))",
+                      "(use (reg/i:SI 2 v0))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    cfg.rpo_blocks[3].rtl_insns[1].has_explicit_call_fusage = true;
+    cfg.rpo_blocks[3].rtl_insns[1].call_fusage = {
+        RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kSi, 4)),
+    };
+    cfg.sideband.basic_block_live_at_start = {
+        {0, {4, 5, 16}},
+        {1, {4, 16}},
+        {2, {4}},
+        {3, {4, 16}},
+    };
+    return cfg;
+  };
+  const CompilationProfile o1_prof{.optimize_level = 1, .c_flags = {"-O1", "-mips2"}};
+
+  // Positive: neither predecessor supplies a call arg and `B1` does not write
+  // `$s0` read by `shared_insns[0]`, so the call-bearing prefix in `B3` is NOT
+  // duplicated into `B1`/`B2`.
+  {
+    const RtlControlFlowGraph lifted = InvertDoCrossJump(make_cfg(/*b1_feeds_shared_first=*/false,
+                                                                  /*b1_feeds_call_arg=*/false),
+                                                         o1_prof);
+    ASSERT_EQ(lifted.rpo_blocks.size(), 4u);
+    EXPECT_EQ(lifted.rpo_blocks[1].instructions.size(), 2u) << lifted.FormatSummary();
+    EXPECT_EQ(lifted.rpo_blocks[2].instructions.size(), 1u) << lifted.FormatSummary();
+  }
+
+  // Negative: when both predecessors supply `$s0` directly to `shared_insns[0]`,
+  // duplicating the shared prefix is allowed.
+  {
+    const RtlControlFlowGraph lifted = InvertDoCrossJump(make_cfg(/*b1_feeds_shared_first=*/true,
+                                                                  /*b1_feeds_call_arg=*/true),
+                                                         o1_prof);
+    ASSERT_EQ(lifted.rpo_blocks.size(), 4u);
+    EXPECT_GT(lifted.rpo_blocks[1].instructions.size(), 3u) << lifted.FormatSummary();
+  }
+}
+
+TEST_F(InvertDoCrossJumpTest, UnCrossJumpsChainedPureFallthroughAluTail) {
+  // Mirrors `jump.c:1978, 2371-2470` (`UnCrossJumpChainedPureFallthroughStoreTails`):
+  // a single-instruction pure-fallthrough non-copy ALU tail (`s1 = s1 + v0`)
+  // shared by a jump predecessor (`B1`) and a fallthrough predecessor (`B2`)
+  // is un-cross-jumped into `B1` at `-O1` (positive), whereas a tail block
+  // containing a `CALL_INSN` is NOT treated as a pure-fallthrough ALU tail (negative).
+  const CompilationProfile o1_prof{.optimize_level = 1, .c_flags = {"-O1", "-mips2", "-Wa,-g"}};
+  auto make_cfg = [](bool tail_has_call) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kJump2;
+    cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) "
+                      "(label_ref L1) (pc)))",
+                  },
+                  {2, 1}),
+        MakeBlock(1, false,
+                  {
+                      "(set (reg:SI 2 v0) (plus:SI (reg:SI 5 a1) (const_int 3)))",
+                      "(set (pc) (label_ref L2))",
+                  },
+                  {3}),
+        MakeBlock(2, true,
+                  {
+                      "(set (reg:SI 2 v0) (xor:SI (reg:SI 5 a1) (const_int 7)))",
+                  },
+                  {3}),
+        MakeBlock(3, true,
+                  tail_has_call
+                      ? std::vector<std::string>{
+                            "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI "
+                            "(\"helper\"))) (const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+                        }
+                      : std::vector<std::string>{
+                            "(set (reg:SI 17 s1) (plus:SI (reg:SI 17 s1) (reg:SI 2 v0))) "
+                            "(expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+                        },
+                  {4}),
+        MakeBlock(4, true,
+                  {
+                      "(set (reg/i:SI 2 v0) (reg:SI 17 s1))",
+                      "(use (reg/i:SI 2 v0))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    cfg.sideband.basic_block_live_at_start = {
+        {0, {4, 5, 17}}, {1, {5, 17}}, {2, {5, 17}}, {3, {2, 17}}, {4, {17}},
+    };
+    return cfg;
+  };
+
+  // Positive: pure-fallthrough ALU tail `s1 = s1 + v0` is duplicated into `B1`
+  // (and `B3` is merged into its sole remaining fallthrough predecessor `B2`).
+  {
+    const RtlControlFlowGraph cfg = make_cfg(/*tail_has_call=*/false);
+    const RtlControlFlowGraph lifted = InvertDoCrossJump(cfg, o1_prof);
+    ASSERT_EQ(lifted.rpo_blocks.size(), 4u) << lifted.FormatSummary();
+    EXPECT_EQ(lifted.rpo_blocks[1].instructions.size(), 3u) << lifted.FormatSummary();
+    EXPECT_NE(lifted.rpo_blocks[1].instructions[1].find("(set (reg:SI 17 s1) (plus:SI"),
+              std::string::npos)
+        << lifted.FormatSummary();
+    EXPECT_EQ(lifted.rpo_blocks[1].successors, (std::vector<size_t>{3}));
+  }
+
+  // Negative: a tail containing a `CALL_INSN` is not un-cross-jumped by the
+  // pure-fallthrough store/ALU tail pass.
+  {
+    const RtlControlFlowGraph cfg = make_cfg(/*tail_has_call=*/true);
+    const RtlControlFlowGraph lifted = InvertDoCrossJump(cfg, o1_prof);
+    ASSERT_EQ(lifted.rpo_blocks.size(), 5u);
+    EXPECT_EQ(lifted.rpo_blocks[1].instructions.size(), 2u) << lifted.FormatSummary();
+    EXPECT_EQ(lifted.rpo_blocks[1].successors, (std::vector<size_t>{3}));
+  }
+}
+
+TEST_F(InvertDoCrossJumpTest,
+       RestoreJump2ConsumedRegDeadNotesTargetsEarlyclobberDiProdInOperandOrder) {
+  // Mirrors `reload1.c:5599-5665` (`emit_reload_insns`) + `jump.c:452-459` +
+  // `sched.c:2872-2906` (`attach_deaths_insn`): when `sched2` separates an
+  // earlyclobber `adddi3_internal_1` (`t8 = t2 + v0`) from its output-reload
+  // move `(set (reg/i:DI 2 v0) (reg:DI 24 t8))` with an intervening pure reader
+  // of `v0` (`[a2+8] = v0`), `jump2` consumed `(REG_DEAD v0)` from `adddi3` (NOT
+  // the intervening store), and restoring it must place `(REG_DEAD v0)` AFTER
+  // `(REG_DEAD t2)` and BEFORE `(REG_UNUSED a0)`.
+  const CompilationProfile o2_prof{.optimize_level = 2,
+                                   .c_flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"}};
+  auto make_cfg = [](bool is_earlyclobber) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kJump2;
+    const std::string prod_insn =
+        is_earlyclobber ? "(parallel[ (set (reg:DI 24 t8) (plus:DI (reg:DI 10 t2) (reg:DI 2 v0))) "
+                          "(clobber (reg:SI 4 a0)) ] ) (expr_list:REG_DEAD (reg:DI 10 t2) "
+                          "(expr_list:REG_UNUSED (reg:SI 4 a0) (nil)))"
+                        : "(set (reg:DI 24 t8) (xor:DI (reg:DI 10 t2) (reg:DI 2 v0))) "
+                          "(expr_list:REG_DEAD (reg:DI 10 t2) (nil))";
+    cfg.rpo_blocks = {
+        MakeBlock(
+            0, /*has_label=*/false,
+            {
+                "(set (reg:DI 2 v0) (ior:DI (reg:DI 2 v0) (reg:DI 12 t4))) "
+                "(expr_list:REG_DEAD (reg:DI 2 v0) (expr_list:REG_DEAD (reg:DI 12 t4) (nil)))",
+                prod_insn,
+                "(set (mem:DI (plus:SI (reg:SI 6 a2) (const_int 8))) (reg:DI 2 v0))",
+                "(set (reg/i:DI 2 v0) (reg:DI 24 t8))",
+                "(use (reg/i:DI 2 v0))",
+            },
+            {}),
+    };
+    cfg.sideband.basic_block_live_at_start = {{0, {2, 3, 6, 10, 11, 12, 13}}};
+    return cfg;
+  };
+
+  // Positive: earlyclobber `adddi3_internal_1` receives `(REG_DEAD (reg:DI 2 v0))`
+  // after `(REG_DEAD (reg:DI 10 t2))` and before `(REG_UNUSED (reg:SI 4 a0))`;
+  // the intervening store receives NO `(REG_DEAD v0)`.
+  {
+    const RtlControlFlowGraph lifted =
+        InvertDoCrossJump(make_cfg(/*is_earlyclobber=*/true), o2_prof);
+    const std::string& prod_str = lifted.rpo_blocks[0].instructions[1];
+    const std::string& store_str = lifted.rpo_blocks[0].instructions[2];
+    const size_t t2_pos = prod_str.find("REG_DEAD (reg:DI 10 t2)");
+    const size_t v0_pos = prod_str.find("REG_DEAD (reg:DI 2 v0)");
+    const size_t unused_pos = prod_str.find("REG_UNUSED (reg:SI 4 a0)");
+    ASSERT_NE(t2_pos, std::string::npos) << prod_str;
+    ASSERT_NE(v0_pos, std::string::npos) << prod_str;
+    ASSERT_NE(unused_pos, std::string::npos) << prod_str;
+    EXPECT_LT(t2_pos, v0_pos) << prod_str;
+    EXPECT_LT(v0_pos, unused_pos) << prod_str;
+    EXPECT_EQ(store_str.find("REG_DEAD (reg:DI 2 v0)"), std::string::npos) << store_str;
+  }
+
+  // Negative: plain non-earlyclobber `xor:DI` restores `(REG_DEAD v0)` onto the
+  // intervening store instead.
+  {
+    const RtlControlFlowGraph lifted =
+        InvertDoCrossJump(make_cfg(/*is_earlyclobber=*/false), o2_prof);
+    EXPECT_EQ(lifted.rpo_blocks[0].instructions[1].find("REG_DEAD (reg:DI 2 v0)"),
+              std::string::npos)
+        << lifted.rpo_blocks[0].instructions[1];
+    EXPECT_NE(lifted.rpo_blocks[0].instructions[2].find("REG_DEAD (reg:DI 2 v0)"),
+              std::string::npos)
+        << lifted.rpo_blocks[0].instructions[2];
+  }
+}
+
 class DoCrossJumpCorpusTest : public ::testing::TestWithParam<RoundTripTestCase> {
  protected:
   static void SetUpTestSuite() {

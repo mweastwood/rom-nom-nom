@@ -1,6 +1,8 @@
 #ifndef ROM_NOM_NOM_LIFTER_POST_RELOAD_NOOP_MOVES_H_
 #define ROM_NOM_NOM_LIFTER_POST_RELOAD_NOOP_MOVES_H_
 
+#include <vector>
+
 #include "core/rtl_cfg.h"
 
 namespace rom_nom_nom::lifter {
@@ -22,6 +24,15 @@ void RestoreSched2DeletedNoopMoves(RtlControlFlowGraph* cfg, const CompilationPr
 // blocks and pre-call argument self-moves in non-entry blocks.
 void RestoreSched2PreScheduleDeletedNoopMoves(RtlControlFlowGraph* cfg,
                                               const CompilationProfile& profile);
+
+// Read-only query returning the hard-register numbers of entry-block (`B0`)
+// incoming ABI parameter self-moves `(set (reg:M hr) (reg:M hr))` that
+// `RestoreJump2DeletedNoopMoves` / `RestoreSched2DeletedNoopMoves` /
+// `RestoreSched2PreScheduleDeletedNoopMoves` will restore for `cfg` under
+// `profile`. Used by Stage 1 and Stage 3 `sched1` projection so `reg_n_sets`
+// stays 100% aligned with Stage 4/5 `assign_parms` pseudo recovery.
+std::vector<int> PredictRestoredEntryArgSelfMoveRegs(const RtlControlFlowGraph& cfg,
+                                                     const CompilationProfile& profile);
 
 }  // namespace rom_nom_nom::lifter
 

@@ -2148,6 +2148,1990 @@ TEST_F(
   EXPECT_TRUE(spill_res.matches) << spill_res.diff_detail;
 }
 
+TEST_F(InvertAlterRegTest, OddFpRegsNotAllocatableUnderMfp32VsMfp64AndDyingLocalIntoSpillSlot) {
+  // 1. `config/mips/mips.c:3448` (`HARD_REGNO_MODE_OK`): on `-mfp32`, odd FP
+  //    registers (`$f1 = 33`, `$f3 = 35`, ...) are never valid for `SFmode`,
+  //    so an `SFmode` local web allocated to `$f2 = 34` while `$f0 = 32` is
+  //    busy must remain lifted as a pseudo (`reg_renumber == 34`) rather than
+  //    being falsely demoted due to free odd `$f1`. Under `-mfp64`, odd `$f1`
+  //    IS allocatable, so `$f2` requires local conflict resolution.
+  RtlControlFlowGraph sf_cfg;
+  sf_cfg.pass = RtlPassKind::kGreg;
+  sf_cfg.rpo_blocks.push_back(RtlBasicBlock{
+      .id = 0,
+      .instructions =
+          {
+              "(set (reg:SF 32 $f0) (mem:SF (reg:SI 4 a0)))",
+              "(set (reg:SF 34 $f2) (mem:SF (plus:SI (reg:SI 4 a0) (const_int 4)))) "
+              "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+              "(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 32 $f0) (reg:SF 34 $f2))) "
+              "(expr_list:REG_DEAD (reg:SF 32 $f0) (expr_list:REG_DEAD (reg:SF 34 $f2) (nil)))",
+              "(use (reg/i:SF 32 $f0))",
+          },
+  });
+  SyncAllBlocks(&sf_cfg);
+
+  const CompilationProfile mfp32_prof{2, {"-O2", "-mips1", "-mfp32"}, {}};
+  const RtlControlFlowGraph lifted_32 = InvertAlterReg(sf_cfg, mfp32_prof, 72);
+  bool found_f2_pseudo_32 = false;
+  for (const auto& [pseudo, hr] : lifted_32.sideband.reg_renumber) {
+    if (hr == 34) {
+      found_f2_pseudo_32 = true;
+    }
+  }
+  EXPECT_TRUE(found_f2_pseudo_32) << "Expected $f2 SFmode web to stay lifted under -mfp32:\n"
+                                  << lifted_32.FormatSummary();
+
+  const CompilationProfile mfp64_prof{2, {"-O2", "-mips3", "-mfp64"}, {}};
+  const RtlControlFlowGraph lifted_64 = InvertAlterReg(sf_cfg, mfp64_prof, 72);
+  bool found_f2_pseudo_64 = false;
+  for (const auto& [pseudo, hr] : lifted_64.sideband.reg_renumber) {
+    if (hr == 34) {
+      found_f2_pseudo_64 = true;
+    }
+  }
+  EXPECT_FALSE(found_f2_pseudo_64) << "Expected $f2 SFmode web to resolve conflict with free $f1 "
+                                      "under -mfp64:\n"
+                                   << lifted_64.FormatSummary();
+
+  // 2. `local-alloc.c:1722` (`combine_regs`): when local `$f2 = 34` dies into
+  //    a computation stored immediately to a reload spill slot (`20($sp)`),
+  //    `InvertReload` folds the spill into a spilled pseudo and `combine_regs`
+  //    spills `$f2` during `block_alloc`, leaving `$f2` free for overlapping
+  //    local `$f4 = 36`. `InvertAlterReg` must therefore resolve `$f4` when
+  //    the spill slot is reloaded, while keeping `$f4` lifted when no spill
+  //    slot exists.
+  auto build_spill_overlap_cfg = [](bool with_spill_reload) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.sideband.frame_size_bytes = 32;
+    cfg.sideband.saved_gpr_regnos = {31};
+    std::vector<std::string> insns = {
+        "(set (reg:SF 32 $f0) (mem:SF (reg:SI 4 a0)))",
+        "(set (reg:SF 34 $f2) (mem:SF (plus:SI (reg:SI 4 a0) (const_int 4))))",
+        "(set (reg:SF 36 $f4) (mem:SF (plus:SI (reg:SI 4 a0) (const_int 8)))) "
+        "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+        "(set (reg:SF 34 $f2) (minus:SF (reg:SF 34 $f2) (reg:SF 32 $f0))) "
+        "(expr_list:REG_DEAD (reg:SF 34 $f2) (nil))",
+    };
+    if (with_spill_reload) {
+      insns.push_back(
+          "(set (mem:SF (plus:SI (reg:SI 29 sp) (const_int 20))) (reg:SF 34 $f2)) "
+          "(expr_list:REG_DEAD (reg:SF 34 $f2) (nil))");
+    } else {
+      insns.push_back(
+          "(set (mem:SF (reg:SI 5 a1)) (reg:SF 34 $f2)) "
+          "(expr_list:REG_DEAD (reg:SF 34 $f2) (nil))");
+    }
+    insns.push_back(
+        "(set (reg:SF 32 $f0) (plus:SF (reg:SF 32 $f0) (reg:SF 36 $f4))) "
+        "(expr_list:REG_DEAD (reg:SF 32 $f0) (expr_list:REG_DEAD (reg:SF 36 $f4) "
+        "(nil)))");
+    if (with_spill_reload) {
+      insns.push_back(
+          "(parallel[ (set (reg:SF 32 $f0) (call (mem:SI (symbol_ref:SI (\"callee\"))) "
+          "(const_int 16))) (clobber (reg:SI 31 ra)) ] )");
+      insns.push_back("(set (reg:SF 38 $f6) (mem:SF (plus:SI (reg:SI 29 sp) (const_int 20))))");
+      insns.push_back(
+          "(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 32 $f0) (reg:SF 38 $f6))) "
+          "(expr_list:REG_DEAD (reg:SF 32 $f0) (expr_list:REG_DEAD (reg:SF 38 $f6) "
+          "(nil)))");
+    } else {
+      insns.push_back(
+          "(set (reg/i:SF 32 $f0) (reg:SF 32 $f0)) "
+          "(expr_list:REG_DEAD (reg:SF 32 $f0) (nil))");
+    }
+    insns.push_back("(use (reg/i:SF 32 $f0))");
+    cfg.rpo_blocks.push_back(RtlBasicBlock{.id = 0, .instructions = std::move(insns)});
+    SyncAllBlocks(&cfg);
+    if (with_spill_reload) {
+      cfg.rpo_blocks[0].rtl_insns[6].has_explicit_call_fusage = true;
+    }
+    return cfg;
+  };
+
+  const RtlControlFlowGraph lifted_with_spill =
+      InvertAlterReg(build_spill_overlap_cfg(/*with_spill_reload=*/true), mfp32_prof, 72);
+  bool f4_lifted_with_spill = false;
+  for (const auto& [pseudo, hr] : lifted_with_spill.sideband.reg_renumber) {
+    if (hr == 36) {
+      f4_lifted_with_spill = true;
+    }
+  }
+  EXPECT_FALSE(f4_lifted_with_spill) << "Expected $f4 local to resolve conflict when overlapping "
+                                        "$f2 dies into reload spill slot:\n"
+                                     << lifted_with_spill.FormatSummary();
+
+  const RtlControlFlowGraph lifted_no_spill =
+      InvertAlterReg(build_spill_overlap_cfg(/*with_spill_reload=*/false), mfp32_prof, 72);
+  bool f4_lifted_no_spill = false;
+  for (const auto& [pseudo, hr] : lifted_no_spill.sideband.reg_renumber) {
+    if (hr == 36) {
+      f4_lifted_no_spill = true;
+    }
+  }
+  EXPECT_TRUE(f4_lifted_no_spill)
+      << "Expected $f4 local to stay lifted when overlapping $f2 is not spilled:\n"
+      << lifted_no_spill.FormatSummary();
+}
+
+TEST_F(InvertAlterRegTest,
+       LocalResolutionIgnoresReloadScratchesTiesModesAndAvoidsSelfDeadThiefDemotion) {
+  const CompilationProfile o2_prof{2, {"-O2", "-mips1", "-mfp32"}, {}};
+
+  // 1. `toplev.c:3098-3142`, `local-alloc.c:1798, 1824`, `reload1.c:663`:
+  //    A single-use GPR-to-FPR input reload scratch (`$f10 = 42` copying `a3`)
+  //    is emitted by `reload()` after `local_alloc()` and must not inject a
+  //    bogus `qty_phys_sugg` (`42`) into its consumer `$f4 = 36` during local
+  //    resolution.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(set (reg:SF 32 $f0) (mem:SF (reg:SI 4 a0)))",
+                "(set (reg:SF 34 $f2) (mem:SF (plus:SI (reg:SI 4 a0) (const_int 4))))",
+                "(set (reg:SF 42 $f10) (reg:SF 7 a3)) (expr_list:REG_DEAD (reg:SF 7 a3) (nil))",
+                "(set (reg:SF 36 $f4) (mult:SF (reg:SF 42 $f10) (reg:SF 34 $f2)))",
+                "(set (mem:SF (reg:SI 4 a0)) (reg:SF 32 $f0)) "
+                "(expr_list:REG_DEAD (reg:SF 32 $f0) (nil))",
+                "(set (mem:SF (plus:SI (reg:SI 4 a0) (const_int 4))) (reg:SF 34 $f2)) "
+                "(expr_list:REG_DEAD (reg:SF 34 $f2) (nil))",
+                "(set (mem:SF (plus:SI (reg:SI 4 a0) (const_int 8))) (reg:SF 36 $f4)) "
+                "(expr_list:REG_DEAD (reg:SI 4 a0) (expr_list:REG_DEAD (reg:SF 36 $f4) (nil)))",
+            },
+    });
+    SyncAllBlocks(&cfg);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    bool f4_lifted = false;
+    bool f10_lifted = false;
+    for (const auto& [pseudo, hr] : lifted.sideband.reg_renumber) {
+      if (hr == 36) {
+        f4_lifted = true;
+      }
+      if (hr == 42) {
+        f10_lifted = true;
+      }
+    }
+    EXPECT_TRUE(f4_lifted) << "Expected $f4 consumer of GPR->FPR reload scratch to stay lifted:\n"
+                           << lifted.FormatSummary();
+    EXPECT_FALSE(f10_lifted) << "Expected GPR->FPR reload scratch $f10 to be demoted:\n"
+                             << lifted.FormatSummary();
+  }
+
+  // 2. `local-alloc.c:1750-1884` (`combine_regs`): a `QImode` local pseudo in
+  //    `2 v0` dying via `(subreg:SI (reg:QI 2 v0) 0)` into chained `SImode`
+  //    local pseudos in `2 v0` combines legally (`MODES_TIEABLE_P(QI, SI)` and
+  //    `hd == hs == 2`) and must not be marked `false_pseudo_combine`.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(set (reg:QI 2 v0) (mem:QI (reg:SI 4 a0)))",
+                "(set (reg:SI 2 v0) (and:SI (subreg:SI (reg:QI 2 v0) 0) (const_int 15))) "
+                "(expr_list:REG_DEAD (reg:QI 2 v0) (nil))",
+                "(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 2))) "
+                "(expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+                "(set (mem:SI (reg:SI 4 a0)) (reg:SI 2 v0)) "
+                "(expr_list:REG_DEAD (reg:SI 4 a0) (expr_list:REG_DEAD (reg:SI 2 v0) (nil)))",
+            },
+    });
+    SyncAllBlocks(&cfg);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    int v0_pseudos = 0;
+    for (const auto& [pseudo, hr] : lifted.sideband.reg_renumber) {
+      if (hr == 2) {
+        ++v0_pseudos;
+      }
+    }
+    EXPECT_EQ(v0_pseudos, 3)
+        << "Expected QI->SI->SI tieable chain in v0 to stay fully lifted as 3 pseudos:\n"
+        << lifted.FormatSummary();
+    ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 4);
+    EXPECT_EQ(lifted.rpo_blocks[0].instructions[1].find("2 v0"), std::string::npos)
+        << lifted.FormatSummary();
+    EXPECT_EQ(lifted.rpo_blocks[0].instructions[2].find("2 v0"), std::string::npos)
+        << lifted.FormatSummary();
+  }
+
+  // 3. `flow.c:2507-2550` / `sched.c:2872` / `local-alloc.c:1633`: when
+  //    `g_thief` (`3 v1`, `raw_sugg = {2 v0}`) steals `2 v0` from `g_victim`
+  //    (`2 v0`, `raw_sugg = {7 a3, 2 v0}`), and demoting `g_victim` would create
+  //    an illegal self-dead `REG_DEAD (reg:SI 2 v0)` on `(set (reg/i:SI 2 v0)
+  //    ...)`, resolve `g_thief` (`3 v1`) instead so `g_victim` stays lifted.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(set (reg:SI 3 v1) (mem:SI (reg:SI 4 a0))) "
+                "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                "(set (reg:SI 2 v0) (ashift:SI (reg:SI 7 a3) (const_int 3))) "
+                "(expr_list:REG_DEAD (reg:SI 7 a3) (nil))",
+                "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 3 v1) (reg:SI 2 v0))) "
+                "(expr_list:REG_DEAD (reg:SI 3 v1) (expr_list:REG_DEAD (reg:SI 2 v0) (nil)))",
+                "(use (reg/i:SI 2 v0))",
+            },
+    });
+    SyncAllBlocks(&cfg);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    bool v0_lifted = false;
+    bool v1_lifted = false;
+    for (const auto& [pseudo, hr] : lifted.sideband.reg_renumber) {
+      if (hr == 2) {
+        v0_lifted = true;
+      }
+      if (hr == 3) {
+        v1_lifted = true;
+      }
+    }
+    EXPECT_TRUE(v0_lifted)
+        << "Expected victim v0 to stay lifted to avoid self-dead REG_DEAD on reg/i v0:\n"
+        << lifted.FormatSummary();
+    EXPECT_FALSE(v1_lifted) << "Expected thief v1 to be demoted instead of victim v0:\n"
+                            << lifted.FormatSummary();
+    ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 4);
+    EXPECT_EQ(lifted.rpo_blocks[0].instructions[2].find("REG_DEAD (reg:SI 2 v0)"),
+              std::string::npos)
+        << "Unexpected self-dead REG_DEAD (reg:SI 2 v0) on exit insn:\n"
+        << lifted.FormatSummary();
+  }
+}
+
+TEST_F(InvertAlterRegTest, Case3QtySuggCompareLiteralIndexBugResolvesMiddleGroup) {
+  const CompilationProfile o2_prof{2, {"-O2", "-mips2", "-Wa,-g"}, {}};
+  hooks_.ApplyCompilationProfile(o2_prof);
+
+  // Positive case (`local-alloc.c:1442-1454` `case 3:` literal `qty_sugg_compare(0, 1)`
+  // double-swap bug): 3 overlapping local webs:
+  //   - g0 (`hr = 3 v1`, 2 refs): reads dying `$2 v0` -> `raw_sugg = {2 v0}`
+  //   - g1 (`hr = 6 a2`, 2 refs): no dying hard-reg read -> `raw_sugg = {}`
+  //   - g2 (`hr = 2 v0`, 3 refs): copies to `(reg/i:SI 2 v0)` -> `raw_copy_sugg = {2 v0}`
+  // Because `next_qty == 3`, GCC 2.7.2 swaps `[0,1,2] -> [1,0,2] -> [0,1,2]`, so
+  // `g0` runs before `g2` and steals `2 v0`. Demoting `g1` (`hr = 6 a2`) drops
+  // `next_qty` to 2 (`case 2:`), so `g2` (3 refs) runs first and gets `2 v0`,
+  // while `g0` runs second and gets `3 v1`.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"callee\"))) "
+                "(const_int 0))) (clobber (reg:SI 31 ra)) ] )",
+                "(set (reg:SI 3 v1) (plus:SI (reg:SI 2 v0) (const_int 1))) "
+                "(expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+                "(set (reg:SI 6 a2) (mem:SI (reg:SI 16 s0)))",
+                "(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 16 s0) (const_int 4))))",
+                "(set (mem:SI (plus:SI (reg:SI 16 s0) (const_int 8))) (reg:SI 2 v0))",
+                "(set (mem:SI (plus:SI (reg:SI 16 s0) (const_int 12))) (reg:SI 3 v1)) "
+                "(expr_list:REG_DEAD (reg:SI 3 v1) (nil))",
+                "(set (mem:SI (plus:SI (reg:SI 16 s0) (const_int 16))) (reg:SI 6 a2)) "
+                "(expr_list:REG_DEAD (reg:SI 16 s0) (expr_list:REG_DEAD (reg:SI 6 a2) (nil)))",
+                "(set (reg/i:SI 2 v0) (reg:SI 2 v0)) (expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+                "(use (reg/i:SI 2 v0))",
+            },
+    });
+    SyncAllBlocks(&cfg);
+    cfg.rpo_blocks[0].rtl_insns[0].has_explicit_call_fusage = true;
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    bool v0_lifted = false;
+    bool v1_lifted = false;
+    bool a2_lifted = false;
+    for (const auto& [pseudo, hr] : lifted.sideband.reg_renumber) {
+      if (hr == 2) v0_lifted = true;
+      if (hr == 3) v1_lifted = true;
+      if (hr == 6) a2_lifted = true;
+    }
+    EXPECT_TRUE(v0_lifted) << lifted.FormatSummary();
+    EXPECT_TRUE(v1_lifted) << lifted.FormatSummary();
+    EXPECT_FALSE(a2_lifted)
+        << "Expected middle unsuggested group g1 (6 a2) to be demoted under case 3 bug:\n"
+        << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+
+  // Negative contrast: when `g0` (`hr = 5 a1`) carries a raw suggestion `{5 a1}`
+  // that does NOT overlap `g2.target_hr` (`2 v0`), all 3 local webs stay lifted
+  // as pseudos and pass `VerifyAlterRegRightInverse`.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(set (reg:SI 5 a1) (plus:SI (reg:SI 5 a1) (const_int 1))) "
+                "(expr_list:REG_DEAD (reg:SI 5 a1) (nil))",
+                "(set (reg:SI 3 v1) (mem:SI (reg:SI 4 a0)))",
+                "(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 4 a0) (const_int 4))))",
+                "(set (mem:SI (plus:SI (reg:SI 4 a0) (const_int 8))) (reg:SI 2 v0))",
+                "(set (mem:SI (plus:SI (reg:SI 4 a0) (const_int 12))) (reg:SI 5 a1)) "
+                "(expr_list:REG_DEAD (reg:SI 5 a1) (nil))",
+                "(set (mem:SI (plus:SI (reg:SI 4 a0) (const_int 16))) (reg:SI 3 v1)) "
+                "(expr_list:REG_DEAD (reg:SI 4 a0) (expr_list:REG_DEAD (reg:SI 3 v1) (nil)))",
+                "(set (reg/i:SI 2 v0) (reg:SI 2 v0)) (expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+                "(use (reg/i:SI 2 v0))",
+            },
+    });
+    SyncAllBlocks(&cfg);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    bool v0_lifted = false;
+    bool v1_lifted = false;
+    bool a1_lifted = false;
+    for (const auto& [pseudo, hr] : lifted.sideband.reg_renumber) {
+      if (hr == 2) v0_lifted = true;
+      if (hr == 3) v1_lifted = true;
+      if (hr == 5) a1_lifted = true;
+    }
+    EXPECT_TRUE(v0_lifted) << lifted.FormatSummary();
+    EXPECT_TRUE(v1_lifted) << lifted.FormatSummary();
+    EXPECT_TRUE(a1_lifted) << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+}
+
+TEST_F(InvertAlterRegTest, LocalResolutionDemotesNonEquivNonParallelQuantityMember) {
+  const CompilationProfile o2_prof{2, {"-O2", "-mips2", "-mcpu=r4000"}, {}};
+  hooks_.ApplyCompilationProfile(o2_prof);
+
+  // (a) Single-block local quantity `{p72, p73}` targeting `$3` while `$2` is
+  //     free, where `p73` carries `REG_EQUIV (mem ...)` (`local-alloc.c:990-991,
+  //     1020`). `SelectLocalResolutionDemoteMember` demotes plain non-`REG_EQUIV`
+  //     producer `p72` to hard `$3`, which in turn gives `p73` a dying `$3`
+  //     source (`just_try_suggested`) so the `REG_EQUIV` tail stays lifted as a
+  //     pseudo (`reg_renumber -> 3`).
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(set (reg:SI 3 v1) (plus:SI (reg:SI 4 a0) (const_int 7)))",
+                "(set (reg:SI 3 v1) (plus:SI (reg:SI 3 v1) (const_int 1))) "
+                "(expr_list:REG_DEAD (reg:SI 3 v1) "
+                "(expr_list:REG_EQUIV (mem:SI (reg:SI 4 a0)) (nil)))",
+                "(set (mem:SI (reg:SI 4 a0)) (reg:SI 3 v1)) "
+                "(expr_list:REG_DEAD (reg:SI 4 a0) (expr_list:REG_DEAD (reg:SI 3 v1) (nil)))",
+                "(set (reg/i:SI 2 v0) (const_int 0))",
+                "(use (reg/i:SI 2 v0))",
+            },
+    });
+    SyncAllBlocks(&cfg);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    EXPECT_NE(lifted.rpo_blocks[0].instructions[0].find("(set (reg:SI 3 v1)"), std::string::npos)
+        << lifted.FormatSummary();
+    EXPECT_EQ(lifted.rpo_blocks[0].instructions[1].find("(set (reg:SI 3 v1)"), std::string::npos)
+        << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+
+  // (b) Contrast: when the producer (`$4`) is a multi-clobber `PARALLEL`
+  //     (`mulsi3_r4000`) combined into a quantity with conflicting `REG_EQUIV`
+  //     tail (`$5`), demoting the `PARALLEL` would reverse `REG_UNUSED` scratch
+  //     order under `flow.c:mark_set_1`, so it stays lifted as a pseudo while
+  //     the tail (`$5`) is demoted instead!
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(parallel[ (set (reg:SI 4 a0) (mult:SI (reg:SI 4 a0) (reg:SI 6 a2))) "
+                "(clobber (reg:SI 64 hi)) (clobber (reg:SI 65 lo)) "
+                "(clobber (reg:SI 66 accum)) ] ) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                "(set (reg:SI 5 a1) (plus:SI (reg:SI 4 a0) (const_int 1))) "
+                "(expr_list:REG_DEAD (reg:SI 4 a0) "
+                "(expr_list:REG_EQUIV (mem:SI (reg:SI 7 a3)) (nil)))",
+                "(set (mem:SI (reg:SI 7 a3)) (reg:SI 5 a1)) "
+                "(expr_list:REG_DEAD (reg:SI 7 a3) (expr_list:REG_DEAD (reg:SI 5 a1) (nil)))",
+                "(set (reg/i:SI 2 v0) (reg:SI 6 a2)) (expr_list:REG_DEAD (reg:SI 6 a2) (nil))",
+                "(use (reg/i:SI 2 v0))",
+            },
+    });
+    SyncAllBlocks(&cfg);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    EXPECT_EQ(lifted.rpo_blocks[0].instructions[0].find("(set (reg:SI 4 a0)"), std::string::npos)
+        << lifted.FormatSummary();
+    EXPECT_NE(lifted.rpo_blocks[0].instructions[1].find("(set (reg:SI 5 a1)"), std::string::npos)
+        << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+}
+
+TEST_F(InvertAlterRegTest, LocalResolutionAvoidsDemotingMemberCreatingSelfSetRegDead) {
+  const CompilationProfile o2_prof{2, {"-O2", "-mips2", "-mcpu=r4000"}, {}};
+  hooks_.ApplyCompilationProfile(o2_prof);
+
+  // Positive: single-block local quantity `{p72, p73}` targeting `$3` (`v1`)
+  // while `$2` (`v0`) is free, where `p73` dies on `(set (reg/i:SI 3 v1) ...)`
+  // setting hard `$3` (`flow.c:2506-2515`, `sched.c:2872-2906`).
+  // `WouldDemoteCreateSelfSetRegDead` rejects demoting `p73` so
+  // `SelectLocalResolutionDemoteMember` demotes `p72` (`insn[0]`) instead,
+  // keeping `p73` lifted and avoiding a self-setting `REG_DEAD (reg:SI 3 v1)`.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(set (reg:SI 3 v1) (plus:SI (reg:SI 4 a0) (const_int 7))) "
+                "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                "(set (reg:SI 3 v1) (plus:SI (reg:SI 3 v1) (const_int 1))) "
+                "(expr_list:REG_DEAD (reg:SI 3 v1) (nil))",
+                "(set (reg/i:SI 3 v1) (mem:SI (reg:SI 3 v1))) "
+                "(expr_list:REG_DEAD (reg:SI 3 v1) (nil))",
+                "(use (reg/i:SI 3 v1))",
+            },
+    });
+    SyncAllBlocks(&cfg);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 4u);
+    EXPECT_NE(lifted.rpo_blocks[0].instructions[0].find("(set (reg:SI 3 v1)"), std::string::npos)
+        << lifted.FormatSummary();
+    EXPECT_EQ(lifted.rpo_blocks[0].instructions[1].find("(set (reg:SI 3 v1)"), std::string::npos)
+        << lifted.FormatSummary();
+    EXPECT_EQ(lifted.rpo_blocks[0].instructions[2].find("REG_DEAD (reg:SI 3 v1)"),
+              std::string::npos)
+        << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+
+  // Negative contrast: when `insn[2]` sets disjoint hard register `(reg/i:SI 2 v0)`,
+  // demoting `p73` does NOT create a self-setting `REG_DEAD`, so
+  // `SelectLocalResolutionDemoteMember` demotes the tail `p73` (`insn[1]`) while
+  // keeping `p72` (`insn[0]`) lifted as a pseudo.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(set (reg:SI 3 v1) (plus:SI (reg:SI 4 a0) (const_int 7))) "
+                "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                "(set (reg:SI 3 v1) (plus:SI (reg:SI 3 v1) (const_int 1))) "
+                "(expr_list:REG_DEAD (reg:SI 3 v1) (nil))",
+                "(set (reg/i:SI 2 v0) (mem:SI (reg:SI 3 v1))) "
+                "(expr_list:REG_DEAD (reg:SI 3 v1) (nil))",
+                "(use (reg/i:SI 2 v0))",
+            },
+    });
+    SyncAllBlocks(&cfg);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 4u);
+    EXPECT_EQ(lifted.rpo_blocks[0].instructions[0].find("(set (reg:SI 3 v1)"), std::string::npos)
+        << lifted.FormatSummary();
+    EXPECT_NE(lifted.rpo_blocks[0].instructions[1].find("(set (reg:SI 3 v1)"), std::string::npos)
+        << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+}
+
+TEST_F(InvertAlterRegTest,
+       LocalResolutionPreservesEarlyclobberFoldTargetAndDemotesLowerOrderBlocker) {
+  const CompilationProfile o2_prof{2, {"-O2", "-mips2", "-mcpu=r4000"}, {}};
+  hooks_.ApplyCompilationProfile(o2_prof);
+
+  // Positive (`reload1.c:5641`, `mips.md:3722-3896`, `flow.c:2505-2520`,
+  // `local-alloc.c:1512, 1598`): when a short `$a0` (`4`) local web is defined
+  // by an `"=&d"` earlyclobber output reload `(set (reg:DI 4 a0) (reg:DI 10 t2))`
+  // whose preceding `ashift:DI` `PARALLEL` carries `REG_DEAD (reg:DI 4 a0)`,
+  // `WouldEarlyclobberFoldCreateSelfSetRegDead` forbids demoting `$a0` and
+  // `TryDemoteOverlappingLowerOrderBlocker` pins the overlapping longer `$v0`
+  // (`2`) blocker (`insn[0]`) instead so `local_alloc` still assigns `$a0`.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(parallel[ (set (reg:DI 2 v0) (ashift:DI (reg:DI 4 a0) (const_int 37))) "
+                "(clobber (reg:SI 7 a3)) ] ) (expr_list:REG_UNUSED (reg:SI 7 a3) (nil))",
+                "(parallel[ (set (reg:DI 8 t0) (ashift:DI (reg:DI 4 a0) (const_int 5))) "
+                "(clobber (reg:SI 9 t1)) ] ) (expr_list:REG_UNUSED (reg:SI 9 t1) (nil))",
+                "(set (reg:SI 6 a2) (and:SI (reg:SI 6 a2) (const_int 63)))",
+                "(parallel[ (set (reg:DI 10 t2) (ashift:DI (reg:DI 4 a0) (reg:SI 6 a2))) "
+                "(clobber (reg:SI 7 a3)) ] ) (expr_list:REG_DEAD (reg:DI 4 a0) "
+                "(expr_list:REG_DEAD (reg:SI 6 a2) (expr_list:REG_UNUSED (reg:SI 7 a3) (nil))))",
+                "(set (reg:DI 4 a0) (reg:DI 10 t2))",
+                "(set (reg:DI 2 v0) (xor:DI (reg:DI 2 v0) (reg:DI 8 t0))) "
+                "(expr_list:REG_DEAD (reg:DI 2 v0) (expr_list:REG_DEAD (reg:DI 8 t0) (nil)))",
+                "(parallel[ (set (reg/i:DI 2 v0) (plus:DI (reg:DI 2 v0) (reg:DI 4 a0))) "
+                "(clobber (reg:SI 6 a2)) ] ) (expr_list:REG_DEAD (reg:DI 2 v0) "
+                "(expr_list:REG_DEAD (reg:DI 4 a0) (expr_list:REG_UNUSED (reg:SI 6 a2) (nil))))",
+                "(use (reg/i:DI 2 v0))",
+            },
+    });
+    SyncAllBlocks(&cfg);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 8u);
+    EXPECT_NE(lifted.rpo_blocks[0].instructions[0].find("(set (reg:DI 2 v0)"), std::string::npos)
+        << lifted.FormatSummary();
+    EXPECT_EQ(lifted.rpo_blocks[0].instructions[4].find("(set (reg:DI 4 a0)"), std::string::npos)
+        << lifted.FormatSummary();
+    EXPECT_EQ(lifted.rpo_blocks[0].instructions[5].find("(set (reg:DI 2 v0)"), std::string::npos)
+        << lifted.FormatSummary();
+    bool has_lifted_a0 = false;
+    for (const auto& [p, hr] : lifted.sideband.reg_renumber) {
+      if (p >= 72 && hr == 4) {
+        has_lifted_a0 = true;
+      }
+    }
+    EXPECT_TRUE(has_lifted_a0) << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+
+  // Negative contrast: when the short `$a0` web is defined by a plain op whose
+  // dying input is a disjoint register (`$s0`), demoting `$a0` creates no
+  // self-setting `REG_DEAD`, so `$a0` is demoted directly and `$v0` (`insn[0]`)
+  // remains lifted as a pseudo.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(parallel[ (set (reg:DI 2 v0) (ashift:DI (reg:DI 4 a0) (const_int 37))) "
+                "(clobber (reg:SI 7 a3)) ] ) (expr_list:REG_UNUSED (reg:SI 7 a3) (nil))",
+                "(parallel[ (set (reg:DI 8 t0) (ashift:DI (reg:DI 4 a0) (const_int 5))) "
+                "(clobber (reg:SI 9 t1)) ] ) (expr_list:REG_DEAD (reg:DI 4 a0) "
+                "(expr_list:REG_UNUSED (reg:SI 9 t1) (nil)))",
+                "(set (reg:DI 4 a0) (xor:DI (reg:DI 16 s0) (reg:DI 8 t0))) "
+                "(expr_list:REG_DEAD (reg:DI 16 s0) (nil))",
+                "(set (reg:DI 2 v0) (xor:DI (reg:DI 2 v0) (reg:DI 8 t0))) "
+                "(expr_list:REG_DEAD (reg:DI 2 v0) (expr_list:REG_DEAD (reg:DI 8 t0) (nil)))",
+                "(parallel[ (set (reg/i:DI 2 v0) (plus:DI (reg:DI 2 v0) (reg:DI 4 a0))) "
+                "(clobber (reg:SI 6 a2)) ] ) (expr_list:REG_DEAD (reg:DI 2 v0) "
+                "(expr_list:REG_DEAD (reg:DI 4 a0) (expr_list:REG_UNUSED (reg:SI 6 a2) (nil))))",
+                "(use (reg/i:DI 2 v0))",
+            },
+    });
+    SyncAllBlocks(&cfg);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 6u);
+    EXPECT_EQ(lifted.rpo_blocks[0].instructions[0].find("(set (reg:DI 2 v0)"), std::string::npos)
+        << lifted.FormatSummary();
+    EXPECT_NE(lifted.rpo_blocks[0].instructions[2].find("(set (reg:DI 4 a0)"), std::string::npos)
+        << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+}
+
+TEST_F(InvertAlterRegTest, LocalResolutionNoConflictLibcallAndDownstreamSuggGuard) {
+  const CompilationProfile o2_prof{2, {"-O2", "-mips2", "-mcpu=r4000"}, {}};
+  hooks_.ApplyCompilationProfile(o2_prof);
+
+  // 1. Positive (`local-alloc.c:1317-1352, 2282-2315` `no_conflict_p` +
+  //    `combine_regs`): a `REG_LIBCALL` `(clobber (reg:DI 4 a0))` paired with
+  //    `REG_NO_CONFLICT` subword writes and a closing `REG_RETVAL` +
+  //    `REG_EQUAL (sign_extend:DI (reg:SI 4 a0))` unions the `SI` input pseudo
+  //    and `DI` output pseudo into one `LocalQtyGroup` so both stay lifted onto
+  //    hard reg `4 a0` without false conflict demotion.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(set (reg:SI 4 a0) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                "(set (reg:SI 2 v0) (plus:SI (reg:SI 4 a0) (const_int 1)))",
+                "(clobber (reg:DI 4 a0)) (insn_list:REG_LIBCALL (nil))",
+                "(set (subreg:SI (reg:DI 4 a0) 1) (reg:SI 4 a0)) "
+                "(expr_list:REG_NO_CONFLICT (reg:SI 4 a0) (nil))",
+                "(set (subreg:SI (reg:DI 4 a0) 0) (ashiftrt:SI (reg:SI 4 a0) (const_int 31))) "
+                "(expr_list:REG_DEAD (reg:SI 4 a0) (expr_list:REG_NO_CONFLICT (reg:SI 4 a0) "
+                "(nil)))",
+                "(set (reg:DI 4 a0) (reg:DI 4 a0)) "
+                "(insn_list:REG_RETVAL "
+                "(expr_list:REG_EQUAL (sign_extend:DI (reg:SI 4 a0)) (nil)))",
+                "(set (mem:DI (reg:SI 6 a2)) (reg:DI 4 a0)) "
+                "(expr_list:REG_DEAD (reg:SI 6 a2) (expr_list:REG_DEAD (reg:DI 4 a0) (nil)))",
+                "(set (reg/i:SI 2 v0) (reg:SI 2 v0)) (expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+                "(use (reg/i:SI 2 v0))",
+            },
+    });
+    SyncAllBlocks(&cfg);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    int a0_pseudos = 0;
+    for (const auto& [p, hr] : lifted.sideband.reg_renumber) {
+      if (p >= 72 && hr == 4) {
+        ++a0_pseudos;
+      }
+    }
+    EXPECT_GE(a0_pseudos, 2) << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+
+  // 2. Positive (`local-alloc.c:1798, 1855`, `flow.c:2505-2520`): when a
+  //    `false_pseudo_combine(src_p, cand_p)` target (`2 v0`) cannot be demoted
+  //    due to Case-2 self-setting `REG_DEAD` on `(set (reg/i:SI 2 v0) ...)`,
+  //    `TryDemoteFalseCombineSourceOrLowerOrderBlocker` breaks the tie by
+  //    demoting the dying source `src_p` (`6 a2`) instead, keeping `cand_p`
+  //    (`2 v0`) lifted without emitting self-setting `REG_DEAD (reg:SI 2 v0)`.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(set (reg:SI 6 a2) (mem:SI (reg:SI 4 a0)))",
+                "(set (reg:SI 2 v0) (plus:SI (reg:SI 6 a2) (const_int 1))) "
+                "(expr_list:REG_DEAD (reg:SI 6 a2) (nil))",
+                "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 4 a0))) "
+                "(expr_list:REG_DEAD (reg:SI 2 v0) (expr_list:REG_DEAD (reg:SI 4 a0) (nil)))",
+                "(use (reg/i:SI 2 v0))",
+            },
+    });
+    SyncAllBlocks(&cfg);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 4u);
+    EXPECT_NE(lifted.rpo_blocks[0].instructions[0].find("(set (reg:SI 6 a2)"), std::string::npos)
+        << lifted.FormatSummary();
+    EXPECT_EQ(lifted.rpo_blocks[0].instructions[2].find("REG_DEAD (reg:SI 2 v0)"),
+              std::string::npos)
+        << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+
+  // 3. Positive (`local-alloc.c:1266-1300` `poisons_downstream_sugg_member`):
+  //    when upstream `p_up` (`$v1`) dies at downstream `p_dn`'s def (`$v1`)
+  //    which also carries a conflicting dying hard reg (`4 a0`), demoting `p_up`
+  //    first would poison `p_dn` with a Case-1 `(REG_DEAD 3 v1)` while leaving
+  //    `p_dn`'s `4 a0` suggestion intact. Selecting `p_dn` (`insn[1]`) instead
+  //    keeps `p_up` (`insn[0]`) lifted and passes `VerifyAlterRegRightInverse`
+  //    (contrast with `LocalResolutionAvoidsDemotingMemberCreatingSelfSetRegDead`
+  //    above where no conflicting hard `REG_DEAD` is present on `insn[1]`).
+  {
+    const CompilationProfile o1_prof{1, {"-O1", "-mips2", "-mcpu=r4000"}, {}};
+    hooks_.ApplyCompilationProfile(o1_prof);
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(set (reg:SI 3 v1) (ashift:SI (reg:SI 4 a0) (const_int 1)))",
+                "(set (reg:SI 3 v1) (plus:SI (reg:SI 3 v1) (reg:SI 4 a0))) "
+                "(expr_list:REG_DEAD (reg:SI 3 v1) (expr_list:REG_DEAD (reg:SI 4 a0) (nil)))",
+                "(set (reg/i:SI 3 v1) (mem:SI (reg:SI 3 v1))) "
+                "(expr_list:REG_DEAD (reg:SI 3 v1) (nil))",
+                "(use (reg/i:SI 3 v1))",
+            },
+    });
+    SyncAllBlocks(&cfg);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o1_prof, 72);
+    ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 4u);
+    EXPECT_EQ(lifted.rpo_blocks[0].instructions[0].find("(set (reg:SI 3 v1)"), std::string::npos)
+        << lifted.FormatSummary();
+    EXPECT_NE(lifted.rpo_blocks[0].instructions[1].find("(set (reg:SI 3 v1)"), std::string::npos)
+        << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+}
+
+TEST_F(InvertAlterRegTest, LocalResolutionPreservesLiveTicksIntoCrossBlockSpillSlot) {
+  const CompilationProfile o2_prof{2, {"-O2", "-mips2", "-mcpu=r4000"}, {}};
+  hooks_.ApplyCompilationProfile(o2_prof);
+
+  // 1. Positive (`local-alloc.c:470-478, 1773-1774`): local pseudo `p` in `$2 v0`
+  //    dies into `dst` (`$7 a3`) which is stored to a cross-block spill slot
+  //    `24($sp)` (`reg_qty[sreg] == -1`), so `combine_regs` returns `0` and `p`
+  //    continues to occupy `$2 v0` in `regs_live_at`. Overlapping local pseudo
+  //    `q` in `$3 v1` therefore sees `$2 v0` occupied and stays lifted (`reg_renumber == 3`).
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.sideband.frame_size_bytes = 32;
+    cfg.rpo_blocks = {
+        RtlBasicBlock{
+            .id = 0,
+            .instructions =
+                {
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 4 a0) (const_int 1)))",
+                    "(set (reg:SI 3 v1) (plus:SI (reg:SI 5 a1) (const_int 2)))",
+                    "(set (reg:SI 7 a3) (plus:SI (reg:SI 2 v0) (const_int 3))) "
+                    "(expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 24))) (reg:SI 7 a3)) "
+                    "(expr_list:REG_DEAD (reg:SI 7 a3) (nil))",
+                    "(set (mem:SI (reg:SI 6 a2)) (reg:SI 3 v1)) "
+                    "(expr_list:REG_DEAD (reg:SI 3 v1) (expr_list:REG_DEAD (reg:SI 6 a2) (nil)))",
+                    "(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) "
+                    "(label_ref L0) (pc))) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                },
+            .successors = {2, 1},
+        },
+        RtlBasicBlock{
+            .id = 1,
+            .instructions =
+                {
+                    "(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 24))))",
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 5 a1))) "
+                    "(expr_list:REG_DEAD (reg:SI 2 v0) (expr_list:REG_DEAD (reg:SI 5 a1) (nil)))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+        },
+        RtlBasicBlock{
+            .id = 2,
+            .instructions =
+                {
+                    "(set (reg/i:SI 2 v0) (reg:SI 5 a1)) (expr_list:REG_DEAD (reg:SI 5 a1) (nil))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+            .has_label = true,
+        },
+    };
+    SyncAllBlocks(&cfg);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 6u);
+    EXPECT_EQ(lifted.rpo_blocks[0].instructions[1].find("(set (reg:SI 3 v1)"), std::string::npos)
+        << "Overlapping local in $v1 should stay lifted when $v0 dies into cross-block spill:\n"
+        << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+
+  // 2. Negative contrast (`local-alloc.c:470-478, 1773-1774`): when `24($sp)` is
+  //    strictly single-block local with `reg_n_deaths == 1` (`reg_qty[sreg] == -2`),
+  //    `combine_regs` combines `p` (`$2 v0`) into the spilled local quantity so
+  //    `$2 v0` is free in `regs_live_at`, forcing `q` (`$3 v1`) to be demoted so
+  //    `find_free_reg` will not reassign `q` to `$2 v0`.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.sideband.frame_size_bytes = 32;
+    cfg.rpo_blocks = {
+        RtlBasicBlock{
+            .id = 0,
+            .instructions =
+                {
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 4 a0) (const_int 1))) "
+                    "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                    "(set (reg:SI 3 v1) (plus:SI (reg:SI 5 a1) (const_int 2)))",
+                    "(set (reg:SI 7 a3) (plus:SI (reg:SI 2 v0) (const_int 3))) "
+                    "(expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 24))) (reg:SI 7 a3)) "
+                    "(expr_list:REG_DEAD (reg:SI 7 a3) (nil))",
+                    "(set (mem:SI (reg:SI 6 a2)) (reg:SI 3 v1)) "
+                    "(expr_list:REG_DEAD (reg:SI 3 v1) (expr_list:REG_DEAD (reg:SI 6 a2) (nil)))",
+                    "(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 24))))",
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 5 a1))) "
+                    "(expr_list:REG_DEAD (reg:SI 2 v0) (expr_list:REG_DEAD (reg:SI 5 a1) (nil)))",
+                    "(use (reg/i:SI 2 v0))",
+                },
+        },
+    };
+    SyncAllBlocks(&cfg);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 8u);
+    EXPECT_NE(lifted.rpo_blocks[0].instructions[1].find("(set (reg:SI 3 v1)"), std::string::npos)
+        << "Overlapping local in $v1 should be demoted when $v0 combines into local spill:\n"
+        << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+}
+
+TEST_F(InvertAlterRegTest, DemotesInheritedMultiUseFprOutputReloadScratchToHardReg) {
+  const CompilationProfile o2_prof{2, {"-O2", "-mips2", "-mcpu=r4000"}, {}};
+  hooks_.ApplyCompilationProfile(o2_prof);
+
+  auto build_cfg = [](bool reader_has_dead_note) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    const std::string reader_insn =
+        reader_has_dead_note ? "(set (reg:SF 34 $f2) (plus:SF (reg:SF 34 $f2) (reg:SF 32 $f0))) "
+                               "(expr_list:REG_DEAD (reg:SF 32 $f0) (nil))"
+                             : "(set (reg:SF 34 $f2) (plus:SF (reg:SF 34 $f2) (reg:SF 32 $f0)))";
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(set (reg:SF 34 $f2) (mem/u:SF (reg:SI 4 a0))) "
+                "(expr_list:REG_EQUIV (mem/u:SF (reg:SI 4 a0)) (nil))",
+                "(set (reg:SF 36 $f4) (mem/u:SF (plus:SI (reg:SI 4 a0) (const_int 4)))) "
+                "(expr_list:REG_EQUIV (mem/u:SF (plus:SI (reg:SI 4 a0) (const_int 4))) (nil))",
+                "(set (reg:SF 32 $f0) (mem/u:SF (plus:SI (reg:SI 4 a0) (const_int 8)))) "
+                "(expr_list:REG_EQUIV (mem/u:SF (plus:SI (reg:SI 4 a0) (const_int 8))) "
+                "(expr_list:REG_DEAD (reg:SI 4 a0) (nil)))",
+                "(set (reg:SF 32 $f0) (plus:SF (reg:SF 32 $f0) (reg:SF 36 $f4))) "
+                "(expr_list:REG_DEAD (reg:SF 32 $f0) (expr_list:REG_DEAD (reg:SF 36 $f4) (nil)))",
+                "(set (reg:SF 16 s0) (reg:SF 32 $f0))",
+                reader_insn,
+                "(set (mem:SF (reg:SI 5 a1)) (reg:SF 34 $f2)) "
+                "(expr_list:REG_DEAD (reg:SF 34 $f2) (expr_list:REG_DEAD (reg:SI 5 a1) (nil)))",
+                "(parallel[ (set (reg:SF 32 $f0) (call (mem:SI (symbol_ref:SI (\"SinkF\"))) "
+                "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+                "(set (reg:SF 40 $f8) (reg:SF 16 s0))",
+                "(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 32 $f0) (reg:SF 40 $f8))) "
+                "(expr_list:REG_DEAD (reg:SF 32 $f0) (expr_list:REG_DEAD (reg:SF 16 s0) (nil)))",
+                "(use (reg/i:SF 32 $f0))",
+            },
+    });
+    SyncAllBlocks(&cfg);
+    return cfg;
+  };
+
+  // Positive (`reload1.c:5186-5249, 5641`): `$f0` produced by `add.s` and used
+  // by note-free `mfc1 s0,$f0` plus inherited FP reader `add.s $f2,$f2,$f0`
+  // must be demoted back to hard reg `32 $f0` so `InvertReload` can fold it.
+  {
+    const RtlControlFlowGraph cfg = build_cfg(/*reader_has_dead_note=*/false);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 11u);
+    EXPECT_NE(lifted.rpo_blocks[0].instructions[3].find("(set (reg:SF 32 $f0)"), std::string::npos)
+        << lifted.FormatSummary();
+    EXPECT_NE(lifted.rpo_blocks[0].instructions[4].find("(reg:SF 32 $f0))"), std::string::npos)
+        << lifted.FormatSummary();
+  }
+
+  // Negative 1: when the downstream FP reader carries `(REG_DEAD (reg:SF 32 $f0))`,
+  // `$f0` is a normal allocated pseudo rather than a note-free output-reload
+  // scratch and stays lifted as a pseudo.
+  {
+    const RtlControlFlowGraph cfg = build_cfg(/*reader_has_dead_note=*/true);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 11u);
+    EXPECT_EQ(lifted.rpo_blocks[0].instructions[3].find("(set (reg:SF 32 $f0)"), std::string::npos)
+        << lifted.FormatSummary();
+  }
+
+  // Negative 2 (`cse.c:481-486`): when the cross-bank move targets an outgoing
+  // call-arg hard register `$a1` (`5`) alongside a pure FP reader, `$f0` is a
+  // multi-use `FP_REGS` pseudo copied to `$a1` and must stay lifted as a pseudo.
+  {
+    RtlControlFlowGraph cfg = build_cfg(/*reader_has_dead_note=*/false);
+    cfg.rpo_blocks[0].instructions[4] = "(set (reg:SF 5 a1) (reg:SF 32 $f0))";
+    cfg.rpo_blocks[0].instructions[6] =
+        "(set (mem:SF (reg:SI 6 a2)) (reg:SF 34 $f2)) "
+        "(expr_list:REG_DEAD (reg:SF 34 $f2) (expr_list:REG_DEAD (reg:SI 6 a2) (nil)))";
+    cfg.rpo_blocks[0].instructions[7] =
+        "(parallel[ (set (reg:SF 32 $f0) (call (mem:SI (symbol_ref:SI (\"SinkF\"))) "
+        "(const_int 16))) (clobber (reg:SI 31 ra)) ] )";
+    cfg.rpo_blocks[0].instructions[8] = "(set (reg:SF 40 $f8) (reg:SF 32 $f0))";
+    cfg.rpo_blocks[0].instructions[9] =
+        "(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 32 $f0) (reg:SF 40 $f8))) "
+        "(expr_list:REG_DEAD (reg:SF 32 $f0) (expr_list:REG_DEAD (reg:SF 40 $f8) (nil)))";
+    SyncAllBlocks(&cfg);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 11u);
+    EXPECT_EQ(lifted.rpo_blocks[0].instructions[3].find("(set (reg:SF 32 $f0)"), std::string::npos)
+        << lifted.FormatSummary();
+  }
+}
+
+TEST_F(InvertAlterRegTest, LocalResolutionSkipsUnallocatableCallCrossingGprFalseCombine) {
+  const CompilationProfile o2_prof{2, {"-O2", "-mips2", "-mcpu=r4000"}, {}};
+  hooks_.ApplyCompilationProfile(o2_prof);
+
+  auto build_cfg = [](bool occupy_all_callee_saved_gprs) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    std::vector<std::string> insns = {
+        "(set (reg:SI 17 s1) (mem/u:SI (reg:SI 4 a0)))",
+        "(set (reg:SI 18 s2) (mem/u:SI (plus:SI (reg:SI 4 a0) (const_int 4))))",
+        "(set (reg:SI 19 s3) (mem/u:SI (plus:SI (reg:SI 4 a0) (const_int 8))))",
+        "(set (reg:SI 20 s4) (mem/u:SI (plus:SI (reg:SI 4 a0) (const_int 12))))",
+        "(set (reg:SI 21 s5) (mem/u:SI (plus:SI (reg:SI 4 a0) (const_int 16))))",
+        "(set (reg:SI 22 s6) (mem/u:SI (plus:SI (reg:SI 4 a0) (const_int 20))))",
+    };
+    if (occupy_all_callee_saved_gprs) {
+      insns.push_back("(set (reg:SI 23 s7) (mem/u:SI (plus:SI (reg:SI 4 a0) (const_int 24))))");
+    }
+    insns.push_back(
+        "(set (reg:SI 3 v1) (mem/u:SI (plus:SI (reg:SI 4 a0) (const_int 28)))) "
+        "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+    insns.push_back(
+        "(set (reg:SI 16 s0) (plus:SI (reg:SI 3 v1) (const_int 5))) "
+        "(expr_list:REG_DEAD (reg:SI 3 v1) (nil))");
+    insns.push_back(
+        "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"Helper\"))) "
+        "(const_int 16))) (clobber (reg:SI 31 ra)) ] )");
+    insns.push_back(
+        "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 16 s0))) "
+        "(expr_list:REG_DEAD (reg:SI 2 v0) (expr_list:REG_DEAD (reg:SI 16 s0) (nil)))");
+    insns.push_back(
+        "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 17 s1))) "
+        "(expr_list:REG_DEAD (reg:SI 2 v0) (expr_list:REG_DEAD (reg:SI 17 s1) (nil)))");
+    insns.push_back(
+        "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 18 s2))) "
+        "(expr_list:REG_DEAD (reg:SI 2 v0) (expr_list:REG_DEAD (reg:SI 18 s2) (nil)))");
+    insns.push_back(
+        "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 19 s3))) "
+        "(expr_list:REG_DEAD (reg:SI 2 v0) (expr_list:REG_DEAD (reg:SI 19 s3) (nil)))");
+    insns.push_back(
+        "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 20 s4))) "
+        "(expr_list:REG_DEAD (reg:SI 2 v0) (expr_list:REG_DEAD (reg:SI 20 s4) (nil)))");
+    insns.push_back(
+        "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 21 s5))) "
+        "(expr_list:REG_DEAD (reg:SI 2 v0) (expr_list:REG_DEAD (reg:SI 21 s5) (nil)))");
+    if (occupy_all_callee_saved_gprs) {
+      insns.push_back(
+          "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 22 s6))) "
+          "(expr_list:REG_DEAD (reg:SI 2 v0) (expr_list:REG_DEAD (reg:SI 22 s6) (nil)))");
+      insns.push_back(
+          "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 23 s7))) "
+          "(expr_list:REG_DEAD (reg:SI 2 v0) (expr_list:REG_DEAD (reg:SI 23 s7) (nil)))");
+    } else {
+      insns.push_back(
+          "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 22 s6))) "
+          "(expr_list:REG_DEAD (reg:SI 2 v0) (expr_list:REG_DEAD (reg:SI 22 s6) (nil)))");
+    }
+    insns.push_back("(use (reg/i:SI 2 v0))");
+    cfg.rpo_blocks.push_back(RtlBasicBlock{.id = 0, .instructions = std::move(insns)});
+    SyncAllBlocks(&cfg);
+    const size_t call_idx = occupy_all_callee_saved_gprs ? 9 : 8;
+    cfg.rpo_blocks[0].rtl_insns[call_idx].has_explicit_call_fusage = true;
+    return cfg;
+  };
+
+  // Positive (`local-alloc.c:1525-1538, 1855-1870, 2106, 2121, 2205-2216`):
+  // when all 8 callee-saved GPRs `$16..$23` are occupied over `[birth(ps),
+  // death(pd)]` and `n_refs <= 4 * calls_crossed`, `local-alloc` leaves the
+  // combined qty `{ps ($3 v1), pd ($16 s0)}` unallocated (`-1`) so `global-alloc`
+  // allocates them separately; `pd` (`$16 s0`) stays lifted as a pseudo.
+  {
+    const RtlControlFlowGraph cfg = build_cfg(/*occupy_all_callee_saved_gprs=*/true);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    EXPECT_EQ(lifted.rpo_blocks[0].instructions[8].find("(set (reg:SI 16 s0)"), std::string::npos)
+        << "Expected call-crossing $s0 to stay lifted when all $s0..$s7 are occupied:\n"
+        << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+
+  // Negative contrast: when `$23 s7` is free over `[birth(ps), death(pd)]`,
+  // `local-alloc` would allocate the combined qty `{ps, pd}` to one callee-saved
+  // hard reg (`hs == hd`), so `false_pseudo_combine` must break the combine
+  // (`pd` demoted to hard `$16 s0` or `ps` demoted to hard `$3 v1`) and pass
+  // `VerifyAlterRegRightInverse`.
+  {
+    const RtlControlFlowGraph cfg = build_cfg(/*occupy_all_callee_saved_gprs=*/false);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    const bool s0_demoted =
+        lifted.rpo_blocks[0].instructions[7].find("(set (reg:SI 16 s0)") != std::string::npos;
+    const bool v1_demoted =
+        lifted.rpo_blocks[0].instructions[6].find("(set (reg:SI 3 v1)") != std::string::npos;
+    EXPECT_TRUE(s0_demoted || v1_demoted)
+        << "Expected false_pseudo_combine to demote $s0 or $v1 when $s7 is free:\n"
+        << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+}
+
+TEST_F(InvertAlterRegTest, LocalResolutionLeftToRightSpillCombineAndLowerOrderDeferral) {
+  const CompilationProfile o2_prof{2, {"-O2", "-mips2", "-mcpu=r4000"}, {}};
+  hooks_.ApplyCompilationProfile(o2_prof);
+
+  // 1. `local-alloc.c:1241-1300` (`block_alloc` -> `combine_regs` left-to-right
+  //    first-`win` `break`): when two dying same-bank local pseudos (`$a0` and
+  //    `$v0`) feed a single-block spilled local `(set (reg:SI 7 a3) (plus:SI
+  //    op1 op2))`, ONLY the leftmost dying operand (`op1`) combines into the
+  //    spilled dest. When `$a0` (`4`, blocked below by `$v0`/`$v1`) is `op1`
+  //    (positive), `$v0` remains uncombined and keeps occupying `$2 v0` in
+  //    `regs_live_at`, so overlapping `$3 v1` stays lifted. Swapping to
+  //    `(plus:SI $v0 $a0)` (negative) combines `$v0` into the spilled local and
+  //    frees `$2 v0`, forcing `$3 v1` to be demoted.
+  auto make_spill_combine_cfg = [](bool v0_is_second_operand) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.sideband.frame_size_bytes = 32;
+    const std::string add_insn =
+        v0_is_second_operand
+            ? "(set (reg:SI 7 a3) (plus:SI (reg:SI 4 a0) (reg:SI 2 v0))) "
+              "(expr_list:REG_DEAD (reg:SI 4 a0) (expr_list:REG_DEAD (reg:SI 2 v0) (nil)))"
+            : "(set (reg:SI 7 a3) (plus:SI (reg:SI 2 v0) (reg:SI 4 a0))) "
+              "(expr_list:REG_DEAD (reg:SI 2 v0) (expr_list:REG_DEAD (reg:SI 4 a0) (nil)))";
+    cfg.rpo_blocks = {
+        RtlBasicBlock{
+            .id = 0,
+            .instructions =
+                {
+                    "(set (reg:SI 2 v0) (mem/u:SI (reg:SI 16 s0)))",
+                    "(set (reg:SI 3 v1) (mem/u:SI (plus:SI (reg:SI 16 s0) (const_int 4))))",
+                    "(set (reg:SI 4 a0) (mem/u:SI (plus:SI (reg:SI 16 s0) (const_int 8))))",
+                    add_insn,
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 24))) (reg:SI 7 a3)) "
+                    "(expr_list:REG_DEAD (reg:SI 7 a3) (nil))",
+                    "(set (mem:SI (reg:SI 17 s1)) (reg:SI 3 v1)) "
+                    "(expr_list:REG_DEAD (reg:SI 3 v1) (expr_list:REG_DEAD (reg:SI 17 s1) (nil)))",
+                    "(set (reg:SI 2 v0) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 24))))",
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 16 s0))) "
+                    "(expr_list:REG_DEAD (reg:SI 2 v0) (expr_list:REG_DEAD (reg:SI 16 s0) (nil)))",
+                    "(use (reg/i:SI 2 v0))",
+                },
+        },
+    };
+    SyncAllBlocks(&cfg);
+    return cfg;
+  };
+  {
+    const RtlControlFlowGraph cfg = make_spill_combine_cfg(/*v0_is_second_operand=*/true);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 9u);
+    EXPECT_EQ(lifted.rpo_blocks[0].instructions[1].find("(set (reg:SI 3 v1)"), std::string::npos)
+        << "Expected $v1 to stay lifted when $a0 wins combine_regs ahead of $v0:\n"
+        << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+  {
+    const RtlControlFlowGraph cfg = make_spill_combine_cfg(/*v0_is_second_operand=*/false);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 9u);
+    EXPECT_NE(lifted.rpo_blocks[0].instructions[1].find("(set (reg:SI 3 v1)"), std::string::npos)
+        << "Expected $v1 to be demoted when $v0 wins combine_regs into local spill:\n"
+        << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+
+  // 2. `local-alloc.c:2158-2181` (`HasOverlappingLowerOrderPendingResolution`)
+  //    + `flow.c:2506-2515` (`CleanInvalidOrDuplicateRegDeadNotesOnInsn`):
+  //    `$v1` (`3`, live `[0, 2]`) has `$v0` free over `[0, 2]` so it needs
+  //    resolution; overlapping `$a0` (`4`, live `[1, 4]`) sees `$v0` occupied
+  //    from `2..4` and only sees `$v1` (`3 < 4`) free until `$v1` resolves.
+  //    Deferring `$a0` lets `$v1` resolve first so `$a0` stays lifted as a pseudo
+  //    without spurious double-demotion.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(set (reg:SI 3 v1) (mem/u:SI (reg:SI 5 a1)))",
+                "(set (reg:SI 4 a0) (mem/u:SI (plus:SI (reg:SI 5 a1) (const_int 4)))) "
+                "(expr_list:REG_DEAD (reg:SI 5 a1) (nil))",
+                "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 3 v1) (const_int 9))) "
+                "(expr_list:REG_DEAD (reg:SI 3 v1) (nil))",
+                "(set (mem:SI (reg:SI 6 a2)) (reg/i:SI 2 v0)) "
+                "(expr_list:REG_DEAD (reg:SI 6 a2) (nil))",
+                "(set (reg/i:SI 2 v0) (plus:SI (reg/i:SI 2 v0) (reg:SI 4 a0))) "
+                "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                "(use (reg/i:SI 2 v0))",
+            },
+    });
+    SyncAllBlocks(&cfg);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 6u);
+    EXPECT_NE(lifted.rpo_blocks[0].instructions[0].find("(set (reg:SI 3 v1)"), std::string::npos)
+        << lifted.FormatSummary();
+    EXPECT_EQ(lifted.rpo_blocks[0].instructions[1].find("(set (reg:SI 4 a0)"), std::string::npos)
+        << "Expected higher-order $a0 to be deferred and stay lifted once $v1 resolves:\n"
+        << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+
+  // 3. `reload1.c:2309-2400` (`PseudoTouchesReloadSpillSlot`): in a block that
+  //    also holds a reload spill slot `24($sp)`, a non-spill local in `$v1` (`3`)
+  //    whose lower-order reg `$v0` (`2`) is free over its own short span coalesces
+  //    with an earlier disjoint non-spill `$v1` pseudo (staying lifted as a pseudo)
+  //    instead of demoting to hard `$v1`; contrastingly, when the second `$v1`
+  //    loads directly from the reload spill slot `24($sp)`, it is NOT coalesced
+  //    into the earlier non-spill `$v1` pseudo.
+  auto make_spill_coalesce_cfg = [](bool second_v1_loads_spill_slot) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.sideband.frame_size_bytes = 32;
+    const std::string second_v1_def =
+        second_v1_loads_spill_slot
+            ? "(set (reg:SI 3 v1) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 24))))"
+            : "(set (reg:SI 3 v1) (mem/u:SI (plus:SI (reg:SI 2 v0) (const_int 4)))) "
+              "(expr_list:REG_DEAD (reg:SI 2 v0) (nil))";
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(set (reg:SI 2 v0) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                "(set (reg:SI 3 v1) (mem/u:SI (reg:SI 2 v0)))",
+                "(set (mem:SI (reg:SI 16 s0)) (reg:SI 3 v1)) (expr_list:REG_DEAD (reg:SI 3 v1) "
+                "(nil))",
+                "(set (reg:SI 5 a1) (plus:SI (reg:SI 16 s0) (const_int 1)))",
+                "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 24))) (reg:SI 5 a1)) "
+                "(expr_list:REG_DEAD (reg:SI 5 a1) (nil))",
+                second_v1_def,
+                "(set (mem:SI (plus:SI (reg:SI 16 s0) (const_int 4))) (reg:SI 3 v1)) "
+                "(expr_list:REG_DEAD (reg:SI 3 v1) (nil))",
+                second_v1_loads_spill_slot
+                    ? "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 7)))"
+                    : "(set (reg/i:SI 2 v0) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 24))))",
+                "(use (reg/i:SI 2 v0))",
+            },
+    });
+    SyncAllBlocks(&cfg);
+    return cfg;
+  };
+  {
+    const RtlControlFlowGraph cfg = make_spill_coalesce_cfg(/*second_v1_loads_spill_slot=*/false);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 9u);
+    auto p1 = ParsePatternAndNotes(lifted.rpo_blocks[0].instructions[1]);
+    auto p5 = ParsePatternAndNotes(lifted.rpo_blocks[0].instructions[5]);
+    ASSERT_TRUE(p1.ok() && p5.ok());
+    ASSERT_TRUE(p1->pattern.IsSet() && p5->pattern.IsSet());
+    EXPECT_TRUE(p1->pattern.SetDest().IsPseudoReg()) << lifted.FormatSummary();
+    EXPECT_TRUE(p5->pattern.SetDest().IsPseudoReg()) << lifted.FormatSummary();
+    EXPECT_EQ(p1->pattern.SetDest().RegNo(), p5->pattern.SetDest().RegNo())
+        << "Expected second non-spill $v1 local to coalesce with first $v1:\n"
+        << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+  {
+    const RtlControlFlowGraph cfg = make_spill_coalesce_cfg(/*second_v1_loads_spill_slot=*/true);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 9u);
+    auto p1 = ParsePatternAndNotes(lifted.rpo_blocks[0].instructions[1]);
+    auto p5 = ParsePatternAndNotes(lifted.rpo_blocks[0].instructions[5]);
+    ASSERT_TRUE(p1.ok() && p5.ok());
+    ASSERT_TRUE(p1->pattern.IsSet() && p5->pattern.IsSet());
+    EXPECT_NE(p1->pattern.SetDest().RegNo(), p5->pattern.SetDest().RegNo())
+        << "Expected spill-slot load $v1 NOT to coalesce into earlier non-spill $v1:\n"
+        << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+}
+
+TEST_F(InvertAlterRegTest, CrossClassReloadInheritedFprWebAndUnallocatableFpGprCombine) {
+  const CompilationProfile o2_prof{2, {"-O2", "-mips2", "-mcpu=r4000"}, {}};
+  hooks_.ApplyCompilationProfile(o2_prof);
+
+  // 1. `local-alloc.c:700-839, 1004-1007` (`optimize_reg_copy_1`) +
+  //    `reload1.c:5186-5257` (`choose_reload_regs` reload inheritance):
+  //    When `(set (reg:SF 16 s0) (reg:SF 32 $f0)) (REG_DEAD $f0)` is followed
+  //    by an FPR-only consumer reading `$f0` with `$s0` and `$f0` unmodified in
+  //    between (positive), `HasLaterCrossClassReloadInheritedFprRead` suppresses
+  //    killing `$f0`'s web at the copy so both uses share the same pseudo.
+  //    When `$s0` is modified before the later `$f0` read (negative), the
+  //    `REG_DEAD $f0` kill IS honored.
+  auto make_cross_class_inherit_cfg = [](bool clobber_s0_between) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    RtlBasicBlock b0{
+        .id = 0,
+        .instructions =
+            {
+                "(set (reg:SF 32 $f0) (plus:SF (reg:SF 44 $f12) (reg:SF 46 $f14)))",
+            },
+        .successors = {1},
+    };
+    std::vector<std::string> b1_insns = {
+        "(set (reg:SF 16 s0) (reg:SF 32 $f0)) (expr_list:REG_DEAD (reg:SF 32 $f0) (nil))",
+    };
+    if (clobber_s0_between) {
+      b1_insns.push_back("(set (reg:SF 16 s0) (reg:SF 46 $f14))");
+    }
+    b1_insns.push_back(
+        "(set (reg:SF 34 $f2) (plus:SF (reg:SF 32 $f0) (reg:SF 44 $f12))) "
+        "(expr_list:REG_DEAD (reg:SF 44 $f12) (nil))");
+    b1_insns.push_back(
+        "(set (mem:SF (reg:SI 5 a1)) (reg:SF 34 $f2)) "
+        "(expr_list:REG_DEAD (reg:SF 34 $f2) (nil))");
+    const size_t call_idx = b1_insns.size();
+    b1_insns.push_back("(call (mem:SI (symbol_ref:SI (\"callee\"))) (const_int 16))");
+    b1_insns.push_back(
+        "(set (mem:SF (plus:SI (reg:SI 5 a1) (const_int 4))) (reg:SF 16 s0)) "
+        "(expr_list:REG_DEAD (reg:SF 16 s0) (expr_list:REG_DEAD (reg:SI 5 a1) (nil)))");
+    b1_insns.push_back(
+        "(set (reg/i:SF 32 $f0) (reg:SF 46 $f14)) "
+        "(expr_list:REG_DEAD (reg:SF 46 $f14) (nil))");
+    b1_insns.push_back("(use (reg/i:SF 32 $f0))");
+    RtlBasicBlock b1{.id = 1, .instructions = std::move(b1_insns), .has_label = true};
+    cfg.rpo_blocks.push_back(std::move(b0));
+    cfg.rpo_blocks.push_back(std::move(b1));
+    SyncAllBlocks(&cfg);
+    cfg.rpo_blocks[1].rtl_insns[call_idx].has_explicit_call_fusage = true;
+    return cfg;
+  };
+  {
+    const RtlControlFlowGraph cfg = make_cross_class_inherit_cfg(/*clobber_s0_between=*/false);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    ASSERT_EQ(lifted.rpo_blocks.size(), 2u);
+    auto p0 = ParsePatternAndNotes(lifted.rpo_blocks[0].instructions[0]);
+    auto p1 = ParsePatternAndNotes(lifted.rpo_blocks[1].instructions[0]);
+    auto p2 = ParsePatternAndNotes(lifted.rpo_blocks[1].instructions[1]);
+    ASSERT_TRUE(p0.ok() && p1.ok() && p2.ok());
+    const int def_pseudo = p0->pattern.SetDest().RegNo();
+    EXPECT_GE(def_pseudo, 72) << lifted.FormatSummary();
+    EXPECT_EQ(p1->pattern.SetSrc().RegNo(), def_pseudo) << lifted.FormatSummary();
+    EXPECT_EQ(p2->pattern.SetSrc().children[0].RegNo(), def_pseudo)
+        << "Expected reload-inherited FPR read to share the same pseudo web as $f0:\n"
+        << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+  {
+    const RtlControlFlowGraph cfg = make_cross_class_inherit_cfg(/*clobber_s0_between=*/true);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    ASSERT_EQ(lifted.rpo_blocks.size(), 2u);
+    auto p0 = ParsePatternAndNotes(lifted.rpo_blocks[0].instructions[0]);
+    auto p3 = ParsePatternAndNotes(lifted.rpo_blocks[1].instructions[2]);
+    ASSERT_TRUE(p0.ok() && p3.ok());
+    // With `$s0` clobbered in between, `REG_DEAD $f0` killed the web at insn 0,
+    // so insn 2's `$f0` read is NOT unified into block 0's pseudo.
+    EXPECT_NE(p3->pattern.SetSrc().children[0].RegNo(), p0->pattern.SetDest().RegNo())
+        << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+
+  // 2. `local-alloc.c:1525-1538, 1855-1870, 2106, 2121, 2205-2216` + `regs.h:165`:
+  //    When a call-crossing `SF` pseudo in `$fp` (`30`) dies in the birth of a
+  //    non-call-crossing `SF` pseudo in call-used `$f4` (`36`) while all
+  //    callee-saved FPRs (`$f20..$f30`) AND all callee-saved GPRs (`$s0..$s7`)
+  //    are live across the span and `combined_refs <= 4 * total_calls` (positive),
+  //    `IsUnallocatableCallCrossingFpGprCombine` prevents combining `$fp` and
+  //    `$f4` into one unallocatable local qty. When a callee-saved FPR (`$f20`)
+  //    is free across the span (negative), the guard returns false.
+  auto make_fp_gpr_combine_cfg = [](bool occupy_all_callee_saved) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.sideband.frame_pointer_needed = false;
+    std::vector<std::string> insns;
+    // Define `$fp` (`30`, SF) and all callee-saved GPRs (`$s0..$s7`, 16..23) +
+    // callee-saved FPRs (`$f20..$f30`, 52..62 even), optionally omitting `$f20`.
+    insns.push_back("(set (reg:SF 30 $fp) (mem/u:SF (reg:SI 4 a0)))");
+    for (int s = 16; s <= 23; ++s) {
+      insns.push_back("(set (reg:SI " + std::to_string(s) + " s" + std::to_string(s - 16) +
+                      ") (mem/u:SI (plus:SI (reg:SI 4 a0) (const_int " +
+                      std::to_string((s - 15) * 4) + "))))");
+    }
+    const int first_cs_fp = occupy_all_callee_saved ? 52 : 54;
+    for (int f = first_cs_fp; f <= 62; f += 2) {
+      insns.push_back("(set (reg:SF " + std::to_string(f) + " $f" + std::to_string(f - 32) +
+                      ") (mem/u:SF (plus:SI (reg:SI 4 a0) (const_int " +
+                      std::to_string((f - 32) * 4) + "))))");
+    }
+    // Call crossed by `$fp` (`30`) and all live callee-saved regs.
+    const size_t call_idx = insns.size();
+    insns.push_back("(call (mem:SI (symbol_ref:SI (\"callee\"))) (const_int 16))");
+    // `$fp` (`30`) dies in the birth of non-call-crossing `$f4` (`36`, call-used).
+    // Keep `$f0`/`$f2` busy across `[birth($f4), death($f4)]` so `$f4` stays lifted.
+    insns.push_back("(set (reg:SF 32 $f0) (mem/u:SF (reg:SI 16 s0)))");
+    insns.push_back("(set (reg:SF 34 $f2) (mem/u:SF (reg:SI 17 s1)))");
+    insns.push_back(
+        "(set (reg:SF 36 $f4) (plus:SF (reg:SF 30 $fp) (reg:SF 32 $f0))) "
+        "(expr_list:REG_DEAD (reg:SF 30 $fp) (nil))");
+    // Use all callee-saved GPRs, callee-saved FPRs, `$f0`, `$f2`, and `$f4`.
+    insns.push_back(
+        "(set (reg:SF 36 $f4) (plus:SF (reg:SF 36 $f4) (reg:SF 34 $f2))) "
+        "(expr_list:REG_DEAD (reg:SF 34 $f2) (nil))");
+    for (int f = first_cs_fp; f <= 62; f += 2) {
+      insns.push_back("(set (reg:SF 36 $f4) (plus:SF (reg:SF 36 $f4) (reg:SF " + std::to_string(f) +
+                      " $f" + std::to_string(f - 32) + "))) (expr_list:REG_DEAD (reg:SF " +
+                      std::to_string(f) + " $f" + std::to_string(f - 32) + ") (nil))");
+    }
+    for (int s = 16; s <= 23; ++s) {
+      insns.push_back("(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int " +
+                      std::to_string((s - 16) * 4) + "))) (reg:SI " + std::to_string(s) + " s" +
+                      std::to_string(s - 16) + ")) (expr_list:REG_DEAD (reg:SI " +
+                      std::to_string(s) + " s" + std::to_string(s - 16) + ") (nil))");
+    }
+    insns.push_back(
+        "(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 32 $f0) (reg:SF 36 $f4))) "
+        "(expr_list:REG_DEAD (reg:SF 36 $f4) (nil))");
+    insns.push_back("(use (reg/i:SF 32 $f0))");
+    RtlBasicBlock blk{.id = 0, .instructions = std::move(insns)};
+    cfg.rpo_blocks.push_back(std::move(blk));
+    SyncAllBlocks(&cfg);
+    cfg.rpo_blocks[0].rtl_insns[call_idx].has_explicit_call_fusage = true;
+    return cfg;
+  };
+  {
+    const RtlControlFlowGraph cfg = make_fp_gpr_combine_cfg(/*occupy_all_callee_saved=*/true);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    // Find the `$fp` birth and the `$f4` birth (right after `call`, `$f0`, `$f2`).
+    auto p_fp = ParsePatternAndNotes(lifted.rpo_blocks[0].instructions[0]);
+    ASSERT_TRUE(p_fp.ok());
+    const int fp_reg = p_fp->pattern.SetDest().RegNo();
+    size_t f4_birth_idx = 0;
+    for (size_t idx = 0; idx < lifted.rpo_blocks[0].instructions.size(); ++idx) {
+      if (lifted.rpo_blocks[0].instructions[idx].find("(plus:SF ") != std::string::npos) {
+        f4_birth_idx = idx;
+        break;
+      }
+    }
+    ASSERT_GT(f4_birth_idx, 0u);
+    auto p_f4 = ParsePatternAndNotes(lifted.rpo_blocks[0].instructions[f4_birth_idx]);
+    ASSERT_TRUE(p_f4.ok());
+    EXPECT_NE(p_f4->pattern.SetDest().RegNo(), fp_reg)
+        << "Expected call-crossing $fp NOT to combine with non-call-crossing $f4 when all "
+           "callee-saved FPRs/GPRs are occupied:\n"
+        << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+  {
+    const RtlControlFlowGraph cfg = make_fp_gpr_combine_cfg(/*occupy_all_callee_saved=*/false);
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+}
+
+TEST_F(InvertAlterRegTest, ResolveDeathlessLocalPseudosEnforcesLocalAllocBirthDeathInvariant) {
+  const CompilationProfile o2_prof{2, {"-O2", "-mips2", "-mcpu=r4000"}, {}};
+  hooks_.ApplyCompilationProfile(o2_prof);
+
+  // Positive 1: multi-SET `PARALLEL` (`udivmod`) reading `$2` and writing `$2`
+  // with no `REG_DEAD $2` coalesces the two webs into one valid local pseudo
+  // whose death note is on the final consumer.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(set (reg:SI 2 v0) (mem:SI (reg:SI 4 a0))) "
+                "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                "(parallel[ (set (reg:SI 1 at) (udiv:SI (reg:SI 5 a1) (reg:SI 2 v0))) "
+                "(set (reg:SI 2 v0) (umod:SI (reg:SI 5 a1) (reg:SI 2 v0))) "
+                "(clobber (reg:SI 65 lo)) (clobber (reg:SI 64 hi)) (clobber (reg:SI 66 accum)) ] ) "
+                "(expr_list:REG_DEAD (reg:SI 5 a1) (expr_list:REG_UNUSED (reg:SI 1 at) "
+                "(expr_list:REG_UNUSED (reg:SI 66 accum) (expr_list:REG_UNUSED (reg:SI 64 hi) "
+                "(expr_list:REG_UNUSED (reg:SI 65 lo) (nil))))))",
+                "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 1))) "
+                "(expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+                "(use (reg/i:SI 2 v0))",
+            },
+    });
+    SyncAllBlocks(&cfg);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    ASSERT_EQ(lifted.rpo_blocks.size(), 1u);
+    ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 4u);
+    // Coalesced into a single pseudo (reg:SI 72) with REG_DEAD on insn 2.
+    EXPECT_NE(lifted.rpo_blocks[0].instructions[0].find("(set (reg:SI 72)"), std::string::npos)
+        << lifted.FormatSummary();
+    EXPECT_NE(lifted.rpo_blocks[0].instructions[1].find("(set (reg:SI 72) (umod:SI"),
+              std::string::npos)
+        << lifted.FormatSummary();
+    EXPECT_NE(lifted.rpo_blocks[0].instructions[2].find("REG_DEAD (reg:SI 72)"), std::string::npos)
+        << lifted.FormatSummary();
+  }
+
+  // Positive 2 vs Negative: single-block `$2` read by `(set (reg/i:SI 2 v0) ...)`
+  // without `REG_DEAD $2` must be demoted back to hard reg `$2` so `block_alloc`
+  // never aborts at `local-alloc.c:2093`; when `REG_DEAD $2` IS present, `$2`
+  // remains lifted as a valid single-block pseudo.
+  auto build_ret_cfg = [](bool has_dead_v0) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    const std::string ret_notes =
+        has_dead_v0 ? "(expr_list:REG_DEAD (reg:SI 8 t0) (expr_list:REG_DEAD (reg:SI 2 v0) (nil)))"
+                    : "(expr_list:REG_DEAD (reg:SI 8 t0) (nil))";
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(set (reg:SI 8 t0) (plus:SI (reg:SI 4 a0) (const_int 1))) "
+                "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                "(set (reg:SI 2 v0) (plus:SI (reg:SI 5 a1) (const_int 2))) "
+                "(expr_list:REG_DEAD (reg:SI 5 a1) (nil))",
+                "(set (reg/i:SI 2 v0) (xor:SI (reg:SI 8 t0) (reg:SI 2 v0))) " + ret_notes,
+                "(use (reg/i:SI 2 v0))",
+            },
+    });
+    SyncAllBlocks(&cfg);
+    return cfg;
+  };
+  {
+    const RtlControlFlowGraph lifted_demoted =
+        InvertAlterReg(build_ret_cfg(/*has_dead_v0=*/false), o2_prof, 72);
+    ASSERT_EQ(lifted_demoted.rpo_blocks[0].instructions.size(), 4u);
+    EXPECT_NE(lifted_demoted.rpo_blocks[0].instructions[1].find("(set (reg:SI 2 v0)"),
+              std::string::npos)
+        << lifted_demoted.FormatSummary();
+  }
+  {
+    const RtlControlFlowGraph lifted_kept =
+        InvertAlterReg(build_ret_cfg(/*has_dead_v0=*/true), o2_prof, 72);
+    ASSERT_EQ(lifted_kept.rpo_blocks[0].instructions.size(), 4u);
+    EXPECT_EQ(lifted_kept.rpo_blocks[0].instructions[1].find("(set (reg:SI 2 v0)"),
+              std::string::npos)
+        << lifted_kept.FormatSummary();
+  }
+}
+
+TEST_F(InvertAlterRegTest, PrecomputePairedLibcallScopesPreservesCalleeSavedClobberAcrossCall) {
+  const CompilationProfile o2_prof{2, {"-O2", "-mips2", "-mcpu=r4000"}, {}};
+
+  auto build_cfg = [](int target_reg, const char* reg_name) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    const std::string reg_str = "(reg:DI " + std::to_string(target_reg) + " " + reg_name + ")";
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(clobber " + reg_str + ")",
+                "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"prep_fn\"))) "
+                "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+                "(set (reg:SI 4 a0) (reg:SI 2 v0)) (expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+                "(parallel[ (set (reg:DI 2 v0) (call (mem:SI (symbol_ref:SI (\"__divdi3\"))) "
+                "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+                "(set " + reg_str +
+                    " (reg:DI 2 v0)) (expr_list:REG_DEAD (reg:DI 2 v0) "
+                    "(expr_list:REG_RETVAL (const_int 0) (nil)))",
+                "(set (reg/i:DI 2 v0) " + reg_str + ") (expr_list:REG_DEAD " + reg_str + " (nil))",
+                "(use (reg/i:DI 2 v0))",
+            },
+    });
+    SyncAllBlocks(&cfg);
+    return cfg;
+  };
+
+  // Positive (`optabs.c:2485-2525` + `sched1` hoisting across an unrelated
+  // call): a callee-saved `(clobber (reg:DI 16 s0))` survives across the
+  // intervening `CALL_INSN`, so `PrecomputePairedLibcallScopes` pairs it with
+  // the post-call `REG_RETVAL` into the SAME lifted pseudo (`reg:DI 72`).
+  {
+    const RtlControlFlowGraph lifted = InvertAlterReg(build_cfg(16, "s0"), o2_prof, 72);
+    ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 7u);
+    EXPECT_EQ(lifted.rpo_blocks[0].instructions[0], "(clobber (reg:DI 72))")
+        << lifted.FormatSummary();
+    EXPECT_NE(lifted.rpo_blocks[0].instructions[4].find("(set (reg:DI 72) (reg:DI 2 v0))"),
+              std::string::npos)
+        << lifted.FormatSummary();
+  }
+
+  // Negative: a call-clobbered `(clobber (reg:DI 8 t0))` cannot survive an
+  // intervening `CALL_INSN`, so it is flushed at the call and does NOT pair
+  // with the post-call `REG_RETVAL` (`instructions[0]` stays hard `8 t0`).
+  {
+    const RtlControlFlowGraph lifted = InvertAlterReg(build_cfg(8, "t0"), o2_prof, 72);
+    ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 7u);
+    EXPECT_EQ(lifted.rpo_blocks[0].instructions[0], "(clobber (reg:DI 8 t0))")
+        << lifted.FormatSummary();
+  }
+}
+
+TEST_F(InvertAlterRegTest, PreservesDuplicateHardRegDeadNotesAndGuardsLiveThroughGlobalCoalesce) {
+  const CompilationProfile o1_prof{1, {"-O1", "-mips2", "-mcpu=r4000", "-Wa,-g"}, {}};
+
+  // 1. Positive (`reload1.c:2309-2326` + `jump.c:452-459`): `InvertAlterReg`
+  //    preserves duplicate hard-register `REG_DEAD` notes (e.g. compensation
+  //    notes from `.11.jump2`) through scratch demotion so `alter_reg`
+  //    right-inverse holds exactly.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.sideband.frame_size_bytes = 32;
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(set (reg:SI 8 t0) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 16))))",
+                "(set (reg:SI 2 v0) (plus:SI (reg:SI 8 t0) (reg:SI 6 a2))) "
+                "(expr_list:REG_DEAD (reg:SI 6 a2) (expr_list:REG_DEAD (reg:SI 8 t0) "
+                "(expr_list:REG_DEAD (reg:SI 6 a2) (nil))))",
+                "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 4 a0))) "
+                "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                "(use (reg/i:SI 2 v0))",
+            },
+    });
+    SyncAllBlocks(&cfg);
+    hooks_.ApplyCompilationProfile(o1_prof);
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+
+  // 2. Positive + Negative (`local-alloc.c:472` + `global.c:1060-1210`):
+  //    in `b > 0`, when a live-through multi-block global pseudo holds a higher
+  //    `REG_ALLOC_ORDER` slot (`$6 a2`) than two disjoint local pseudos in `$3 v1`
+  //    (where `$2 v0` is live across the first `$v1` local so it stays lifted),
+  //    coalescing those locals would promote them from `local_alloc` to
+  //    `global_alloc` and expose `$3 v1` to the live-through global; therefore
+  //    the second `$3 v1` local is demoted instead of coalesced. Conversely,
+  //    when no higher-order live-through global exists (only `$2 v0`),
+  //    coalescing is safe.
+  auto make_two_block_cfg = [](bool include_higher_order_live_through_global) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.sideband.frame_size_bytes = 32;
+    std::vector<std::string> b0_insns;
+    if (include_higher_order_live_through_global) {
+      b0_insns.push_back("(set (reg:SI 6 a2) (plus:SI (reg:SI 5 a1) (const_int 5)))");
+    } else {
+      b0_insns.push_back("(set (reg:SI 7 a3) (plus:SI (reg:SI 5 a1) (const_int 5)))");
+    }
+    b0_insns.push_back(
+        "(set (pc) (if_then_else (eq:SI (reg:SI 5 a1) (const_int 0)) (label_ref L1) (pc)))");
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions = std::move(b0_insns),
+        .successors = {1},
+    });
+    std::vector<std::string> b1_insns = {
+        "(set (reg:SI 2 v0) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+        "(set (reg:SI 3 v1) (mem/u:SI (reg:SI 2 v0)))",
+        "(set (mem:SI (reg:SI 5 a1)) (reg:SI 3 v1)) (expr_list:REG_DEAD (reg:SI 3 v1) (nil))",
+        "(set (reg:SI 3 v1) (mem/u:SI (plus:SI (reg:SI 2 v0) (const_int 4)))) "
+        "(expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+        "(set (mem:SI (plus:SI (reg:SI 5 a1) (const_int 4))) (reg:SI 3 v1)) "
+        "(expr_list:REG_DEAD (reg:SI 3 v1) (nil))",
+    };
+    if (include_higher_order_live_through_global) {
+      b1_insns.push_back(
+          "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 6 a2) (reg:SI 5 a1))) "
+          "(expr_list:REG_DEAD (reg:SI 6 a2) (expr_list:REG_DEAD (reg:SI 5 a1) (nil)))");
+    } else {
+      b1_insns.push_back(
+          "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 5 a1) (const_int 1))) "
+          "(expr_list:REG_DEAD (reg:SI 5 a1) (nil))");
+    }
+    b1_insns.push_back("(use (reg/i:SI 2 v0))");
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 1,
+        .instructions = std::move(b1_insns),
+        .has_label = true,
+    });
+    SyncAllBlocks(&cfg);
+    return cfg;
+  };
+
+  {
+    const RtlControlFlowGraph lifted = InvertAlterReg(
+        make_two_block_cfg(/*include_higher_order_live_through_global=*/true), o1_prof, 72);
+    auto p1 = ParsePatternAndNotes(lifted.rpo_blocks[1].instructions[1]);
+    auto p3 = ParsePatternAndNotes(lifted.rpo_blocks[1].instructions[3]);
+    ASSERT_TRUE(p1.ok() && p3.ok());
+    EXPECT_TRUE(p1->pattern.SetDest().IsPseudoReg()) << lifted.FormatSummary();
+    EXPECT_FALSE(p3->pattern.SetDest().IsPseudoReg())
+        << "Expected higher-order live-through global ($a2) to prevent coalescing $v1 locals:\n"
+        << lifted.FormatSummary();
+  }
+  {
+    const RtlControlFlowGraph lifted = InvertAlterReg(
+        make_two_block_cfg(/*include_higher_order_live_through_global=*/false), o1_prof, 72);
+    auto p1 = ParsePatternAndNotes(lifted.rpo_blocks[1].instructions[1]);
+    auto p3 = ParsePatternAndNotes(lifted.rpo_blocks[1].instructions[3]);
+    ASSERT_TRUE(p1.ok() && p3.ok());
+    EXPECT_TRUE(p1->pattern.SetDest().IsPseudoReg()) << lifted.FormatSummary();
+    EXPECT_TRUE(p3->pattern.SetDest().IsPseudoReg()) << lifted.FormatSummary();
+    EXPECT_EQ(p1->pattern.SetDest().RegNo(), p3->pattern.SetDest().RegNo())
+        << "Expected absence of higher-order live-through global to allow coalescing $v1 locals:\n"
+        << lifted.FormatSummary();
+  }
+}
+
+TEST_F(InvertAlterRegTest, CoalescesDisjointMultiBlockFprPseudosAndPromotesO0DiMdMemStore) {
+  // 1. Disjoint multi-block same-reg `FP_REGS` (`32..63`, step 2) coalescing:
+  //    web A in `$f2` (`34`, B0 -> B1) overlaps `$f0` (`32`), while disjoint
+  //    web B in `$f2` (`34`, B1 -> B3 / B2 -> B3) has `$f0` free. Coalescing
+  //    A and B into one pseudo carries A's conflict with `$f0` onto B so
+  //    `global_alloc` keeps `$f2` instead of assigning `$f0` (positive).
+  {
+    const CompilationProfile o2_prof{2, {"-O2", "-mips1", "-funsigned-char", "-Wa,-O2"}, {}};
+    hooks_.ApplyCompilationProfile(o2_prof);
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.rpo_blocks = {
+        RtlBasicBlock{
+            .id = 0,
+            .instructions =
+                {
+                    "(set (reg:DF 32 $f0) (mem/u:DF (reg:SI 4 a0)))",
+                    "(set (reg:DF 34 $f2) (mem/u:DF (plus:SI (reg:SI 4 a0) (const_int 8))))",
+                    "(set (pc) (if_then_else (eq:SI (reg:SI 5 a1) (const_int 0)) "
+                    "(label_ref L0) (pc)))",
+                },
+            .successors = {2, 1},
+        },
+        RtlBasicBlock{
+            .id = 1,
+            .instructions =
+                {
+                    "(set (reg:DF 32 $f0) (plus:DF (reg:DF 32 $f0) (reg:DF 34 $f2))) "
+                    "(expr_list:REG_DEAD (reg:DF 34 $f2) (nil))",
+                    "(set (mem:DF (reg:SI 4 a0)) (reg:DF 32 $f0)) "
+                    "(expr_list:REG_DEAD (reg:DF 32 $f0) (nil))",
+                    "(set (reg:DF 34 $f2) (mem/u:DF (plus:SI (reg:SI 4 a0) (const_int 16))))",
+                    "(set (pc) (label_ref L1))",
+                },
+            .successors = {3},
+        },
+        RtlBasicBlock{
+            .id = 2,
+            .instructions =
+                {
+                    "(set (reg:DF 32 $f0) (mult:DF (reg:DF 32 $f0) (reg:DF 34 $f2))) "
+                    "(expr_list:REG_DEAD (reg:DF 34 $f2) (nil))",
+                    "(set (mem:DF (plus:SI (reg:SI 4 a0) (const_int 8))) (reg:DF 32 $f0)) "
+                    "(expr_list:REG_DEAD (reg:DF 32 $f0) (nil))",
+                    "(set (reg:DF 34 $f2) (mem/u:DF (plus:SI (reg:SI 4 a0) (const_int 24))))",
+                },
+            .successors = {3},
+            .has_label = true,
+        },
+        RtlBasicBlock{
+            .id = 3,
+            .instructions =
+                {
+                    "(set (reg/i:DF 32 $f0) (plus:DF (reg:DF 34 $f2) (reg:DF 44 $f12))) "
+                    "(expr_list:REG_DEAD (reg:DF 34 $f2) (expr_list:REG_DEAD (reg:DF 44 $f12) "
+                    "(nil)))",
+                    "(use (reg/i:DF 32 $f0))",
+                },
+            .has_label = true,
+        },
+    };
+    SyncAllBlocks(&cfg);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    auto p0 = ParsePatternAndNotes(lifted.rpo_blocks[0].instructions[1]);
+    auto p1 = ParsePatternAndNotes(lifted.rpo_blocks[1].instructions[2]);
+    ASSERT_TRUE(p0.ok() && p1.ok());
+    ASSERT_TRUE(p0->pattern.SetDest().IsPseudoReg());
+    ASSERT_TRUE(p1->pattern.SetDest().IsPseudoReg());
+    EXPECT_EQ(p0->pattern.SetDest().RegNo(), p1->pattern.SetDest().RegNo())
+        << "Expected disjoint multi-block $f2 webs to coalesce:\n"
+        << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+
+  // 2. `-O0` `!gp64` `PromoteNonConflictingSingleBlockMdPseudos` on `mulsidi3`:
+  //    `mult:DI -> 64 hi ; (set 10 t2 64 hi) ; (set mem:DI 10 t2)` promotes the
+  //    pseudo to `reg_renumber == 64` and demotes `10 t2` back to hard reg
+  //    (positive), whereas a non-`MEM` consumer does not promote at `-O0` (negative).
+  {
+    const CompilationProfile o0_prof{0, {"-O0", "-mips2", "-Wa,-g"}, {}};
+    hooks_.ApplyCompilationProfile(o0_prof);
+    auto make_o0_mul_cfg = [](bool mem_store) {
+      RtlControlFlowGraph cfg;
+      cfg.pass = RtlPassKind::kGreg;
+      cfg.sideband.frame_pointer_needed = true;
+      cfg.sideband.frame_size_bytes = 32;
+      cfg.rpo_blocks.push_back(RtlBasicBlock{
+          .id = 0,
+          .instructions =
+              {
+                  "(set (reg:SI 2 v0) (mem:SI (reg:SI 30 $fp)))",
+                  "(set (reg:SI 3 v1) (mem:SI (plus:SI (reg:SI 30 $fp) (const_int 4))))",
+                  "(parallel[ (set (reg:DI 64 hi) (mult:DI (sign_extend:DI (reg:SI 2 v0)) "
+                  "(sign_extend:DI (reg:SI 3 v1)))) (clobber (reg:SI 66 accum)) ] )",
+                  "(set (reg:DI 10 t2) (reg:DI 64 hi))",
+                  mem_store
+                      ? "(set (mem:DI (plus:SI (reg:SI 30 $fp) (const_int 16))) (reg:DI 10 t2))"
+                      : "(set (reg:DI 4 a0) (xor:DI (reg:DI 10 t2) (reg:DI 4 a0)))",
+                  "(set (reg/i:DI 2 v0) (mem:DI (plus:SI (reg:SI 30 $fp) (const_int 16))))",
+                  "(use (reg/i:DI 2 v0))",
+              },
+      });
+      SyncAllBlocks(&cfg);
+      return cfg;
+    };
+    const RtlControlFlowGraph pos =
+        InvertAlterReg(make_o0_mul_cfg(/*mem_store=*/true), o0_prof, 72);
+    bool found_64_pseudo = false;
+    for (const auto& [p, hr] : pos.sideband.reg_renumber) {
+      if (hr == 64) {
+        found_64_pseudo = true;
+      }
+    }
+    EXPECT_TRUE(found_64_pseudo) << pos.FormatSummary();
+    EXPECT_NE(pos.rpo_blocks[0].instructions[3].find("(set (reg:DI 10 t2) (reg:DI "),
+              std::string::npos)
+        << pos.FormatSummary();
+
+    const RtlControlFlowGraph neg =
+        InvertAlterReg(make_o0_mul_cfg(/*mem_store=*/false), o0_prof, 72);
+    bool neg_has_64_pseudo = false;
+    for (const auto& [p, hr] : neg.sideband.reg_renumber) {
+      if (hr == 64) {
+        neg_has_64_pseudo = true;
+      }
+    }
+    EXPECT_FALSE(neg_has_64_pseudo) << neg.FormatSummary();
+  }
+}
+
+TEST_F(InvertAlterRegTest,
+       CoalesceDisjointMultiBlockFprRequiresMatchingModeAndUpgradesPartialDiRegDead) {
+  const CompilationProfile o2_prof{.optimize_level = 2,
+                                   .c_flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"}};
+
+  // 1. Negative for `CoalesceDisjointMultiBlockSameRegPseudos`
+  //    (`config/mips/mips.h:1268-1279`): disjoint multi-block `kDF` (web A) and
+  //    `kSF` (web B) pseudos both assigned to `$f2` (`34`) must NOT be coalesced
+  //    into one pseudo.
+  {
+    const CompilationProfile mips1_prof{2, {"-O2", "-mips1", "-funsigned-char", "-Wa,-O2"}, {}};
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.rpo_blocks = {
+        RtlBasicBlock{
+            .id = 0,
+            .instructions =
+                {
+                    "(set (reg:DF 32 $f0) (mem/u:DF (reg:SI 4 a0)))",
+                    "(set (reg:DF 34 $f2) (mem/u:DF (plus:SI (reg:SI 4 a0) (const_int 8))))",
+                    "(set (pc) (if_then_else (eq:SI (reg:SI 5 a1) (const_int 0)) "
+                    "(label_ref L0) (pc)))",
+                },
+            .successors = {2, 1},
+        },
+        RtlBasicBlock{
+            .id = 1,
+            .instructions =
+                {
+                    "(set (reg:DF 32 $f0) (plus:DF (reg:DF 32 $f0) (reg:DF 34 $f2))) "
+                    "(expr_list:REG_DEAD (reg:DF 34 $f2) (nil))",
+                    "(set (mem:DF (reg:SI 4 a0)) (reg:DF 32 $f0)) "
+                    "(expr_list:REG_DEAD (reg:DF 32 $f0) (nil))",
+                    "(set (reg:SF 34 $f2) (mem/u:SF (plus:SI (reg:SI 4 a0) (const_int 16))))",
+                    "(set (pc) (label_ref L1))",
+                },
+            .successors = {3},
+        },
+        RtlBasicBlock{
+            .id = 2,
+            .instructions =
+                {
+                    "(set (reg:DF 32 $f0) (mult:DF (reg:DF 32 $f0) (reg:DF 34 $f2))) "
+                    "(expr_list:REG_DEAD (reg:DF 34 $f2) (nil))",
+                    "(set (mem:DF (plus:SI (reg:SI 4 a0) (const_int 8))) (reg:DF 32 $f0)) "
+                    "(expr_list:REG_DEAD (reg:DF 32 $f0) (nil))",
+                    "(set (reg:SF 34 $f2) (mem/u:SF (plus:SI (reg:SI 4 a0) (const_int 24))))",
+                },
+            .successors = {3},
+            .has_label = true,
+        },
+        RtlBasicBlock{
+            .id = 3,
+            .instructions =
+                {
+                    "(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 34 $f2) (reg:SF 44 $f12))) "
+                    "(expr_list:REG_DEAD (reg:SF 34 $f2) (expr_list:REG_DEAD (reg:SF 44 $f12) "
+                    "(nil)))",
+                    "(use (reg/i:SF 32 $f0))",
+                },
+            .successors = {},
+            .has_label = true,
+        },
+    };
+    for (auto& blk : cfg.rpo_blocks) {
+      blk.SyncRtlInsnsFromInstructions();
+    }
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, mips1_prof, 72);
+    int f2_pseudos = 0;
+    for (const auto& [p, hr] : lifted.sideband.reg_renumber) {
+      if (hr == 34) {
+        ++f2_pseudos;
+      }
+    }
+    EXPECT_GE(f2_pseudos, 2) << lifted.FormatSummary();
+  }
+
+  // 2. `RewriteNoteDatumExpr` (`flow.c:2537-2550`): when an insn reads
+  //    `(subreg:SI (reg:DI 2 v0) 1)` and simultaneously writes word 2 (`(reg:SI 2 v0)`)
+  //    to a distinct pseudo, a partial-word `(REG_DEAD (reg:SI 3 v1))` note is
+  //    upgraded to `(REG_DEAD (reg:DI p))` so `p` stays lifted (positive); when
+  //    word 2 is NOT overwritten, the partial note is NOT blindly upgraded (negative).
+  {
+    auto build_cfg = [](bool writes_word2) {
+      RtlControlFlowGraph cfg;
+      cfg.pass = RtlPassKind::kGreg;
+      cfg.rpo_blocks.resize(1);
+      cfg.rpo_blocks[0].id = 0;
+      const std::string dst = writes_word2 ? "(reg:SI 2 v0)" : "(reg:SI 5 a1)";
+      cfg.rpo_blocks[0].instructions = {
+          "(set (reg:DI 2 v0) (mem:DI (plus:SI (reg:SI 0 argp) (const_int 16))))",
+          "(set (reg:SI 4 a0) (plus:SI (subreg:SI (reg:DI 2 v0) 0) (reg:SI 16 s0)))",
+          "(set " + dst +
+              " (plus:SI (subreg:SI (reg:DI 2 v0) 1) (reg:SI 17 s1))) "
+              "(expr_list:REG_DEAD (reg:SI 3 v1) (nil))",
+          "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 4 a0) " + dst + "))",
+          "(use (reg/i:SI 2 v0))",
+      };
+      cfg.rpo_blocks[0].SyncRtlInsnsFromInstructions();
+      return cfg;
+    };
+
+    const RtlControlFlowGraph pos = InvertAlterReg(build_cfg(/*writes_word2=*/true), o2_prof, 72);
+    EXPECT_NE(pos.rpo_blocks[0].instructions[0].find("(set (reg:DI 72)"), std::string::npos)
+        << pos.FormatSummary();
+    EXPECT_NE(pos.rpo_blocks[0].instructions[2].find("REG_DEAD (reg:DI 72)"), std::string::npos)
+        << pos.FormatSummary();
+
+    const RtlControlFlowGraph neg = InvertAlterReg(build_cfg(/*writes_word2=*/false), o2_prof, 72);
+    EXPECT_EQ(neg.rpo_blocks[0].instructions[2].find("REG_DEAD (reg:DI 72)"), std::string::npos)
+        << neg.FormatSummary();
+  }
+}
+
+TEST_F(InvertAlterRegTest, BaseLiveTicksRecordsUnusedHardRegWritePreventingCrossWriteCoalesce) {
+  // Mirrors `global.c:729-767` (`global_conflicts`): `note_stores(...,
+  // mark_reg_store)` records birth conflicts for every stored hard register
+  // BEFORE `REG_UNUSED` kills it. When two disjoint single-block `$2 v0` webs
+  // are separated by `(set (reg:DI 2 v0) (ashiftrt:DI (reg:DI 4 a0) 32))`
+  // carrying `(REG_UNUSED (reg:SI 2 v0))` and the second `$2 v0` web reads dying
+  // hard regs `$5 a1`/`$3 v1` (`local-alloc.c:1798` `qty_phys_sugg`),
+  // `base_live_ticks[2*i+1]` must record `$2 v0` occupied so the two `$2 v0`
+  // webs are NOT coalesced across the unused `$2 v0` write (positive). Without
+  // the intervening `$2 v0` write (negative), coalescing is permitted.
+  const CompilationProfile o2_prof{.optimize_level = 2,
+                                   .c_flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"}};
+  hooks_.ApplyCompilationProfile(o2_prof);
+
+  auto make_cfg = [](bool include_unused_v0_di_write) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    std::vector<std::string> insns = {
+        "(set (reg:SI 2 v0) (plus:SI (reg:SI 16 s0) (const_int 7)))",
+        "(set (reg:SI 16 s0) (and:SI (reg:SI 2 v0) (reg:SI 22 s6))) "
+        "(expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+        "(set (reg:DI 4 a0) (mem:DI (reg:SI 16 s0)))",
+        "(set (reg:SI 16 s0) (plus:SI (reg:SI 16 s0) (const_int 8)))",
+    };
+    if (include_unused_v0_di_write) {
+      insns.push_back(
+          "(parallel[ (set (reg:DI 2 v0) (ashiftrt:DI (reg:DI 4 a0) (const_int 32))) "
+          "(clobber (reg:SI 6 a2)) ] ) (expr_list:REG_DEAD (reg:SI 4 a0) "
+          "(expr_list:REG_UNUSED (reg:SI 2 v0) (expr_list:REG_UNUSED (reg:SI 6 a2) (nil))))");
+      insns.push_back(
+          "(set (reg:SI 2 v0) (xor:SI (reg:SI 5 a1) (reg:SI 3 v1))) "
+          "(expr_list:REG_DEAD (reg:SI 5 a1) (expr_list:REG_DEAD (reg:SI 3 v1) (nil)))");
+    } else {
+      insns.push_back(
+          "(set (reg:SI 2 v0) (xor:SI (reg:SI 5 a1) (reg:SI 4 a0))) "
+          "(expr_list:REG_DEAD (reg:SI 5 a1) (expr_list:REG_DEAD (reg:SI 4 a0) (nil)))");
+    }
+    insns.push_back(
+        "(set (reg:SI 17 s1) (plus:SI (reg:SI 17 s1) (reg:SI 2 v0))) "
+        "(expr_list:REG_DEAD (reg:SI 2 v0) (nil))");
+    insns.push_back("(set (reg/i:SI 2 v0) (reg:SI 17 s1))");
+    insns.push_back("(use (reg/i:SI 2 v0))");
+    cfg.rpo_blocks.push_back(RtlBasicBlock{.id = 0, .instructions = std::move(insns)});
+    SyncAllBlocks(&cfg);
+    return cfg;
+  };
+
+  // Positive: intervening `(set (reg:DI 2 v0) ...) (REG_UNUSED (reg:SI 2 v0))`
+  // prevents coalescing `[0]` and `[5]` into one pseudo.
+  {
+    const RtlControlFlowGraph cfg = make_cfg(/*include_unused_v0_di_write=*/true);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    auto p0 = ParsePatternAndNotes(lifted.rpo_blocks[0].instructions[0]);
+    auto p5 = ParsePatternAndNotes(lifted.rpo_blocks[0].instructions[5]);
+    ASSERT_TRUE(p0.ok() && p5.ok());
+    EXPECT_NE(p0->pattern.SetDest().RegNo(), p5->pattern.SetDest().RegNo())
+        << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+
+  // Negative: without the intervening `$2 v0` write, `InvertAlterReg` still
+  // produces a valid `alter_reg` preimage.
+  {
+    const RtlControlFlowGraph cfg = make_cfg(/*include_unused_v0_di_write=*/false);
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+}
+
+TEST_F(InvertAlterRegTest, LocalStackArrayNotTreatedAsReloadSpillSlotPositiveAndNegative) {
+  // Mirrors `reload1.c:2352-2358` + `function.c:682-704` (`assign_stack_local(..., -1)`):
+  // 1. Positive: a local `s32[2]` array accessing both `0($sp)` and `4($sp)` inside
+  //    the same 8-byte slot (`frame_size_bytes = 8`) is NOT a `reload` spill slot,
+  //    so `InvertAlterReg` must keep an overlapping `$v1` local lifted rather than
+  //    demoting it due to a false local-spill `combine_regs`.
+  // 2. Negative (contrast): an upper 8-byte big-endian reload spill slot at `12($sp)`
+  //    above the `0($sp)/4($sp)` local array (`frame_size_bytes = 16`) IS still
+  //    recognized as a local reload spill slot and demotes overlapping `$v1`.
+  const CompilationProfile o2_prof{.optimize_level = 2, .c_flags = {"-O2", "-mips2"}};
+  hooks_.ApplyCompilationProfile(o2_prof);
+
+  auto make_cfg = [](bool use_upper_spill_slot) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.sideband.frame_size_bytes = use_upper_spill_slot ? 16 : 8;
+    const std::string slot_expr = use_upper_spill_slot
+                                      ? "(mem:SI (plus:SI (reg:SI 29 sp) (const_int 12)))"
+                                      : "(mem:SI (plus:SI (reg:SI 29 sp) (const_int 4)))";
+    cfg.rpo_blocks = {
+        RtlBasicBlock{
+            .id = 0,
+            .instructions =
+                {
+                    "(set (mem:SI (reg:SI 29 sp)) (reg:SI 6 a2))",
+                    "(set (reg:SI 8 t0) (mem:SI (reg:SI 29 sp)))",
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 4 a0) (reg:SI 8 t0))) "
+                    "(expr_list:REG_DEAD (reg:SI 4 a0) (expr_list:REG_DEAD (reg:SI 8 t0) (nil)))",
+                    "(set (reg:SI 3 v1) (plus:SI (reg:SI 5 a1) (const_int 2)))",
+                    "(set (reg:SI 7 a3) (plus:SI (reg:SI 2 v0) (const_int 3))) "
+                    "(expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+                    "(set " + slot_expr +
+                        " (reg:SI 7 a3)) (expr_list:REG_DEAD (reg:SI 7 a3) (nil))",
+                    "(set (mem:SI (reg:SI 6 a2)) (reg:SI 3 v1)) "
+                    "(expr_list:REG_DEAD (reg:SI 3 v1) (expr_list:REG_DEAD (reg:SI 6 a2) (nil)))",
+                    "(set (reg:SI 2 v0) " + slot_expr + ")",
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 5 a1))) "
+                    "(expr_list:REG_DEAD (reg:SI 2 v0) (expr_list:REG_DEAD (reg:SI 5 a1) (nil)))",
+                    "(use (reg/i:SI 2 v0))",
+                },
+        },
+    };
+    SyncAllBlocks(&cfg);
+    return cfg;
+  };
+
+  // Positive: `4($sp)` shares 8-byte slot 0 with `0($sp)` -> NOT a spill slot -> `$v1` stays
+  // lifted.
+  {
+    const RtlControlFlowGraph cfg = make_cfg(/*use_upper_spill_slot=*/false);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 10u);
+    EXPECT_EQ(lifted.rpo_blocks[0].instructions[3].find("(set (reg:SI 3 v1)"), std::string::npos)
+        << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+
+  // Negative (contrast): `12($sp)` is a valid upper 8-byte big-endian reload spill slot -> `$v1`
+  // demoted.
+  {
+    const RtlControlFlowGraph cfg = make_cfg(/*use_upper_spill_slot=*/true);
+    const RtlControlFlowGraph lifted = InvertAlterReg(cfg, o2_prof, 72);
+    ASSERT_EQ(lifted.rpo_blocks[0].instructions.size(), 10u);
+    EXPECT_NE(lifted.rpo_blocks[0].instructions[3].find("(set (reg:SI 3 v1)"), std::string::npos)
+        << lifted.FormatSummary();
+    const RightInverseResult res = verifier_.VerifyAlterRegRightInverse(cfg);
+    EXPECT_TRUE(res.matches) << res.diff_detail;
+  }
+}
+
 class InvertAlterRegCorpusTest : public ::testing::TestWithParam<RoundTripTestCase> {
  protected:
   static void SetUpTestSuite() {
@@ -2309,6 +4293,329 @@ TEST_P(InvertAlterRegCorpusTest, All4172CasesSatisfyBoundaryAndFreshGregRightInv
       << canonical_fresh_greg.FormatSummary() << "\nactual (.09.greg):\n"
       << replayed.post_state.FormatSummary() << "\nlifted pre-alter:\n"
       << lifted_pre_alter.FormatSummary();
+}
+
+TEST_F(InvertAlterRegTest, ResolveDeathlessLocalPseudosPreservesIndirectCallTargetPseudo) {
+  // Mirrors `calls.c:emit_call_1` + `flow.c:2504-2515`: a local GPR web feeding
+  // an indirect `CALL_INSN` callee address `(call (mem:SI (reg:SI 3 v1)) ...)`
+  // lacks `(REG_DEAD 3 v1)` on the `CALL_INSN` in Stage 0, yet must remain a
+  // pseudo rather than being demoted by `ResolveDeathlessLocalPseudos`.
+  const CompilationProfile o2_prof{.optimize_level = 2,
+                                   .c_flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"}};
+  hooks_.ApplyCompilationProfile(o2_prof);
+
+  auto make_cfg = [](bool use_in_indirect_call) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    std::vector<std::string> insns = {
+        "(set (reg:SI 16 s0) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+        "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"Prep\"))) (const_int 16))) "
+        "(clobber (reg:SI 31 ra)) ] )",
+        "(set (reg:SI 3 v1) (mem:SI (reg:SI 16 s0))) (expr_list:REG_DEAD (reg:SI 16 s0) (nil))",
+        "(set (reg:SI 4 a0) (reg:SI 2 v0)) (expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+    };
+    if (use_in_indirect_call) {
+      insns.push_back(
+          "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (reg:SI 3 v1)) (const_int 16))) "
+          "(clobber (reg:SI 31 ra)) ] )");
+      insns.push_back("(set (reg/i:SI 2 v0) (reg:SI 2 v0))");
+    } else {
+      insns.push_back("(set (reg/i:SI 2 v0) (plus:SI (reg:SI 3 v1) (reg:SI 4 a0)))");
+    }
+    insns.push_back("(use (reg/i:SI 2 v0))");
+    cfg.rpo_blocks.push_back(RtlBasicBlock{.id = 0, .instructions = std::move(insns)});
+    SyncAllBlocks(&cfg);
+    return cfg;
+  };
+
+  // Positive: indirect call target `$3 v1` stays lifted as a pseudo (`>= 68`).
+  {
+    const RtlControlFlowGraph lifted =
+        InvertAlterReg(make_cfg(/*use_in_indirect_call=*/true), o2_prof, 72);
+    auto p2 = ParsePatternAndNotes(lifted.rpo_blocks[0].instructions[2]);
+    ASSERT_TRUE(p2.ok());
+    EXPECT_TRUE(p2->pattern.SetDest().IsPseudoReg()) << lifted.FormatSummary();
+  }
+
+  // Negative: deathless non-call consumer without `REG_DEAD` still demotes `$3 v1`.
+  {
+    const RtlControlFlowGraph lifted =
+        InvertAlterReg(make_cfg(/*use_in_indirect_call=*/false), o2_prof, 72);
+    auto p2 = ParsePatternAndNotes(lifted.rpo_blocks[0].instructions[2]);
+    ASSERT_TRUE(p2.ok());
+    EXPECT_TRUE(p2->pattern.SetDest().IsHardReg()) << lifted.FormatSummary();
+    EXPECT_EQ(p2->pattern.SetDest().RegNo(), 3) << lifted.FormatSummary();
+  }
+}
+
+TEST_F(InvertAlterRegTest,
+       GlobalPrefShieldingPrefersSched1AchievableCandidateOverBirthingBreakingCandidate) {
+  // Mirrors `sched.c:2469-2549` (`birthing_insn_p`): when global preference
+  // shielding for `p_other` (allocated `$f20`, preferring `$f0` via call-return
+  // copy `(set $f20 $f0)`) has two conflicting `$f0` pseudos — `q_break` in
+  // `B2` whose demotion to `$f0` (`reg_n_sets[32] >= 3`) destroys
+  // `birthing_insn_p` and breaks `Im(F_sched1)`, and `q_safe` in `B1` whose
+  // demotion keeps `B1` in `Im(F_sched1)` — `-O2` (`RunsSched1()`) selects
+  // `q_safe` while `-O1` (`!RunsSched1()`) keeps the default higher-regno
+  // candidate `q_break`.
+  const CompilationProfile o2_mips1{2, {"-O2", "-mips1", "-funsigned-char", "-Wa,-O2"}, {}};
+  const CompilationProfile o1_mips1{1, {"-O1", "-mips1", "-funsigned-char", "-Wa,-O2"}, {}};
+
+  auto build_cfg = []() {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    // B0: `p_other` (`$f20`) receives call-return `$f0` (`pref = $f0`).
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(parallel[ (set (reg:SF 32 $f0) (call (mem:SI (symbol_ref:SI (\"InitF\"))) "
+                "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+                "(set (reg:SF 52 $f20) (reg:SF 32 $f0)) (expr_list:REG_DEAD (reg:SF 32 $f0) (nil))",
+                "(set (pc) (if_then_else (eq:SI (reg:SI 17 s1) (const_int 0)) "
+                "(label_ref L2) (pc)))",
+            },
+        .successors = {1, 2},
+    });
+    // B1 -> B3: global `q_safe` (`$f0`, 2 blocks, read in def block) remains
+    // `sched1`-achievable when demoted to hard reg `32 $f0`.
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 1,
+        .instructions =
+            {
+                "(set (reg:SF 32 $f0) (mem/u:SF (reg:SI 18 s2)))",
+                "(set (reg:SF 52 $f20) (plus:SF (reg:SF 52 $f20) (reg:SF 32 $f0)))",
+            },
+        .successors = {3},
+    });
+    // B2 -> B4: global `q_break` (`$f0`, 2 blocks, read in def block, higher
+    // regno than `q_safe`) sits in a block whose order (`abs:SF` latency 1
+    // before `const_double` load latency 2) is NOT in `Im(F_sched1)` on
+    // `-mips1`, so `-O2` skips `q_break` in favor of `q_safe`.
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 2,
+        .instructions =
+            {
+                "(set (reg:SF 34 $f2) (mem/u:SF (reg:SI 18 s2)))",
+                "(set (reg:SF 34 $f2) (abs:SF (reg:SF 34 $f2)))",
+                "(set (reg:SF 32 $f0) (const_double:SF (cc0) 0 1070596096))",
+                "(set (reg:SF 52 $f20) (plus:SF (reg:SF 34 $f2) (reg:SF 32 $f0))) "
+                "(expr_list:REG_DEAD (reg:SF 34 $f2) (nil))",
+            },
+        .successors = {4},
+    });
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 3,
+        .instructions =
+            {
+                "(set (reg:SF 52 $f20) (plus:SF (reg:SF 52 $f20) (reg:SF 32 $f0))) "
+                "(expr_list:REG_DEAD (reg:SF 32 $f0) (nil))",
+                "(set (pc) (label_ref L5))",
+            },
+        .successors = {5},
+    });
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 4,
+        .instructions =
+            {
+                "(set (reg:SF 52 $f20) (plus:SF (reg:SF 52 $f20) (reg:SF 32 $f0))) "
+                "(expr_list:REG_DEAD (reg:SF 32 $f0) (nil))",
+            },
+        .successors = {5},
+    });
+    // B5: returns `$f20` via `(reg/i:SF 32 $f0)` (`reg_n_sets[32] >= 3` if
+    // either `$f0` candidate is demoted).
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 5,
+        .instructions =
+            {
+                "(set (reg/i:SF 32 $f0) (reg:SF 52 $f20)) "
+                "(expr_list:REG_DEAD (reg:SF 52 $f20) (nil))",
+                "(use (reg/i:SF 32 $f0))",
+            },
+        .successors = {},
+    });
+    SyncAllBlocks(&cfg);
+    return cfg;
+  };
+
+  // Positive (`-O2`): `q_break` in B2 stays lifted as a pseudo while `q_safe`
+  // in B1 shields `$f0`.
+  {
+    const RtlControlFlowGraph lifted = InvertAlterReg(build_cfg(), o2_mips1, 72);
+    auto b1_0 = ParsePatternAndNotes(lifted.rpo_blocks[1].instructions[0]);
+    auto b2_2 = ParsePatternAndNotes(lifted.rpo_blocks[2].instructions[2]);
+    ASSERT_TRUE(b1_0.ok());
+    ASSERT_TRUE(b2_2.ok());
+    EXPECT_TRUE(b1_0->pattern.SetDest().IsHardReg()) << lifted.FormatSummary();
+    EXPECT_EQ(b1_0->pattern.SetDest().RegNo(), 32) << lifted.FormatSummary();
+    EXPECT_TRUE(b2_2->pattern.SetDest().IsPseudoReg()) << lifted.FormatSummary();
+  }
+
+  // Negative (`-O1`, `!RunsSched1()`): default tie-break picks the higher
+  // pseudo `q_break` in B2 without running `sched1` achievability checks.
+  {
+    const RtlControlFlowGraph lifted = InvertAlterReg(build_cfg(), o1_mips1, 72);
+    auto b1_0 = ParsePatternAndNotes(lifted.rpo_blocks[1].instructions[0]);
+    auto b2_2 = ParsePatternAndNotes(lifted.rpo_blocks[2].instructions[2]);
+    ASSERT_TRUE(b1_0.ok());
+    ASSERT_TRUE(b2_2.ok());
+    EXPECT_TRUE(b1_0->pattern.SetDest().IsPseudoReg()) << lifted.FormatSummary();
+    EXPECT_TRUE(b2_2->pattern.SetDest().IsHardReg()) << lifted.FormatSummary();
+    EXPECT_EQ(b2_2->pattern.SetDest().RegNo(), 32) << lifted.FormatSummary();
+  }
+}
+
+TEST_F(InvertAlterRegTest, DemotesPostSetupSaveAreasSpillSlotAboveCallerSaveSlot) {
+  const CompilationProfile o2_prof{2, {"-O2", "-mips2"}, {}};
+
+  // Positive (`reload1.c:658, 1446, 2253, 3499`): an 8-byte aligned big-endian
+  // reload spill slot `[sp+28]` allocated AFTER `setup_save_areas` (above a
+  // caller-save save/restore slot at `[sp+20]`) is still discovered by
+  // `FindProvenReloadSpillSlots`, demoting the no-`REG_DEAD` reload scratch
+  // `$f0` (32) back to a hard register.
+  auto make_cfg = [&](bool add_reg_dead_on_use) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.sideband.frame_pointer_needed = false;
+    cfg.sideband.outgoing_args_size = 16;
+    cfg.sideband.frame_size_bytes = 16;  // [sp+16..sp+32): [sp+20] caller-save, [sp+28] spill
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(set (reg:SF 34 $f2) (plus:SF (reg:SF 44 $f12) (reg:SF 46 $f14)))",
+                // Caller-save save/restore of `$f2` around a call at `[sp+20]`.
+                "(set (mem:SF (plus:SI (reg:SI 29 sp) (const_int 20))) (reg:SF 34 $f2))",
+                "(parallel[ (set (reg:SF 32 $f0) "
+                "(call (mem:SI (symbol_ref:SI (\"callee\"))) (const_int 16))) "
+                "(clobber (reg:SI 31 ra)) ] )",
+                "(set (reg:SF 34 $f2) (mem:SF (plus:SI (reg:SI 29 sp) (const_int 20))))",
+                // Post-`setup_save_areas` output-reload spill into `[sp+28]` + input reload.
+                "(set (reg:SF 32 $f0) (mult:SF (reg:SF 32 $f0) (reg:SF 34 $f2)))",
+                "(set (mem:SF (plus:SI (reg:SI 29 sp) (const_int 28))) (reg:SF 32 $f0))",
+                "(set (reg:SF 32 $f0) (mem:SF (plus:SI (reg:SI 29 sp) (const_int 28))))",
+                add_reg_dead_on_use
+                    ? "(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 32 $f0) (reg:SF 34 $f2))) "
+                      "(expr_list:REG_DEAD (reg:SF 32 $f0) "
+                      "(expr_list:REG_DEAD (reg:SF 34 $f2) (nil)))"
+                    : "(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 32 $f0) (reg:SF 34 $f2))) "
+                      "(expr_list:REG_DEAD (reg:SF 34 $f2) (nil))",
+                "(use (reg/i:SF 32 $f0))",
+            },
+    });
+    SyncAllBlocks(&cfg);
+    return cfg;
+  };
+
+  {
+    const RtlControlFlowGraph lifted =
+        InvertAlterReg(make_cfg(/*add_reg_dead_on_use=*/false), o2_prof, 72);
+    auto load_pn = ParsePatternAndNotes(lifted.rpo_blocks[0].instructions[6]);
+    ASSERT_TRUE(load_pn.ok());
+    EXPECT_TRUE(load_pn->pattern.SetDest().IsHardReg()) << lifted.FormatSummary();
+    EXPECT_EQ(load_pn->pattern.SetDest().RegNo(), 32) << lifted.FormatSummary();
+  }
+
+  // Negative: when the last use carries `(REG_DEAD (reg:SF 32 $f0))`, the load
+  // destination is a real pre-reload pseudo rather than an un-noted reload
+  // scratch, so it stays lifted as a pseudo.
+  {
+    const RtlControlFlowGraph lifted =
+        InvertAlterReg(make_cfg(/*add_reg_dead_on_use=*/true), o2_prof, 72);
+    auto load_pn = ParsePatternAndNotes(lifted.rpo_blocks[0].instructions[6]);
+    ASSERT_TRUE(load_pn.ok());
+    EXPECT_TRUE(load_pn->pattern.SetDest().IsPseudoReg()) << lifted.FormatSummary();
+  }
+}
+
+TEST_F(InvertAlterRegTest, DemotesMultiUseCalleeSavedGprToFprAndSelfLoopConstDoubleReloads) {
+  const CompilationProfile o2_prof{2, {"-O2", "-mips2"}, {}};
+
+  // Exercises BOTH:
+  // 1. `reload1.c:5186-5258` (`choose_reload_regs`) multi-use inherited copy
+  //    from callee-saved GPR `$s0` (16) -> call-used FPR `$f4` (36) in B0
+  //    (2 FP arithmetic uses, no `REG_DEAD`), which registers `$f4` as a
+  //    proven call-used FP spill register in `DemoteReloadAndCallerSaveHardScratches`.
+  // 2. `reload1.c:517-524, 566-573, 2769-2782, 6583` (`reg_equiv_constant`):
+  //    in self-loop block B1 with unique preheader B0, a rematerialized
+  //    `const_double:SF` into proven FP spill reg `$f4` (36) is demoted early
+  //    into `demoted_reload_scratch_masks` so `DetectLocalResolutionGroupConflicts`
+  //    does NOT inject a false `qty_phys_sugg = 36` onto local pseudo `q`
+  //    (`B1[1]`, allocated to `32 $f0`).
+  auto make_cfg = [](const char* b0_src_gpr, bool is_self_loop) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.rpo_blocks.resize(3);
+    cfg.rpo_blocks[0].id = 0;
+    cfg.rpo_blocks[0].successors = {1};
+    cfg.rpo_blocks[0].instructions = {
+        std::string("(set (reg:SF 36 $f4) (reg:SF ") + b0_src_gpr + "))",
+        "(set (reg:SF 34 $f2) (plus:SF (reg:SF 36 $f4) (reg:SF 44 $f12)))",
+        "(set (reg:SF 34 $f2) (mult:SF (reg:SF 34 $f2) (reg:SF 36 $f4)))",
+    };
+    cfg.rpo_blocks[1].id = 1;
+    cfg.rpo_blocks[1].successors =
+        is_self_loop ? std::vector<size_t>{1, 2} : std::vector<size_t>{2};
+    cfg.rpo_blocks[1].instructions = {
+        "(set (reg:SF 36 $f4) (const_double:SF (cc0) 0 1070596096))",
+        "(set (reg:SF 32 $f0) (plus:SF (reg:SF 36 $f4) (reg:SF 34 $f2)))",
+        "(set (reg:SF 34 $f2) (plus:SF (reg:SF 34 $f2) (reg:SF 32 $f0))) "
+        "(expr_list:REG_DEAD (reg:SF 32 $f0) (nil))",
+        "(set (reg:SI 4 a0) (plus:SI (reg:SI 4 a0) (const_int -1)))",
+        "(set (pc) (if_then_else (ne:SI (reg:SI 4 a0) (const_int 0)) (label_ref L1) (pc)))",
+    };
+    cfg.rpo_blocks[2].id = 2;
+    cfg.rpo_blocks[2].instructions = {
+        "(set (reg/i:SF 32 $f0) (reg:SF 34 $f2)) (expr_list:REG_DEAD (reg:SF 34 $f2) (nil))",
+        "(use (reg/i:SF 32 $f0))",
+    };
+    SyncAllBlocks(&cfg);
+    return cfg;
+  };
+
+  // Positive: multi-use callee-saved GPR `$s0` -> `$f4` in B0 + self-loop B1
+  // demotes both reload scratches into `demoted_reload_scratch_masks`, so local
+  // pseudo `B1[1]` (`32 $f0`) receives no false `qty_phys_sugg = 36` and stays
+  // lifted as a pseudo.
+  {
+    const RtlControlFlowGraph lifted =
+        InvertAlterReg(make_cfg("16 s0", /*is_self_loop=*/true), o2_prof, 72);
+    auto b0_copy = ParsePatternAndNotes(lifted.rpo_blocks[0].instructions[0]);
+    auto b1_cd = ParsePatternAndNotes(lifted.rpo_blocks[1].instructions[0]);
+    auto b1_real_q = ParsePatternAndNotes(lifted.rpo_blocks[1].instructions[1]);
+    ASSERT_TRUE(b0_copy.ok());
+    ASSERT_TRUE(b1_cd.ok());
+    ASSERT_TRUE(b1_real_q.ok());
+    EXPECT_TRUE(b0_copy->pattern.SetDest().IsHardReg()) << lifted.FormatSummary();
+    EXPECT_EQ(b0_copy->pattern.SetDest().RegNo(), 36) << lifted.FormatSummary();
+    EXPECT_TRUE(b1_cd->pattern.SetDest().IsHardReg()) << lifted.FormatSummary();
+    EXPECT_EQ(b1_cd->pattern.SetDest().RegNo(), 36) << lifted.FormatSummary();
+    EXPECT_TRUE(b1_real_q->pattern.SetDest().IsPseudoReg()) << lifted.FormatSummary();
+  }
+
+  // Negative 1 (Rule 2a): multi-use copy from call-used GPR `$a0` (4) in B0 is
+  // NOT demoted by Rule 2a, so `$f4` is not a proven FP spill reg, B1's
+  // `const_double` is not marked in `demoted_reload_scratch_masks`, and it
+  // injects false `qty_phys_sugg = 36` onto `B1[1]`, demoting `B1[1]`.
+  {
+    const RtlControlFlowGraph lifted =
+        InvertAlterReg(make_cfg("4 a0", /*is_self_loop=*/true), o2_prof, 72);
+    auto b1_real_q = ParsePatternAndNotes(lifted.rpo_blocks[1].instructions[1]);
+    ASSERT_TRUE(b1_real_q.ok());
+    EXPECT_TRUE(b1_real_q->pattern.SetDest().IsHardReg()) << lifted.FormatSummary();
+  }
+
+  // Negative 2 (Step 4): when B1 is NOT a self-loop, its `const_double` is not
+  // marked in `demoted_reload_scratch_masks` even though `$f4` is a proven FP
+  // spill reg, so it injects false `qty_phys_sugg = 36` onto `B1[1]`.
+  {
+    const RtlControlFlowGraph lifted =
+        InvertAlterReg(make_cfg("16 s0", /*is_self_loop=*/false), o2_prof, 72);
+    auto b1_real_q = ParsePatternAndNotes(lifted.rpo_blocks[1].instructions[1]);
+    ASSERT_TRUE(b1_real_q.ok());
+    EXPECT_TRUE(b1_real_q->pattern.SetDest().IsHardReg()) << lifted.FormatSummary();
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(All4172Cases, InvertAlterRegCorpusTest,

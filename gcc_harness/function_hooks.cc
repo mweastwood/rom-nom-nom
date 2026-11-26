@@ -3106,12 +3106,38 @@ int FunctionHooks::RunInvertJump(Rtx jump, Rtx nlabel) {
 // Stage 3 & Stage 6: Sched (`sched.c`)
 // -----------------------------------------------------------------------------
 
+namespace {
+
+// Preserves `regno_pointer_flag` across harness-only `restore_reg_data` +
+// `reg_scan` setup calls for scheduling and allocation passes: in genuine GCC
+// 2.7.2 (`toplev.c:3028-3128`), `schedule_insns`, `local_alloc`,
+// `global_alloc`, and `-O0` `reload` never invoke `restore_reg_data` or
+// `reg_scan`.
+void RestoreRegDataAndScanPreservingPointerFlags(Rtx head, int repeat) {
+  std::vector<char> saved_pointer_flags;
+  if (regno_pointer_flag != nullptr && regno_pointer_flag_length > 0) {
+    saved_pointer_flags.assign(regno_pointer_flag,
+                               regno_pointer_flag + static_cast<size_t>(regno_pointer_flag_length));
+  }
+  restore_reg_data(head);
+  max_regno = max_reg_num();
+  reg_scan(head, max_regno, repeat);
+  if (regno_pointer_flag != nullptr && regno_pointer_flag_length > 0) {
+    std::memset(regno_pointer_flag, 0, static_cast<size_t>(regno_pointer_flag_length));
+    const size_t copy_len =
+        std::min(saved_pointer_flags.size(), static_cast<size_t>(regno_pointer_flag_length));
+    if (copy_len > 0) {
+      std::memcpy(regno_pointer_flag, saved_pointer_flags.data(), copy_len);
+    }
+  }
+}
+
+}  // namespace
+
 void FunctionHooks::PrepareSchedState(Rtx first) {
   PopulateInsnCodesWithVolatileOk(first);
   StripFlowGeneratedNotes(first);
-  restore_reg_data(first);
-  max_regno = max_reg_num();
-  reg_scan(first, max_regno, 0);
+  RestoreRegDataAndScanPreservingPointerFlags(first, 0);
   flow_analysis(first, max_regno, nullptr);
   init_alias_analysis();
 
@@ -3271,7 +3297,7 @@ void RestoreExistingFlowState(const SavedFlowState& state) {
         state.saved_n_deaths[r] > 0) {
       reg_n_deaths[r] = state.saved_n_deaths[r];
     }
-    if (reg_live_length != nullptr && state.saved_live_length[r] > 0) {
+    if (reg_live_length != nullptr && state.saved_live_length[r] != 0) {
       reg_live_length[r] = state.saved_live_length[r];
     }
     if (r < static_cast<int>(state.saved_n_calls_crossed.size()) &&
@@ -3289,6 +3315,29 @@ void FunctionHooks::RunScheduleInsns(Rtx first) {
     return;
   }
   const int saved_reload_completed = reload_completed;
+  if (saved_reload_completed != 0) {
+    // `function.c:5454-5455, 5617-5663` (`reposition_prologue_and_epilogue_notes`):
+    // GCC's `schedule_insns` unconditionally calls `reposition_prologue_and_epilogue_notes`
+    // when `reload_completed != 0`, which dereferences `NOTE_INSN_PROLOGUE_END` /
+    // `NOTE_INSN_EPILOGUE_BEG` (`note == NULL` -> SIGSEGV) if `function.c`'s static
+    // `prologue`/`epilogue` UID arrays from an earlier `TraceForwardCompilation`
+    // collide with UIDs in a freshly materialized CFG that has no prologue/epilogue
+    // notes. Delegate to `ExecuteSchedPassGranular(head)` (which mirrors
+    // `schedule_insns` block-for-block and guards `reposition_prologue_and_epilogue_notes`
+    // on the presence of those notes).
+    bool has_prologue_or_epilogue_note = false;
+    for (Rtx scan = head; scan != nullptr; scan = scan->fld[2].rtx) {
+      if (scan->code == kNote && (scan->fld[4].rtint == kNoteInsnPrologueEnd ||
+                                  scan->fld[4].rtint == kNoteInsnEpilogueBeg)) {
+        has_prologue_or_epilogue_note = true;
+        break;
+      }
+    }
+    if (!has_prologue_or_epilogue_note) {
+      ExecuteSchedPassGranular(head);
+      return;
+    }
+  }
   if (saved_reload_completed == 0 || basic_block_live_at_start == nullptr) {
     const int saved_nregs = std::max(max_regno, max_reg_num());
     std::vector<int> saved_n_refs;
@@ -3303,9 +3352,7 @@ void FunctionHooks::RunScheduleInsns(Rtx first) {
     }
     const SavedFlowState saved_flow = CaptureExistingFlowState(head);
     StripFlowGeneratedNotes(head);
-    restore_reg_data(head);
-    max_regno = max_reg_num();
-    reg_scan(head, max_regno, 0);
+    RestoreRegDataAndScanPreservingPointerFlags(head, 0);
     RefreshJumpLabelsAndNuses(head);
     flow_analysis(head, max_regno, nullptr);
     RestoreExistingFlowState(saved_flow);
@@ -3324,9 +3371,7 @@ void FunctionHooks::RunScheduleInsns(Rtx first) {
       }
     }
   } else {
-    restore_reg_data(head);
-    max_regno = max_reg_num();
-    reg_scan(head, max_regno, 0);
+    RestoreRegDataAndScanPreservingPointerFlags(head, 0);
     if (n_basic_blocks == 0 || basic_block_head == nullptr || basic_block_end == nullptr) {
       const SavedBlockLiveState saved_live = SaveActiveBasicBlockLiveAtStart();
       RunFindBasicBlocks(head, nullptr);
@@ -3379,9 +3424,7 @@ void FunctionHooks::ExecuteSchedPassGranular(Rtx first) {
     }
     const SavedFlowState saved_flow = CaptureExistingFlowState(head);
     StripFlowGeneratedNotes(head);
-    restore_reg_data(head);
-    max_regno = max_reg_num();
-    reg_scan(head, max_regno, 0);
+    RestoreRegDataAndScanPreservingPointerFlags(head, 0);
     RefreshJumpLabelsAndNuses(head);
     flow_analysis(head, max_regno, nullptr);
     RestoreExistingFlowState(saved_flow);
@@ -3400,9 +3443,7 @@ void FunctionHooks::ExecuteSchedPassGranular(Rtx first) {
       }
     }
   } else {
-    restore_reg_data(head);
-    max_regno = max_reg_num();
-    reg_scan(head, max_regno, 0);
+    RestoreRegDataAndScanPreservingPointerFlags(head, 0);
     if (n_basic_blocks == 0 || basic_block_head == nullptr || basic_block_end == nullptr) {
       const SavedBlockLiveState saved_live = SaveActiveBasicBlockLiveAtStart();
       RunFindBasicBlocks(head, nullptr);
@@ -3542,33 +3583,6 @@ void FunctionHooks::ExecuteSchedPassGranular(Rtx first) {
   }
 }
 
-namespace {
-
-// Preserves `regno_pointer_flag` across harness-only `restore_reg_data` +
-// `reg_scan` setup calls for allocation passes: in genuine GCC 2.7.2
-// (`toplev.c:3048-3083`), `local_alloc`, `global_alloc`, and `-O0` `reload`
-// never invoke `restore_reg_data` or `reg_scan`.
-void RestoreRegDataAndScanPreservingPointerFlags(Rtx head, int repeat) {
-  std::vector<char> saved_pointer_flags;
-  if (regno_pointer_flag != nullptr && regno_pointer_flag_length > 0) {
-    saved_pointer_flags.assign(regno_pointer_flag,
-                               regno_pointer_flag + static_cast<size_t>(regno_pointer_flag_length));
-  }
-  restore_reg_data(head);
-  max_regno = max_reg_num();
-  reg_scan(head, max_regno, repeat);
-  if (regno_pointer_flag != nullptr && regno_pointer_flag_length > 0) {
-    std::memset(regno_pointer_flag, 0, static_cast<size_t>(regno_pointer_flag_length));
-    const size_t copy_len =
-        std::min(saved_pointer_flags.size(), static_cast<size_t>(regno_pointer_flag_length));
-    if (copy_len > 0) {
-      std::memcpy(regno_pointer_flag, saved_pointer_flags.data(), copy_len);
-    }
-  }
-}
-
-}  // namespace
-
 void FunctionHooks::PrepareLocalAllocState(Rtx first) {
   struct PreAllocatedScratch {
     Rtx insn;
@@ -3606,6 +3620,11 @@ void FunctionHooks::PrepareLocalAllocState(Rtx first) {
   RestoreRegDataAndScanPreservingPointerFlags(first, /*repeat=*/1);
   flow_analysis(first, max_regno, nullptr);
   RestoreExistingFlowState(saved_flow);
+  // Mirror `toplev.c:2957` -> `3051`: clear `regclass.c`'s static `prefclass`
+  // (`regclass.c:620-623`) before `regclass()` so `record_reg_classes`
+  // (`regclass.c:1299`) never reads stale/freed `rtl_obstack` entries on
+  // `pass == 0` (especially at `-O1` where `flag_expensive_optimizations == 0`).
+  regclass_init();
   regclass(first, max_regno);
 
   const int max_qty_val = std::max(32, (max_regno - kFirstPseudoRegister) * 2 + max_scratch +
@@ -3680,6 +3699,9 @@ void FunctionHooks::RunLocalAlloc(Rtx first) {
   RestoreRegDataAndScanPreservingPointerFlags(head, /*repeat=*/1);
   flow_analysis(head, max_regno, nullptr);
   RestoreExistingFlowState(saved_flow);
+  // Mirror `toplev.c:2957` -> `3051`: clear `regclass.c`'s static `prefclass`
+  // (`regclass.c:620-623`) before `regclass()`.
+  regclass_init();
   regclass(head, max_regno);
   local_alloc();
 }
@@ -3835,8 +3857,7 @@ void PrepareGlobalReloadState() {
         (current_function_has_nonlocal_label == 0 || reg_n_calls_crossed[i] == 0) &&
         (reg_renumber == nullptr || reg_renumber[i] < 0 || reg_basic_block == nullptr ||
          reg_basic_block[i] < 0 || (lra_reg_qty != nullptr && lra_reg_qty[i] == -1) ||
-         reg_renumber[i] == kMipsArgPointerRegnum || reg_renumber[i] == kMipsFramePointerRegnum ||
-         reg_renumber[i] >= 64);
+         reg_renumber[i] == kMipsArgPointerRegnum || reg_renumber[i] == kMipsFramePointerRegnum);
     if (is_global_candidate) {
       if (reg_may_share[i] != 0 && reg_allocno[reg_may_share[i]] >= 0) {
         reg_allocno[i] = reg_allocno[reg_may_share[i]];
@@ -3951,6 +3972,22 @@ void PrepareGlobalReloadState() {
       }
     }
 
+    // `global_conflicts()` (`global.c:663-670, 1352, 1451, 1483`) assumes every
+    // global allocno (`reg_allocno[i] >= 0`) still has `reg_renumber[i] == -1`,
+    // whereas local-allocated pseudos (`reg_allocno[i] < 0`) carry their
+    // hard-register assignments. Temporarily clear `reg_renumber[i]` for global
+    // allocnos across `global_conflicts()`..`prune_preferences()`, then restore
+    // and propagate their hard-register conflicts below (`global.c:1175-1191`).
+    std::vector<std::pair<int, short>> saved_global_renumber;
+    if (reg_renumber != nullptr) {
+      for (int i = kFirstPseudoRegister; i < max_regno; ++i) {
+        if (reg_allocno[i] >= 0 && reg_renumber[i] >= 0) {
+          saved_global_renumber.emplace_back(i, reg_renumber[i]);
+          reg_renumber[i] = -1;
+        }
+      }
+    }
+
     global_conflicts();
     for (int a = 0; a < max_allocno; ++a) {
       for (int w = 0; w < 3; ++w) {
@@ -3975,6 +4012,12 @@ void PrepareGlobalReloadState() {
     }
     std::qsort(allocno_order, max_allocno, sizeof(int), allocno_compare);
     prune_preferences();
+
+    if (reg_renumber != nullptr) {
+      for (const auto& [regno, hard_reg] : saved_global_renumber) {
+        reg_renumber[regno] = hard_reg;
+      }
+    }
 
     // Propagate already-allocated global hard registers into conflicting
     // allocnos' `hard_reg_conflicts` sets (`global.c:find_reg` lines 1175-1191).
@@ -4134,11 +4177,6 @@ void FunctionHooks::RunAlterReg(int regno, int from_reg) {
 
 void FunctionHooks::PrepareCombineState(Rtx first) {
   const int prev_max_reg = max_reg_num();
-  restore_reg_data(first);
-  const int nregs = std::max({max_reg_num(), prev_max_reg, 256}) + 16;
-  max_regno = std::max(max_reg_num(), prev_max_reg);
-  reg_scan(first, max_regno, 0);
-
   bool has_existing_log_links = false;
   for (Rtx insn = first; insn != nullptr; insn = insn->fld[2].rtx) {
     if ((insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) &&
@@ -4146,6 +4184,26 @@ void FunctionHooks::PrepareCombineState(Rtx first) {
       has_existing_log_links = true;
       break;
     }
+  }
+  // Per `toplev.c:2983-3034`, `flow.c:2035-2049`, and `regclass.c:1713,
+  // 1782-1791`, GCC 2.7.2 never runs `reg_scan` between `flow_analysis` and
+  // `combine_instructions`. `reg_scan` zeroes `reg_n_sets` and recounts only
+  // base `REGNO(dest)` without iterating `HARD_REGNO_NREGS`, clobbering
+  // multi-word hard-register set counts. Preserve `flow_analysis`'s exact
+  // `reg_n_sets` across the harness-only `reg_scan` call.
+  std::vector<short> saved_reg_n_sets;
+  if ((has_existing_log_links || reg_n_deaths != nullptr) && reg_n_sets != nullptr &&
+      prev_max_reg > 0) {
+    saved_reg_n_sets.assign(reg_n_sets, reg_n_sets + prev_max_reg);
+  }
+  restore_reg_data(first);
+  const int nregs = std::max({max_reg_num(), prev_max_reg, 256}) + 16;
+  max_regno = std::max(max_reg_num(), prev_max_reg);
+  reg_scan(first, max_regno, 0);
+  if (!saved_reg_n_sets.empty() && reg_n_sets != nullptr) {
+    const int restore_count = std::min(static_cast<int>(saved_reg_n_sets.size()), max_regno);
+    std::memcpy(reg_n_sets, saved_reg_n_sets.data(),
+                static_cast<size_t>(restore_count) * sizeof(short));
   }
 
   if (!has_existing_log_links && reg_n_deaths == nullptr) {
@@ -4223,11 +4281,7 @@ void FunctionHooks::RunCombineInstructions(Rtx first, int nregs) {
   if (head == nullptr) {
     return;
   }
-  restore_reg_data(head);
-  const int num_regs = nregs > 0 ? nregs : max_reg_num();
-  max_regno = num_regs;
-  reg_scan(head, num_regs, 0);
-
+  const int prev_max_reg = max_reg_num();
   bool has_existing_log_links = false;
   for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
     if ((insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) &&
@@ -4235,6 +4289,22 @@ void FunctionHooks::RunCombineInstructions(Rtx first, int nregs) {
       has_existing_log_links = true;
       break;
     }
+  }
+  // Per `toplev.c:2983-3034`, `flow.c:2035-2049`, and `regclass.c:1713,
+  // 1782-1791`, preserve `flow_analysis`'s exact multi-word `reg_n_sets`
+  // across the harness-only `reg_scan` call when `flow_analysis` has run.
+  std::vector<short> saved_reg_n_sets;
+  if (has_existing_log_links && reg_n_sets != nullptr && prev_max_reg > 0) {
+    saved_reg_n_sets.assign(reg_n_sets, reg_n_sets + prev_max_reg);
+  }
+  restore_reg_data(head);
+  const int num_regs = nregs > 0 ? nregs : max_reg_num();
+  max_regno = num_regs;
+  reg_scan(head, num_regs, 0);
+  if (!saved_reg_n_sets.empty() && reg_n_sets != nullptr) {
+    const int restore_count = std::min(static_cast<int>(saved_reg_n_sets.size()), num_regs);
+    std::memcpy(reg_n_sets, saved_reg_n_sets.data(),
+                static_cast<size_t>(restore_count) * sizeof(short));
   }
   if (!has_existing_log_links) {
     const SavedFlowState saved_flow = CaptureExistingFlowState(head);
@@ -4260,12 +4330,8 @@ void FunctionHooks::ExecuteCombinePassGranular(Rtx first, int nregs) {
   if (head == nullptr) {
     return;
   }
+  const int prev_max_reg = max_reg_num();
   const SavedFlowState saved_flow = CaptureExistingFlowState(head);
-  restore_reg_data(head);
-  const int num_regs = nregs > 0 ? nregs : max_reg_num();
-  max_regno = num_regs;
-  reg_scan(head, num_regs, 0);
-
   bool has_existing_log_links = false;
   for (Rtx insn = head; insn != nullptr; insn = insn->fld[2].rtx) {
     if ((insn->code == kInsn || insn->code == kJumpInsn || insn->code == kCallInsn) &&
@@ -4273,6 +4339,22 @@ void FunctionHooks::ExecuteCombinePassGranular(Rtx first, int nregs) {
       has_existing_log_links = true;
       break;
     }
+  }
+  // Per `toplev.c:2983-3034`, `flow.c:2035-2049`, and `regclass.c:1713,
+  // 1782-1791`, preserve `flow_analysis`'s exact multi-word `reg_n_sets`
+  // across the harness-only `reg_scan` call when `flow_analysis` has run.
+  std::vector<short> saved_reg_n_sets;
+  if (has_existing_log_links && reg_n_sets != nullptr && prev_max_reg > 0) {
+    saved_reg_n_sets.assign(reg_n_sets, reg_n_sets + prev_max_reg);
+  }
+  restore_reg_data(head);
+  const int num_regs = nregs > 0 ? nregs : max_reg_num();
+  max_regno = num_regs;
+  reg_scan(head, num_regs, 0);
+  if (!saved_reg_n_sets.empty() && reg_n_sets != nullptr) {
+    const int restore_count = std::min(static_cast<int>(saved_reg_n_sets.size()), num_regs);
+    std::memcpy(reg_n_sets, saved_reg_n_sets.data(),
+                static_cast<size_t>(restore_count) * sizeof(short));
   }
   if (!has_existing_log_links) {
     StripFlowGeneratedNotes(head);
@@ -7342,6 +7424,7 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
       snap.post_state.pass = RtlPassKind::kGreg;
       if (head != nullptr) {
         if (optimize_level > 0) {
+          GccContext::ScopedSkipReloadInGlobalAlloc skip_reload;
           RunGlobalAlloc(head);
         } else {
           StripFlowGeneratedNotes(head);
@@ -7368,11 +7451,12 @@ SubfunctionBoundarySnapshot FunctionHooks::ExecuteSubfunctionBoundary(
       Rtx head = materialize_post_expand();
       if (head != nullptr) {
         RunReload(head, /*global=*/optimize_level > 0 ? 1 : 0);
-        for (const auto& [regno, hard_reg] : pre_state.sideband.reg_renumber) {
-          if (regno >= kFirstPseudoRegister && hard_reg >= 0 && regno < max_regno &&
-              reg_renumber != nullptr && reg_renumber[regno] >= 0 && regno_reg_rtx != nullptr &&
-              regno_reg_rtx[regno] != nullptr && regno_reg_rtx[regno]->code == kReg) {
-            regno_reg_rtx[regno]->fld[0].rtint = regno;
+        if (reg_renumber != nullptr && regno_reg_rtx != nullptr) {
+          for (int regno = kFirstPseudoRegister; regno < max_regno; ++regno) {
+            if (reg_renumber[regno] >= 0 && regno_reg_rtx[regno] != nullptr &&
+                regno_reg_rtx[regno]->code == kReg) {
+              regno_reg_rtx[regno]->fld[0].rtint = regno;
+            }
           }
         }
       }

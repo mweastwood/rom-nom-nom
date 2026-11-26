@@ -1145,10 +1145,13 @@ TEST_F(InvertReloadTest, ReconstructsActiveSpilledPseudoAlongsidePhantomAlterReg
         phantom_pseudos.push_back(p);
         EXPECT_EQ(nrefs, 2);
         EXPECT_FALSE(lifted->sideband.reg_n_sets.contains(p));
+        // Phantom `alter_reg` gap pseudos carry `reg_n_deaths == 0` and
+        // `reg_live_length == -1` so `global_alloc` (`global.c:388`) skips them
+        // while `reload` (`reload1.c:654-658`) still reserves their stack slots.
         ASSERT_TRUE(lifted->sideband.reg_n_deaths.contains(p));
-        EXPECT_EQ(lifted->sideband.reg_n_deaths.at(p), 1);
+        EXPECT_EQ(lifted->sideband.reg_n_deaths.at(p), 0);
         ASSERT_TRUE(lifted->sideband.reg_live_length.contains(p));
-        EXPECT_EQ(lifted->sideband.reg_live_length.at(p), 2);
+        EXPECT_EQ(lifted->sideband.reg_live_length.at(p), -1);
       }
     }
   }
@@ -1775,6 +1778,549 @@ TEST_F(InvertReloadTest,
         "}\n",
         "CrossClassSecondFloatArg", flags);
     verify_trace_reload_and_fresh_greg_replay(cross_cls_trace);
+  }
+}
+
+TEST_F(InvertReloadTest, FoldsInheritedReloadInputMoveAndMarksMdSpillCrossedLoads) {
+  const CompilationProfile o2_prof{2, {"-O2", "-mips2", "-mcpu=r4000"}, {}};
+
+  // 1. Positive (`reload1.c:5186-5258`, `reload1.c:6583`, `rtlanal.c:101-102`,
+  //    `sched.c:817-840`):
+  //    - Widening `mult:DI` (`=x`) output reload into spilled `DI` slot
+  //      `[sp+0]` via secondary spill reg `$16 s0`, with `sched2`-hoisted
+  //      varying load `(set (reg:SI 4 a0) (mem:SI (reg:SI 78)))` inside the
+  //      `mult -> mfhi` window and `sw $16, 0($sp)` sunk past it;
+  //    - Followed by an inherited spill-reg copy `(set (reg:DI 83) (reg:DI 16 s0))`
+  //      feeding a `plus:DI` that overwrites `r83`, separated by an independent
+  //      `(set (reg:DI 84) (reg:DI 64 hi))` reload (`sched2`-interleaved).
+  //    Verify:
+  //    (a) `FoldInheritedReloadInputMoves` folds `(set r83 P_spill)` into `plus:DI`;
+  //    (b) `FoldMdOutputReloads` folds `(set P_spill (reg:DI 64 hi))` into `mult:DI`
+  //        even inside a self-loop block with a second multi-use `mult:DI`;
+  //    (c) `MarkVaryingMemsCrossedByMdOutputSpill` restores `/s/u` on the
+  //        hoisted varying load when no varying store precedes `mult:DI`.
+  auto build_md_spill_cfg = [](bool add_preceding_varying_store, bool add_extra_read_of_r83) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.sideband.frame_size_bytes = 8;
+    cfg.sideband.frame_pointer_needed = false;
+    cfg.sideband.outgoing_args_size = 0;
+    cfg.sideband.max_regno = 88;
+    cfg.sideband.reg_renumber = {
+        {78, 12}, {79, 11}, {80, 3}, {81, 2}, {82, 2}, {83, 2}, {84, 4}, {85, 6}, {86, 8}, {87, 13},
+    };
+    {
+      RtlBasicBlock b0;
+      b0.id = 0;
+      b0.has_label = false;
+      b0.instructions = {
+          "(set (reg:SI 79) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+          "(set (reg:SI 78) (reg:SI 5 a1)) (expr_list:REG_DEAD (reg:SI 5 a1) (nil))",
+          "(set (reg:SI 87) (reg:SI 6 a2)) (expr_list:REG_DEAD (reg:SI 6 a2) (nil))",
+          "(set (reg:DI 86) (const_int 0))",
+      };
+      b0.successors = {1};
+      cfg.rpo_blocks.push_back(std::move(b0));
+    }
+    std::vector<std::string> b1_insns;
+    if (add_preceding_varying_store) {
+      b1_insns.push_back("(set (mem:SI (reg:SI 87)) (const_int 1))");
+    }
+    b1_insns.push_back("(set (reg:SI 80) (mem:SI (reg:SI 79)))");
+    b1_insns.push_back("(set (reg:SI 81) (plus:SI (reg:SI 80) (const_int 3)))");
+    b1_insns.push_back(
+        "(parallel[ (set (reg:DI 64 hi) (mult:DI (sign_extend:DI (reg:SI 80)) "
+        "(sign_extend:DI (reg:SI 81)))) (clobber (reg:SI 66 accum)) ] ) "
+        "(expr_list:REG_DEAD (reg:SI 80) (expr_list:REG_DEAD (reg:SI 81) "
+        "(expr_list:REG_UNUSED (reg:SI 66 accum) (nil))))");
+    // Anti-dependent on `mult:DI` (overwrites dead input `r80`) -> `must_follow_m`
+    // proves this load could only follow `mult:DI` and still precede the sunk
+    // `sp` spill store if `MEM_UNCHANGING_P` (`/u`) was set.
+    b1_insns.push_back("(set (reg:SI 80) (mem:SI (reg:SI 78)))");
+    // Independent of `mult:DI` (writes unrelated `$4 a0`) -> must NOT get `/u`.
+    b1_insns.push_back("(set (reg:SI 4 a0) (mem:SI (reg:SI 78)))");
+    b1_insns.push_back("(set (reg:DI 16 s0) (reg:DI 64 hi))");
+    b1_insns.push_back("(set (reg:SI 82) (plus:SI (reg:SI 4 a0) (const_int 5)))");
+    b1_insns.push_back(
+        "(parallel[ (set (reg:DI 64 hi) (mult:DI (zero_extend:DI (reg:SI 4 a0)) "
+        "(zero_extend:DI (reg:SI 82)))) (clobber (reg:SI 66 accum)) ] ) "
+        "(expr_list:REG_DEAD (reg:SI 4 a0) (expr_list:REG_DEAD (reg:SI 82) "
+        "(expr_list:REG_UNUSED (reg:SI 66 accum) (nil))))");
+    b1_insns.push_back("(set (reg:DI 83) (reg:DI 16 s0))");
+    b1_insns.push_back(
+        "(set (mem:DI (reg:SI 29 sp)) (reg:DI 16 s0)) (expr_list:REG_DEAD (reg:DI 16 s0) (nil))");
+    b1_insns.push_back("(set (reg:DI 84) (reg:DI 64 hi))");
+    if (add_extra_read_of_r83) {
+      b1_insns.push_back("(set (mem:DI (reg:SI 87)) (reg:DI 83))");
+    }
+    b1_insns.push_back(
+        "(parallel[ (set (reg:DI 83) (plus:DI (reg:DI 83) (reg:DI 84))) "
+        "(clobber (reg:SI 85)) ] ) (expr_list:REG_UNUSED (reg:SI 85) (nil))");
+    b1_insns.push_back(
+        "(set (reg:DI 86) (xor:DI (reg:DI 86) (reg:DI 83))) "
+        "(expr_list:REG_DEAD (reg:DI 83) (nil))");
+    b1_insns.push_back(
+        "(set (reg:DI 86) (xor:DI (reg:DI 86) (reg:DI 84))) "
+        "(expr_list:REG_DEAD (reg:DI 84) (nil))");
+    b1_insns.push_back(
+        "(set (pc) (if_then_else (ne:SI (reg:SI 7 a3) (const_int 0)) (label_ref L0) (pc)))");
+    {
+      RtlBasicBlock b1;
+      b1.id = 1;
+      b1.has_label = true;
+      b1.instructions = std::move(b1_insns);
+      b1.successors = {1, 2};
+      cfg.rpo_blocks.push_back(std::move(b1));
+    }
+    {
+      RtlBasicBlock b2;
+      b2.id = 2;
+      b2.has_label = true;
+      b2.instructions = {
+          "(set (reg/i:DI 2 v0) (reg:DI 86)) (expr_list:REG_DEAD (reg:DI 86) (nil))",
+          "(use (reg/i:DI 2 v0))",
+      };
+      cfg.rpo_blocks.push_back(std::move(b2));
+    }
+    for (auto& blk : cfg.rpo_blocks) {
+      blk.SyncRtlInsnsFromInstructions();
+    }
+    return cfg;
+  };
+
+  {
+    const absl::StatusOr<RtlControlFlowGraph> pos =
+        InvertReload(build_md_spill_cfg(/*add_preceding_varying_store=*/false,
+                                        /*add_extra_read_of_r83=*/false),
+                     o2_prof);
+    ASSERT_TRUE(pos.ok()) << pos.status();
+    const std::string summary = pos->FormatSummary();
+    EXPECT_EQ(summary.find("(reg:DI 64 hi)"), std::string::npos) << summary;
+    EXPECT_EQ(summary.find("(set (reg:DI 83) (reg:DI 88))"), std::string::npos) << summary;
+    EXPECT_NE(summary.find("(plus:DI (reg:DI 88) (reg:DI 84))"), std::string::npos) << summary;
+    EXPECT_NE(summary.find("(set (reg:SI 80) (mem/s/u:SI (reg:SI 78)))"), std::string::npos)
+        << summary;
+    EXPECT_EQ(summary.find("(set (reg:SI 4 a0) (mem/s/u:SI (reg:SI 78)))"), std::string::npos)
+        << summary;
+  }
+
+  // 2. Negative:
+  //    (a) When a varying non-stack store precedes `mult:DI`,
+  //    `MarkVaryingMemsCrossedByMdOutputSpill`
+  //        must NOT mark the hoisted load `/u` (`MEM_UNCHANGING_P`);
+  //    (b) When an intervening instruction reads `r83` before `plus:DI` overwrites
+  //        `r83`, `FoldInheritedReloadInputMoves` must NOT delete `(set r83 P_spill)`.
+  {
+    const absl::StatusOr<RtlControlFlowGraph> neg =
+        InvertReload(build_md_spill_cfg(/*add_preceding_varying_store=*/true,
+                                        /*add_extra_read_of_r83=*/true),
+                     o2_prof);
+    ASSERT_TRUE(neg.ok()) << neg.status();
+    const std::string summary = neg->FormatSummary();
+    EXPECT_EQ(summary.find("(set (reg:SI 80) (mem/s/u:SI (reg:SI 78)))"), std::string::npos)
+        << summary;
+    EXPECT_NE(summary.find("(set (reg:DI 83) (reg:DI 88))"), std::string::npos) << summary;
+  }
+
+  // Negative 2 (F2 soundness): when `frame_pointer_needed == true`,
+  // `MarkVaryingMemsCrossedByMdOutputSpill` must NOT mark a crossed load `/u`
+  // because `sched2` cannot distinguish frame-pointer stack spills from varying
+  // pointer loads (`sched.c:817-839`).
+  {
+    RtlControlFlowGraph fp_cfg = build_md_spill_cfg(/*add_preceding_varying_store=*/false,
+                                                    /*add_extra_read_of_r83=*/false);
+    fp_cfg.sideband.frame_pointer_needed = true;
+    const absl::StatusOr<RtlControlFlowGraph> fp_neg = InvertReload(fp_cfg, o2_prof);
+    ASSERT_TRUE(fp_neg.ok()) << fp_neg.status();
+    EXPECT_EQ(fp_neg->FormatSummary().find("(set (reg:SI 80) (mem/s/u:SI (reg:SI 78)))"),
+              std::string::npos)
+        << fp_neg->FormatSummary();
+  }
+}
+
+TEST_F(InvertReloadTest, RestoresSpilledSingleMdRegRenumberForHighpartUnlessOverlapped) {
+  const CompilationProfile o2_prof{2, {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"}, {}};
+
+  auto make_cfg = [](bool include_intervening_call) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.sideband.frame_size_bytes = 32;
+    cfg.sideband.outgoing_args_size = 0;
+    cfg.sideband.max_regno = 85;
+    cfg.sideband.reg_renumber = {
+        {72, 4}, {73, 5}, {74, 8}, {75, 16}, {79, 18},
+    };
+    std::vector<std::string> insns = {
+        "(parallel[ (set (reg:DI 78) (mult:DI (sign_extend:DI (reg:SI 72)) "
+        "(sign_extend:DI (reg:SI 73)))) (clobber (reg:SI 66 accum)) ] )",
+    };
+    if (include_intervening_call) {
+      insns.push_back(
+          "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"helper\"))) "
+          "(const_int 16))) (clobber (reg:SI 31 ra)) ] )");
+    } else {
+      insns.push_back("(set (reg:SI 74) (plus:SI (reg:SI 72) (const_int 1)))");
+    }
+    insns.push_back(
+        "(parallel[ (set (reg:DI 75) (plus:DI (reg:DI 75) (reg:DI 78))) "
+        "(clobber (reg:SI 80)) ] ) (expr_list:REG_DEAD (reg:DI 78) (nil))");
+    // A second `mult:DI` allocated to GPR `$18` needs `MD_REGS` as a reload reg
+    // (`reload1.c:3445`), triggering `RestoreSpilledSingleMdRegRenumber` for `78`.
+    insns.push_back(
+        "(parallel[ (set (reg:DI 79) (mult:DI (sign_extend:DI (reg:SI 72)) "
+        "(sign_extend:DI (reg:SI 73)))) (clobber (reg:SI 66 accum)) ] )");
+    insns.push_back(
+        "(set (reg/i:DI 2 v0) (xor:DI (reg:DI 75) (reg:DI 79))) "
+        "(expr_list:REG_DEAD (reg:DI 75) (expr_list:REG_DEAD (reg:DI 79) (nil)))");
+    insns.push_back("(use (reg/i:DI 2 v0))");
+    cfg.rpo_blocks.push_back(RtlBasicBlock{.id = 0, .instructions = std::move(insns)});
+    cfg.rpo_blocks[0].SyncRtlInsnsFromInstructions();
+    return cfg;
+  };
+
+  // Positive (`reload1.c:3445` + `local-alloc.c:1824`): when a single-block
+  // `DI` `mult:DI` pseudo (`78`) is spilled (absent from `reg_renumber`) with
+  // no conflicting MD op or call across its live range,
+  // `RestoreSpilledSingleMdRegRenumber` restores its pre-reload `reg_renumber = 64`.
+  {
+    const absl::StatusOr<RtlControlFlowGraph> pos =
+        InvertReload(make_cfg(/*include_intervening_call=*/false), o2_prof);
+    ASSERT_TRUE(pos.ok()) << pos.status();
+    ASSERT_TRUE(pos->sideband.reg_renumber.contains(78)) << pos->FormatSummary();
+    EXPECT_EQ(pos->sideband.reg_renumber.at(78), 64) << pos->FormatSummary();
+  }
+
+  // Negative: when an intervening `CALL_INSN` clobbers `MD_REGS` (`{64, 65}`)
+  // across the spilled pseudo's live range, `78` must NOT be restored to `64`.
+  {
+    const absl::StatusOr<RtlControlFlowGraph> neg =
+        InvertReload(make_cfg(/*include_intervening_call=*/true), o2_prof);
+    ASSERT_TRUE(neg.ok()) << neg.status();
+    EXPECT_FALSE(neg->sideband.reg_renumber.contains(78) && neg->sideband.reg_renumber.at(78) == 64)
+        << neg->FormatSummary();
+  }
+}
+
+TEST_F(InvertReloadTest, AppliesFallthroughInheritedReloadsOnlyAcrossUnlabeledEdges) {
+  // Mirrors `reload1.c:3965-3981` (`ApplyFallthroughInheritedReloads`):
+  // `reload_as_needed` preserves `reg_reloaded_contents[]` across a conditional
+  // jump fallthrough into an unlabeled block (positive), and clears it at a
+  // `CODE_LABEL` (negative).
+  CompilationProfile o2_prof{.optimize_level = 2, .c_flags = {"-O2", "-mips2"}};
+  auto make_cfg = [](bool b1_has_label) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.sideband.frame_size_bytes = 8;
+    cfg.sideband.outgoing_args_size = 16;
+    cfg.sideband.reg_renumber = {{72, 4}, {73, 5}, {74, 52}};
+    RtlBasicBlock b0;
+    b0.id = 0;
+    b0.successors = {2, 1};
+    b0.instructions = {
+        "(set (reg:SF 38 $f6) (plus:SF (reg:SF 74) (reg:SF 74)))",
+        "(set (mem:SF (plus:SI (reg:SI 29 sp) (const_int 20))) (reg:SF 38 $f6))",
+        "(set (pc) (if_then_else (eq:SI (reg:SI 72) (const_int 0)) (label_ref L1) (pc)))",
+    };
+    b0.SyncRtlInsnsFromInstructions();
+
+    RtlBasicBlock b1;
+    b1.id = 1;
+    b1.has_label = b1_has_label;
+    b1.successors = {2};
+    b1.instructions = {
+        "(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 38 $f6) (reg:SF 74)))",
+    };
+    b1.SyncRtlInsnsFromInstructions();
+
+    RtlBasicBlock b2;
+    b2.id = 2;
+    b2.has_label = true;
+    b2.instructions = {
+        "(set (reg:SF 40 $f8) (mem:SF (plus:SI (reg:SI 29 sp) (const_int 20))))",
+        "(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 40 $f8) (reg:SF 74)))",
+        "(use (reg/i:SF 32 $f0))",
+    };
+    b2.SyncRtlInsnsFromInstructions();
+
+    cfg.rpo_blocks = {std::move(b0), std::move(b1), std::move(b2)};
+    return cfg;
+  };
+
+  // Positive: unlabeled fallthrough `B1` inherits the spilled pseudo from `$f6`.
+  {
+    const absl::StatusOr<RtlControlFlowGraph> pos =
+        InvertReload(make_cfg(/*b1_has_label=*/false), o2_prof);
+    ASSERT_TRUE(pos.ok()) << pos.status();
+    EXPECT_EQ(pos->rpo_blocks[1].instructions[0].find("(reg:SF 38 $f6)"), std::string::npos)
+        << pos->FormatSummary();
+  }
+
+  // Negative: `CODE_LABEL` on `B1` blocks fallthrough reload inheritance.
+  {
+    const absl::StatusOr<RtlControlFlowGraph> neg =
+        InvertReload(make_cfg(/*b1_has_label=*/true), o2_prof);
+    ASSERT_TRUE(neg.ok()) << neg.status();
+    EXPECT_EQ(neg->rpo_blocks[1].instructions[0].find("(reg:SF 75)"), std::string::npos)
+        << neg->FormatSummary();
+  }
+}
+
+TEST_F(InvertReloadTest, FoldsMultiDefFprScratchReloadsConstDoublesAndZone3SpillSlots) {
+  CompilationProfile o2_prof{.optimize_level = 2, .c_flags = {"-O2", "-mips2"}};
+
+  // 1. Multi-def single-block FPR scratch pseudo (`r95` on `$f4`) folds both
+  //    output-reload and input-reload live ranges and is dropped from `reg_renumber`.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.sideband.outgoing_args_size = 16;
+    cfg.sideband.reg_renumber = {{72, 17}, {73, 18}, {74, 52}, {95, 36}};
+    RtlBasicBlock b0;
+    b0.id = 0;
+    b0.instructions = {
+        "(set (reg:SF 95) (plus:SF (reg:SF 74) (reg:SF 74)))",
+        "(set (reg:SF 72) (reg:SF 95)) (expr_list:REG_DEAD (reg:SF 95) (nil))",
+        "(set (reg:SF 95) (reg:SF 73))",
+        "(set (reg/i:SF 32 $f0) (mult:SF (reg:SF 95) (reg:SF 74))) "
+        "(expr_list:REG_DEAD (reg:SF 95) (nil))",
+        "(use (reg/i:SF 32 $f0))",
+    };
+    b0.SyncRtlInsnsFromInstructions();
+    cfg.rpo_blocks = {std::move(b0)};
+    const absl::StatusOr<RtlControlFlowGraph> lifted = InvertReload(cfg, o2_prof);
+    ASSERT_TRUE(lifted.ok()) << lifted.status();
+    EXPECT_FALSE(lifted->sideband.reg_renumber.contains(95)) << lifted->FormatSummary();
+    EXPECT_EQ(lifted->FormatSummary().find("(reg:SF 95)"), std::string::npos)
+        << lifted->FormatSummary();
+
+    // Negative: incoming hard-GPR argument copy `(set (reg:SF 73) (reg:SF 5 a1))`
+    // must NOT be folded by Pass B into FP consumers.
+    RtlControlFlowGraph arg_cfg;
+    arg_cfg.pass = RtlPassKind::kGreg;
+    arg_cfg.sideband.outgoing_args_size = 16;
+    arg_cfg.sideband.reg_renumber = {{72, 32}, {73, 34}};
+    RtlBasicBlock ab0;
+    ab0.id = 0;
+    ab0.instructions = {
+        "(set (reg:SF 72) (mem/u:SF (reg:SI 4 a0)))",
+        "(set (reg:SF 73) (reg:SF 5 a1)) (expr_list:REG_DEAD (reg:SF 5 a1) (nil))",
+        "(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 72) (reg:SF 73))) "
+        "(expr_list:REG_DEAD (reg:SF 72) (expr_list:REG_DEAD (reg:SF 73) (nil)))",
+        "(use (reg/i:SF 32 $f0))",
+    };
+    ab0.SyncRtlInsnsFromInstructions();
+    arg_cfg.rpo_blocks = {std::move(ab0)};
+    const absl::StatusOr<RtlControlFlowGraph> arg_lifted = InvertReload(arg_cfg, o2_prof);
+    ASSERT_TRUE(arg_lifted.ok()) << arg_lifted.status();
+    EXPECT_TRUE(arg_lifted->sideband.reg_renumber.contains(73)) << arg_lifted->FormatSummary();
+    EXPECT_NE(arg_lifted->FormatSummary().find("(set (reg:SF 73) (reg:SF 5 a1))"),
+              std::string::npos)
+        << arg_lifted->FormatSummary();
+  }
+
+  // 2. Spilled `const_double` on a `proven_spill_regs` FPR inside a self-loop
+  //    whose unique non-self predecessor ends in a conditional jump hoists to
+  //    that predecessor before its branch (positive), while a non-spill FPR
+  //    `const_double` is left untouched (negative).
+  {
+    auto make_loop_cfg = [](int cd_fpr_hr) {
+      RtlControlFlowGraph cfg;
+      cfg.pass = RtlPassKind::kGreg;
+      cfg.sideband.outgoing_args_size = 16;
+      cfg.sideband.reg_renumber = {{72, 17}, {73, 52}, {74, 16}};
+      RtlBasicBlock b0;
+      b0.id = 0;
+      b0.successors = {2, 1};
+      b0.instructions = {
+          "(set (pc) (if_then_else (le:SI (reg:SI 74) (const_int 0)) (label_ref L1) (pc)))",
+      };
+      b0.SyncRtlInsnsFromInstructions();
+
+      RtlBasicBlock b1;
+      b1.id = 1;
+      b1.has_label = true;
+      b1.successors = {1, 2};
+      b1.instructions = {
+          // Proves `$f6` (`38`) is a spill reg via GPR->FPR input reload.
+          "(set (reg:SF 38 $f6) (reg:SF 72))",
+          "(set (reg:SF 73) (plus:SF (reg:SF 73) (reg:SF 38 $f6)))",
+          absl::StrFormat("(set (reg:SF %d $f%d) (const_double:SF (cc0) 0 1072693248))", cd_fpr_hr,
+                          cd_fpr_hr - 32),
+          absl::StrFormat("(set (reg:SF 73) (plus:SF (reg:SF 73) (reg:SF %d $f%d)))", cd_fpr_hr,
+                          cd_fpr_hr - 32),
+          "(set (reg:SI 74) (plus:SI (reg:SI 74) (const_int -1)))",
+          "(set (pc) (if_then_else (ne:SI (reg:SI 74) (const_int 0)) (label_ref L0) (pc)))",
+      };
+      b1.SyncRtlInsnsFromInstructions();
+
+      RtlBasicBlock b2;
+      b2.id = 2;
+      b2.has_label = true;
+      b2.instructions = {
+          "(set (reg/i:SF 32 $f0) (reg:SF 73))",
+          "(use (reg/i:SF 32 $f0))",
+      };
+      b2.SyncRtlInsnsFromInstructions();
+
+      cfg.rpo_blocks = {std::move(b0), std::move(b1), std::move(b2)};
+      return cfg;
+    };
+
+    const absl::StatusOr<RtlControlFlowGraph> pos = InvertReload(make_loop_cfg(38), o2_prof);
+    ASSERT_TRUE(pos.ok()) << pos.status();
+    ASSERT_EQ(pos->rpo_blocks[0].instructions.size(), 2u) << pos->FormatSummary();
+    EXPECT_NE(pos->rpo_blocks[0].instructions[0].find("REG_EQUIV (const_double:SF"),
+              std::string::npos)
+        << pos->FormatSummary();
+
+    const absl::StatusOr<RtlControlFlowGraph> neg = InvertReload(make_loop_cfg(40), o2_prof);
+    ASSERT_TRUE(neg.ok()) << neg.status();
+    EXPECT_EQ(neg->rpo_blocks[0].instructions.size(), 1u) << neg->FormatSummary();
+  }
+
+  // 3. Three-zone stack layout (`reload1.c:658, 1446, 2363-2400, 3499`):
+  //    Zone 1 `[sp+20]`, stripped caller-save `[sp+32..40)`, Zone 3 `[sp+44]`
+  //    (2 accesses) and `[sp+52]` (4 accesses across 2 disjoint single-block
+  //    live ranges). Skips phantom allocation on `[32..40)`, assigns `[sp+44]`
+  //    to higher spill reg `42` and splits `[sp+52]` into 2 single-def pseudos
+  //    on lower spill reg `38`.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.sideband.frame_size_bytes = 40;  // [16..56): Zone1 [16..32), CS [32..40), Zone3 [40..56)
+    cfg.sideband.outgoing_args_size = 16;
+    cfg.sideband.reg_renumber = {{72, 48}, {73, 50}, {74, 17}, {75, 18}, {76, 52}};
+    RtlBasicBlock b0;
+    b0.id = 0;
+    b0.instructions = {
+        "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))) (reg:SI 6 a2))",
+        "(set (mem:SF (plus:SI (reg:SI 29 sp) (const_int 32))) (reg:SF 48 $f16))",
+        "(set (mem:SF (plus:SI (reg:SI 29 sp) (const_int 36))) (reg:SF 50 $f18))",
+        "(parallel[ (set (reg:SF 32 $f0) (call (mem:SI (symbol_ref:SI (\"callee\"))) "
+        "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+        "(set (reg:SF 48 $f16) (mem:SF (plus:SI (reg:SI 29 sp) (const_int 32))))",
+        "(set (reg:SF 50 $f18) (mem:SF (plus:SI (reg:SI 29 sp) (const_int 36))))",
+        // Prove `38` (`$f6`) and `42` (`$f10`) as FP spill regs.
+        "(set (reg:SF 38 $f6) (reg:SF 74))",
+        "(set (reg:SF 42 $f10) (reg:SF 75))",
+        "(set (reg:SF 76) (plus:SF (reg:SF 38 $f6) (reg:SF 42 $f10)))",
+        // Zone-3 slot `[sp+52]` live range 1 (2 accesses)
+        "(set (reg:SF 42 $f10) (mult:SF (reg:SF 72) (reg:SF 76)))",
+        "(set (mem:SF (plus:SI (reg:SI 29 sp) (const_int 52))) (reg:SF 42 $f10))",
+        // Zone-3 slot `[sp+44]` live range (2 accesses total)
+        "(set (reg:SF 38 $f6) (mult:SF (reg:SF 73) (reg:SF 76)))",
+        "(set (mem:SF (plus:SI (reg:SI 29 sp) (const_int 44))) (reg:SF 38 $f6))",
+        "(set (reg:SF 38 $f6) (mem:SF (plus:SI (reg:SI 29 sp) (const_int 52))))",
+        "(set (reg:SF 72) (plus:SF (reg:SF 72) (reg:SF 38 $f6))) "
+        "(expr_list:REG_DEAD (mem:SF (plus:SI (reg:SI 29 sp) (const_int 52))) (nil))",
+        // Zone-3 slot `[sp+52]` live range 2 (4 accesses total -> splits into 2 pseudos on `38`)
+        "(set (reg:SF 38 $f6) (mult:SF (reg:SF 72) (reg:SF 73)))",
+        "(set (mem:SF (plus:SI (reg:SI 29 sp) (const_int 52))) (reg:SF 38 $f6))",
+        "(set (reg:SF 42 $f10) (mem:SF (plus:SI (reg:SI 29 sp) (const_int 44))))",
+        "(set (reg:SF 73) (plus:SF (reg:SF 73) (reg:SF 42 $f10))) "
+        "(expr_list:REG_DEAD (mem:SF (plus:SI (reg:SI 29 sp) (const_int 44))) (nil))",
+        "(set (reg:SF 42 $f10) (mem:SF (plus:SI (reg:SI 29 sp) (const_int 52))))",
+        "(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 72) (reg:SF 42 $f10))) "
+        "(expr_list:REG_DEAD (mem:SF (plus:SI (reg:SI 29 sp) (const_int 52))) (nil))",
+        "(set (reg:SI 3 v1) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))))",
+        "(use (reg:SI 3 v1))",
+        "(use (reg/i:SF 32 $f0))",
+    };
+    b0.SyncRtlInsnsFromInstructions();
+    cfg.rpo_blocks = {std::move(b0)};
+    const absl::StatusOr<RtlControlFlowGraph> lifted = InvertReload(cfg, o2_prof);
+    ASSERT_TRUE(lifted.ok()) << lifted.status();
+    int on_38 = 0;
+    int on_42 = 0;
+    for (const auto& [p, hr] : lifted->sideband.reg_renumber) {
+      if (hr == 38) ++on_38;
+      if (hr == 42) ++on_42;
+    }
+    EXPECT_EQ(on_42, 1) << lifted->FormatSummary();
+    EXPECT_EQ(on_38, 2) << lifted->FormatSummary();
+    // Caller-save `[32..40)` must not generate a phantom slot (only `[24..32)`
+    // is a Zone-1 phantom, `[16..24)` is real `[sp+20]`, so `frame_size_bytes == 0`).
+    EXPECT_EQ(lifted->sideband.frame_size_bytes, 0) << lifted->FormatSummary();
+  }
+}
+
+TEST_F(InvertReloadTest, PreservesNarrowDiSubregDeadNoteAndFoldsO0DiMdMemStoreInputReload) {
+  // 1. Subword `REG_DEAD` preservation on `(subreg:SI (reg:DI base) w)` (`!gp64`):
+  //    when `(set r73 (xor:SI (subreg:SI (reg:DI 72) 1) ...))` already carries
+  //    `(REG_DEAD (reg:SI 5 a1))` on the narrower subword (not `DI`), `InvertReload`
+  //    must preserve `(REG_DEAD (reg:SI 5 a1))` rather than overwriting it with
+  //    `(REG_DEAD (reg:DI 72))`.
+  {
+    const CompilationProfile o1_prof{1, {"-O1", "-mips2", "-Wa,-g"}, {}};
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.sideband.reg_renumber = {{72, 4}, {73, 2}};
+    RtlBasicBlock b0;
+    b0.id = 0;
+    b0.instructions = {
+        "(set (reg:DI 72) (mem:DI (reg:SI 16 s0)))",
+        "(set (reg:SI 73) (xor:SI (subreg:SI (reg:DI 72) 1) (const_int 1))) "
+        "(expr_list:REG_DEAD (reg:SI 5 a1) (nil))",
+        "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 73) (subreg:SI (reg:DI 72) 0))) "
+        "(expr_list:REG_DEAD (reg:SI 73) (expr_list:REG_DEAD (reg:DI 72) (nil)))",
+        "(use (reg/i:SI 2 v0))",
+    };
+    b0.SyncRtlInsnsFromInstructions();
+    cfg.rpo_blocks = {std::move(b0)};
+    const absl::StatusOr<RtlControlFlowGraph> lifted = InvertReload(cfg, o1_prof);
+    ASSERT_TRUE(lifted.ok()) << lifted.status();
+    EXPECT_NE(lifted->rpo_blocks[0].instructions[1].find("REG_DEAD (reg:SI 5 a1)"),
+              std::string::npos)
+        << lifted->FormatSummary();
+    EXPECT_EQ(lifted->rpo_blocks[0].instructions[1].find("REG_DEAD (reg:DI 72)"), std::string::npos)
+        << lifted->FormatSummary();
+  }
+
+  // 2. `-O0` `!gp64` `FoldMdGprInputReloads` on `DI` `64 hi -> scr -> mem:DI`:
+  //    folds `(set (reg:DI 10 t2) (reg:DI 72))` (`reg_renumber[72] == 64`) into
+  //    `(set (mem:DI ...) (reg:DI 10 t2))` (positive), but leaves a non-`MEM`
+  //    consumer (`xor:DI`) unfolded at `-O0` (negative).
+  const CompilationProfile o0_prof{0, {"-O0", "-mips2", "-Wa,-g"}, {}};
+  auto make_o0_md_cfg = [](bool mem_store_consumer) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.sideband.frame_pointer_needed = true;
+    cfg.sideband.frame_size_bytes = 32;
+    cfg.sideband.reg_renumber = {{72, 64}, {73, 2}, {74, 3}, {75, 4}};
+    RtlBasicBlock b0;
+    b0.id = 0;
+    b0.instructions = {
+        "(set (reg:SI 73) (mem:SI (reg:SI 30 $fp)))",
+        "(set (reg:SI 74) (mem:SI (plus:SI (reg:SI 30 $fp) (const_int 4))))",
+        "(parallel[ (set (reg:DI 72) (mult:DI (sign_extend:DI (reg:SI 73)) "
+        "(sign_extend:DI (reg:SI 74)))) (clobber (reg:SI 66 accum)) ] )",
+        "(set (reg:DI 10 t2) (reg:DI 72))",
+        mem_store_consumer
+            ? "(set (mem:DI (plus:SI (reg:SI 30 $fp) (const_int 16))) (reg:DI 10 t2))"
+            : "(set (reg:DI 75) (xor:DI (reg:DI 10 t2) (reg:DI 75)))",
+        "(set (reg/i:DI 2 v0) (mem:DI (plus:SI (reg:SI 30 $fp) (const_int 16))))",
+        "(use (reg/i:DI 2 v0))",
+    };
+    b0.SyncRtlInsnsFromInstructions();
+    cfg.rpo_blocks = {std::move(b0)};
+    return cfg;
+  };
+  {
+    const absl::StatusOr<RtlControlFlowGraph> pos =
+        InvertReload(make_o0_md_cfg(/*mem_store_consumer=*/true), o0_prof);
+    ASSERT_TRUE(pos.ok()) << pos.status();
+    EXPECT_EQ(pos->FormatSummary().find("(set (reg:DI 10 t2) (reg:DI 72))"), std::string::npos)
+        << pos->FormatSummary();
+    EXPECT_NE(pos->FormatSummary().find(
+                  "(set (mem:DI (plus:SI (reg:SI 30 $fp) (const_int 16))) (reg:DI 72))"),
+              std::string::npos)
+        << pos->FormatSummary();
+
+    const absl::StatusOr<RtlControlFlowGraph> neg =
+        InvertReload(make_o0_md_cfg(/*mem_store_consumer=*/false), o0_prof);
+    ASSERT_TRUE(neg.ok()) << neg.status();
+    EXPECT_NE(neg->FormatSummary().find("(set (reg:DI 10 t2) (reg:DI 72))"), std::string::npos)
+        << neg->FormatSummary();
   }
 }
 

@@ -558,7 +558,7 @@ TEST_F(InvertGlobalAllocTest, ExcludesSingleRegMdClassHighpartPseudoFromLocalAll
   greg_cfg.sideband.reg_renumber[72] = 2;
   greg_cfg.sideband.reg_renumber[73] = 3;
   greg_cfg.sideband.reg_renumber[74] = 4;
-  greg_cfg.sideband.reg_renumber[75] = 3;
+  greg_cfg.sideband.reg_renumber[75] = 64;
 
   RtlBasicBlock bb0;
   bb0.id = 0;
@@ -980,6 +980,646 @@ TEST_F(InvertGlobalAllocTest,
   EXPECT_EQ(ga_snap.post_state.sideband.reg_renumber.at(72), 3);
   EXPECT_EQ(ga_snap.post_state.sideband.reg_renumber.at(73), 2);
   EXPECT_TRUE(verifier.VerifySubfunctionBoundaryRightInverse(ga_snap).matches);
+}
+
+TEST_F(InvertGlobalAllocTest, Sched1LockedLiveLengthPreservesAllocnoOrderAcrossSched1WriteBack) {
+  // Mirrors `sched.c:4911-4966` and `global.c:760, 1078-1095`: when `-O2`
+  // (`flag_schedule_insns`) runs, `schedule_insns` overwrites positive
+  // `reg_live_length[r]` with `sched_reg_live_length[r]` while preserving
+  // `reg_n_refs[r]`. Verify `InvertGlobalAlloc` reconciles inverted global
+  // allocno priorities strictly via `reg_n_refs` (preserving `reg_live_length`)
+  // so genuine GCC `sched1 -> local_alloc -> global_alloc` reproduces target
+  // `reg_renumber` for both non-call-crossing and call-crossing callee-saved
+  // allocnos.
+  const CompilationProfile o2_prof{2, {"-O2", "-mips2", "-mcpu=r4000"}, {}};
+  ctx->BeginFunction("harness_init");
+  hooks->ApplyCompilationProfile(o2_prof);
+  regclass_init();
+
+  // Case 1: Two non-call-crossing loop-carried pseudos (`72`, `73`) with equal
+  // natural `(reg_n_refs, reg_live_length)` where target assignment puts `73`
+  // ahead of `72` (`73 -> $3`, `72 -> $5`).
+  RtlControlFlowGraph loop_cfg;
+  loop_cfg.pass = RtlPassKind::kGreg;
+  loop_cfg.sideband.max_regno = 75;
+  loop_cfg.sideband.reg_renumber = {{72, 5}, {73, 3}, {74, 2}};
+
+  RtlBasicBlock lb0;
+  lb0.id = 0;
+  lb0.successors = {2, 1};
+  lb0.AddPatternOnly("(set (reg:SI 72) (const_int 0))");
+  lb0.AddPatternOnly("(set (reg:SI 73) (const_int 0))");
+  lb0.AddPatternOnly(
+      "(set (pc) (if_then_else (le:SI (reg:SI 4 a0) (const_int 0)) (label_ref L2) (pc)))");
+  loop_cfg.rpo_blocks.push_back(std::move(lb0));
+
+  RtlBasicBlock lb1;
+  lb1.id = 1;
+  lb1.has_label = true;
+  lb1.successors = {1, 2};
+  lb1.AddPatternOnly("(set (reg:SI 72) (plus:SI (reg:SI 72) (const_int 1)))");
+  lb1.AddPatternOnly("(set (reg:SI 73) (plus:SI (reg:SI 73) (const_int 2)))");
+  lb1.AddPatternOnly("(set (reg:SI 74) (lt:SI (reg:SI 72) (reg:SI 4 a0)))");
+  lb1.AddPatternOnly(
+      "(set (pc) (if_then_else (ne:SI (reg:SI 74) (const_int 0)) (label_ref L1) (pc))) "
+      "(expr_list:REG_DEAD (reg:SI 74) (nil))");
+  loop_cfg.rpo_blocks.push_back(std::move(lb1));
+
+  RtlBasicBlock lb2;
+  lb2.id = 2;
+  lb2.has_label = true;
+  lb2.AddPatternOnly("(set (reg/i:SI 2 v0) (reg:SI 73)) (expr_list:REG_DEAD (reg:SI 73) (nil))");
+  lb2.AddPatternOnly("(use (reg/i:SI 2 v0))");
+  loop_cfg.rpo_blocks.push_back(std::move(lb2));
+
+  absl::StatusOr<RtlControlFlowGraph> lifted_loop = InvertGlobalAlloc(loop_cfg, o2_prof);
+  ASSERT_TRUE(lifted_loop.ok()) << lifted_loop.status();
+  ASSERT_TRUE(lifted_loop->sideband.reg_live_length.contains(72));
+  ASSERT_TRUE(lifted_loop->sideband.reg_live_length.contains(73));
+  // Both pseudos have identical `sched_reg_live_length` (7); locked-length
+  // reconciliation must preserve `reg_live_length[72] == reg_live_length[73]`
+  // and separate priorities via `reg_n_refs`.
+  EXPECT_EQ(lifted_loop->sideband.reg_live_length.at(72),
+            lifted_loop->sideband.reg_live_length.at(73));
+  EXPECT_GT(lifted_loop->sideband.reg_n_refs.at(73), lifted_loop->sideband.reg_n_refs.at(72));
+
+  // Replay through genuine GCC `sched1 -> local_alloc -> global_alloc` and
+  // confirm `sched1` write-back preserves `{72: 5, 73: 3}`.
+  RtlControlFlowGraph pre_sched = *lifted_loop;
+  pre_sched.sideband.reg_renumber.clear();
+  pre_sched.pass = RtlPassKind::kCombine;
+  const SubfunctionBoundarySnapshot s1_snap = hooks->ExecuteSubfunctionBoundary(
+      SubfunctionId::kScheduleBlockSched1, pre_sched, {}, o2_prof.optimize_level, o2_prof.c_flags);
+  const SubfunctionBoundarySnapshot ba_snap = hooks->ExecuteSubfunctionBoundary(
+      SubfunctionId::kBlockAlloc, s1_snap.post_state, {}, o2_prof.optimize_level, o2_prof.c_flags);
+  const SubfunctionBoundarySnapshot ga_snap = hooks->ExecuteSubfunctionBoundary(
+      SubfunctionId::kGlobalAlloc, ba_snap.post_state, {}, o2_prof.optimize_level, o2_prof.c_flags);
+  ASSERT_TRUE(ga_snap.post_state.sideband.reg_renumber.contains(72));
+  ASSERT_TRUE(ga_snap.post_state.sideband.reg_renumber.contains(73));
+  EXPECT_EQ(ga_snap.post_state.sideband.reg_renumber.at(72), 5);
+  EXPECT_EQ(ga_snap.post_state.sideband.reg_renumber.at(73), 3);
+
+  // Case 2: Two call-crossing callee-saved pseudos (`72 -> $17`, `73 -> $16`)
+  // where `72` naturally has `reg_n_refs > 4 * calls_crossed` and `73` has
+  // `reg_n_refs <= 4 * calls_crossed`. Per `global.c:1078-1095`, callee-saved
+  // targets in `pref_class` never reach `CALLER_SAVE_PROFITABLE`, so
+  // `InvertGlobalAlloc` must keep `reg_live_length` locked and raise
+  // `reg_n_refs[73]` (or lower `reg_n_refs[72]`) across `4 * calls_crossed`.
+  RtlControlFlowGraph call_cfg;
+  call_cfg.pass = RtlPassKind::kGreg;
+  call_cfg.sideband.outgoing_args_size = 16;
+  call_cfg.sideband.saved_gpr_regnos = {16, 17, 31};
+  call_cfg.sideband.max_regno = 74;
+  call_cfg.sideband.reg_renumber = {{72, 17}, {73, 16}};
+
+  RtlBasicBlock cb0;
+  cb0.id = 0;
+  cb0.successors = {1};
+  cb0.AddPatternOnly("(set (reg:SI 72) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+  cb0.AddPatternOnly("(set (reg:SI 73) (reg:SI 5 a1)) (expr_list:REG_DEAD (reg:SI 5 a1) (nil))");
+  cb0.AddPatternOnly("(set (reg:SI 72) (plus:SI (reg:SI 72) (const_int 1)))");
+  cb0.AddPatternOnly("(set (reg:SI 72) (plus:SI (reg:SI 72) (const_int 2)))");
+  RtlInsn call_ins;
+  call_ins.canonical_pattern =
+      "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"Sink\"))) (const_int 16))) "
+      "(clobber (reg:SI 31 ra)) ] )";
+  call_ins.has_explicit_call_fusage = true;
+  cb0.AddInsn(std::move(call_ins));
+  call_cfg.rpo_blocks.push_back(std::move(cb0));
+
+  RtlBasicBlock cb1;
+  cb1.id = 1;
+  cb1.has_label = true;
+  cb1.AddPatternOnly(
+      "(set (reg:SI 72) (plus:SI (reg:SI 72) (reg:SI 73))) "
+      "(expr_list:REG_DEAD (reg:SI 73) (nil))");
+  cb1.AddPatternOnly(
+      "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 72))) "
+      "(expr_list:REG_DEAD (reg:SI 72) (nil))");
+  cb1.AddPatternOnly("(use (reg/i:SI 2 v0))");
+  call_cfg.rpo_blocks.push_back(std::move(cb1));
+
+  absl::StatusOr<RtlControlFlowGraph> lifted_call = InvertGlobalAlloc(call_cfg, o2_prof);
+  ASSERT_TRUE(lifted_call.ok()) << lifted_call.status();
+  RtlControlFlowGraph pre_call_sched = *lifted_call;
+  pre_call_sched.sideband.reg_renumber.clear();
+  pre_call_sched.pass = RtlPassKind::kCombine;
+  const SubfunctionBoundarySnapshot cs_s1 =
+      hooks->ExecuteSubfunctionBoundary(SubfunctionId::kScheduleBlockSched1, pre_call_sched, {},
+                                        o2_prof.optimize_level, o2_prof.c_flags);
+  EXPECT_EQ(cs_s1.post_state.sideband.reg_live_length.at(72),
+            lifted_call->sideband.reg_live_length.at(72));
+  EXPECT_EQ(cs_s1.post_state.sideband.reg_live_length.at(73),
+            lifted_call->sideband.reg_live_length.at(73));
+  const SubfunctionBoundarySnapshot cs_ba = hooks->ExecuteSubfunctionBoundary(
+      SubfunctionId::kBlockAlloc, cs_s1.post_state, {}, o2_prof.optimize_level, o2_prof.c_flags);
+  const SubfunctionBoundarySnapshot cs_ga = hooks->ExecuteSubfunctionBoundary(
+      SubfunctionId::kGlobalAlloc, cs_ba.post_state, {}, o2_prof.optimize_level, o2_prof.c_flags);
+  ASSERT_TRUE(cs_ga.post_state.sideband.reg_renumber.contains(72));
+  ASSERT_TRUE(cs_ga.post_state.sideband.reg_renumber.contains(73));
+  EXPECT_EQ(cs_ga.post_state.sideband.reg_renumber.at(72), 17);
+  EXPECT_EQ(cs_ga.post_state.sideband.reg_renumber.at(73), 16);
+}
+
+TEST_F(InvertGlobalAllocTest, Sched1PhantomAllocnoUnlockedLengthPreservesCfgAllocnoLockedLengths) {
+  // Mirrors `sched.c:4915-4947` + `global.c:1115-1156`: a zero-occurrence
+  // spilled phantom pseudo (`75`) is never touched by `sched_reg_live_length`,
+  // so keeping its `reg_live_length` unlocked lets it satisfy tight density
+  // caps without forcing real CFG allocnos (`72`, `73`) to fall back to
+  // unlocked lengths across `sched1`.
+  const CompilationProfile o2_prof{2, {"-O2", "-mips2", "-mcpu=r4000"}, {}};
+  ctx->BeginFunction("harness_init");
+  hooks->ApplyCompilationProfile(o2_prof);
+  regclass_init();
+
+  RtlControlFlowGraph cfg;
+  cfg.pass = RtlPassKind::kGreg;
+  cfg.sideband.max_regno = 76;
+  cfg.sideband.reg_renumber = {{72, 5}, {73, 3}, {74, 2}, {75, -1}};
+  // Zero-occurrence spilled phantom `75` with short length `3` (density > 0.33
+  // if locked, colliding with a tight density cap) alongside real CFG pseudos
+  // `72` and `73` whose natural priority order must swap (`73 -> $3`, `72 -> $5`).
+  cfg.sideband.reg_n_refs[75] = 2;
+  cfg.sideband.reg_n_sets[75] = 0;
+  cfg.sideband.reg_n_deaths[75] = 0;
+  cfg.sideband.reg_live_length[75] = 3;
+
+  RtlBasicBlock bb0;
+  bb0.id = 0;
+  bb0.successors = {2, 1};
+  bb0.AddPatternOnly("(set (reg:SI 72) (const_int 0))");
+  bb0.AddPatternOnly("(set (reg:SI 73) (const_int 0))");
+  bb0.AddPatternOnly(
+      "(set (pc) (if_then_else (le:SI (reg:SI 4 a0) (const_int 0)) (label_ref L2) (pc)))");
+  cfg.rpo_blocks.push_back(std::move(bb0));
+
+  RtlBasicBlock bb1;
+  bb1.id = 1;
+  bb1.has_label = true;
+  bb1.successors = {1, 2};
+  bb1.AddPatternOnly("(set (reg:SI 72) (plus:SI (reg:SI 72) (const_int 1)))");
+  bb1.AddPatternOnly("(set (reg:SI 73) (plus:SI (reg:SI 73) (const_int 2)))");
+  bb1.AddPatternOnly("(set (reg:SI 74) (lt:SI (reg:SI 72) (reg:SI 4 a0)))");
+  bb1.AddPatternOnly(
+      "(set (pc) (if_then_else (ne:SI (reg:SI 74) (const_int 0)) (label_ref L1) (pc))) "
+      "(expr_list:REG_DEAD (reg:SI 74) (nil))");
+  cfg.rpo_blocks.push_back(std::move(bb1));
+
+  RtlBasicBlock bb2;
+  bb2.id = 2;
+  bb2.has_label = true;
+  bb2.AddPatternOnly("(set (reg/i:SI 2 v0) (reg:SI 73)) (expr_list:REG_DEAD (reg:SI 73) (nil))");
+  bb2.AddPatternOnly("(use (reg/i:SI 2 v0))");
+  cfg.rpo_blocks.push_back(std::move(bb2));
+
+  absl::StatusOr<RtlControlFlowGraph> lifted = InvertGlobalAlloc(cfg, o2_prof);
+  ASSERT_TRUE(lifted.ok()) << lifted.status();
+  ASSERT_TRUE(lifted->sideband.reg_live_length.contains(72));
+  ASSERT_TRUE(lifted->sideband.reg_live_length.contains(73));
+  // Real CFG allocnos keep their exact locked `sched_reg_live_length` and
+  // separate priority strictly via `reg_n_refs`.
+  EXPECT_EQ(lifted->sideband.reg_live_length.at(72), lifted->sideband.reg_live_length.at(73));
+  EXPECT_GT(lifted->sideband.reg_n_refs.at(73), lifted->sideband.reg_n_refs.at(72));
+
+  RtlControlFlowGraph pre_sched = *lifted;
+  pre_sched.sideband.reg_renumber.clear();
+  pre_sched.pass = RtlPassKind::kCombine;
+  const SubfunctionBoundarySnapshot s1_snap = hooks->ExecuteSubfunctionBoundary(
+      SubfunctionId::kScheduleBlockSched1, pre_sched, {}, o2_prof.optimize_level, o2_prof.c_flags);
+  EXPECT_EQ(s1_snap.post_state.sideband.reg_live_length.at(72),
+            lifted->sideband.reg_live_length.at(72));
+  EXPECT_EQ(s1_snap.post_state.sideband.reg_live_length.at(73),
+            lifted->sideband.reg_live_length.at(73));
+  const SubfunctionBoundarySnapshot ba_snap = hooks->ExecuteSubfunctionBoundary(
+      SubfunctionId::kBlockAlloc, s1_snap.post_state, {}, o2_prof.optimize_level, o2_prof.c_flags);
+  const SubfunctionBoundarySnapshot ga_snap = hooks->ExecuteSubfunctionBoundary(
+      SubfunctionId::kGlobalAlloc, ba_snap.post_state, {}, o2_prof.optimize_level, o2_prof.c_flags);
+  EXPECT_EQ(ga_snap.post_state.sideband.reg_renumber.at(72), 5);
+  EXPECT_EQ(ga_snap.post_state.sideband.reg_renumber.at(73), 3);
+}
+
+TEST_F(InvertGlobalAllocTest, BlockAllocModelTiesOperandZeroNotSecondSetInDivModParallel) {
+  const CompilationProfile o2_prof{2, {"-O2", "-mips2", "-mcpu=r4000"}, {}};
+
+  // Negative (`REG_UNUSED` on operand 0 `div` dest): `local-alloc.c:1240` ties
+  // `recog_operand[0]`, NOT the second `SET` (`mod`, operand 3). Thus `r73`
+  // (`renum = 3`, dying in `divmodsi4`) must NOT be combined with `r74`
+  // (`renum = 14`, operand 3), so `r72`/`r73`/`r74` stay local in `reg_renumber`.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(set (reg:SI 72) (and:SI (reg:SI 4 a0) (const_int 127))) "
+                "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                "(set (reg:SI 73) (plus:SI (reg:SI 72) (const_int 3))) "
+                "(expr_list:REG_DEAD (reg:SI 72) (nil))",
+                "(parallel[ (set (reg:SI 1 at) (div:SI (reg:SI 5 a1) (reg:SI 73))) "
+                "(set (reg:SI 74) (mod:SI (reg:SI 5 a1) (reg:SI 73))) "
+                "(clobber (reg:SI 65 lo)) (clobber (reg:SI 64 hi)) (clobber (reg:SI 66 accum)) ] ) "
+                "(expr_list:REG_DEAD (reg:SI 5 a1) (expr_list:REG_DEAD (reg:SI 73) "
+                "(expr_list:REG_UNUSED (reg:SI 1 at) (expr_list:REG_UNUSED (reg:SI 66 accum) "
+                "(expr_list:REG_UNUSED (reg:SI 64 hi) (expr_list:REG_UNUSED (reg:SI 65 lo) "
+                "(nil)))))))",
+                "(set (reg/i:SI 2 v0) (reg:SI 74)) (expr_list:REG_DEAD (reg:SI 74) (nil))",
+                "(use (reg/i:SI 2 v0))",
+            },
+    });
+    cfg.sideband.max_regno = 75;
+    cfg.sideband.reg_renumber = {{72, 3}, {73, 3}, {74, 14}};
+    const absl::StatusOr<RtlControlFlowGraph> lifted = InvertGlobalAlloc(cfg, o2_prof);
+    ASSERT_TRUE(lifted.ok()) << lifted.status();
+    ASSERT_TRUE(lifted->sideband.reg_renumber.contains(72));
+    ASSERT_TRUE(lifted->sideband.reg_renumber.contains(73));
+    ASSERT_TRUE(lifted->sideband.reg_renumber.contains(74));
+    EXPECT_EQ(lifted->sideband.reg_renumber.at(72), 3);
+    EXPECT_EQ(lifted->sideband.reg_renumber.at(73), 3);
+    EXPECT_EQ(lifted->sideband.reg_renumber.at(74), 14);
+  }
+
+  // Positive (live pseudo on operand 0 `div` dest): `local-alloc.c:1240` DOES
+  // combine dead input `r73` (`renum = 3`) with operand 0 `r74` (`renum = 14`),
+  // so quantity atomicity detects the incompatible hard regs and erases the
+  // quantity from `reg_renumber`.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.rpo_blocks.push_back(RtlBasicBlock{
+        .id = 0,
+        .instructions =
+            {
+                "(set (reg:SI 72) (and:SI (reg:SI 4 a0) (const_int 127))) "
+                "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                "(set (reg:SI 73) (plus:SI (reg:SI 72) (const_int 3))) "
+                "(expr_list:REG_DEAD (reg:SI 72) (nil))",
+                "(parallel[ (set (reg:SI 74) (div:SI (reg:SI 73) (reg:SI 5 a1))) "
+                "(set (reg:SI 1 at) (mod:SI (reg:SI 73) (reg:SI 5 a1))) "
+                "(clobber (reg:SI 65 lo)) (clobber (reg:SI 64 hi)) (clobber (reg:SI 66 accum)) ] ) "
+                "(expr_list:REG_DEAD (reg:SI 5 a1) (expr_list:REG_DEAD (reg:SI 73) "
+                "(expr_list:REG_UNUSED (reg:SI 1 at) (expr_list:REG_UNUSED (reg:SI 66 accum) "
+                "(expr_list:REG_UNUSED (reg:SI 64 hi) (expr_list:REG_UNUSED (reg:SI 65 lo) "
+                "(nil)))))))",
+                "(set (reg/i:SI 2 v0) (reg:SI 74)) (expr_list:REG_DEAD (reg:SI 74) (nil))",
+                "(use (reg/i:SI 2 v0))",
+            },
+    });
+    cfg.sideband.max_regno = 75;
+    cfg.sideband.reg_renumber = {{72, 3}, {73, 3}, {74, 14}};
+    const absl::StatusOr<RtlControlFlowGraph> lifted = InvertGlobalAlloc(cfg, o2_prof);
+    ASSERT_TRUE(lifted.ok()) << lifted.status();
+    EXPECT_FALSE(lifted->sideband.reg_renumber.contains(72));
+    EXPECT_FALSE(lifted->sideband.reg_renumber.contains(73));
+    EXPECT_FALSE(lifted->sideband.reg_renumber.contains(74));
+  }
+}
+
+TEST_F(InvertGlobalAllocTest, LocalAllocMdClobberIgnoresAccumOnlyWideningMultButHonorsHardHiLo) {
+  const CompilationProfile o2_prof{2, {"-O2", "-mips2", "-mcpu=r4000"}, {}};
+
+  // Mirrors `local-alloc.c:1381` (`note_stores`) + `config/mips/mips.md:963-1024`:
+  // a pseudo-destination widening `mult:DI` (`mulsidi3`/`umulsidi3`) only
+  // clobbers `(reg:SI 66 accum)`, NOT hard regs `64 hi`/`65 lo`. Therefore:
+  // - Positive: a spilled single-block widening `mult:DI` (`r79`,
+  //   `reg_renumber[79] == -1`) whose live range spans a second pseudo-dest
+  //   widening `mult:DI` (`r80`, `renum = 4`) is restored to `reg_renumber[79] = 64`
+  //   (`hi`) by `InvertGlobalAlloc` (since `local_alloc` sees `hi`/`lo` free).
+  // - Negative: when an explicit `(clobber (reg:SI 64 hi))` intervenes across
+  //   `r79`'s live range, `local_alloc` marks `hi` live, so `r79` is NOT
+  //   restored to `64`.
+  auto build_cfg = [](bool explicit_hi_clobber) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    std::vector<std::string> insns = {
+        "(parallel[ (set (reg:DI 79) (mult:DI (sign_extend:DI (reg:SI 4 a0)) "
+        "(sign_extend:DI (reg:SI 5 a1)))) (clobber (reg:SI 66 accum)) ] ) "
+        "(expr_list:REG_UNUSED (reg:SI 66 accum) (nil))",
+    };
+    if (explicit_hi_clobber) {
+      insns.push_back(
+          "(parallel[ (set (reg:SI 80) (div:SI (reg:SI 4 a0) (reg:SI 5 a1))) "
+          "(set (reg:SI 1 at) (mod:SI (reg:SI 4 a0) (reg:SI 5 a1))) "
+          "(clobber (reg:SI 65 lo)) (clobber (reg:SI 64 hi)) (clobber (reg:SI 66 accum)) ] ) "
+          "(expr_list:REG_DEAD (reg:SI 4 a0) (expr_list:REG_DEAD (reg:SI 5 a1) "
+          "(expr_list:REG_UNUSED (reg:SI 1 at) (expr_list:REG_UNUSED (reg:SI 66 accum) "
+          "(expr_list:REG_UNUSED (reg:SI 64 hi) (expr_list:REG_UNUSED (reg:SI 65 lo) "
+          "(nil)))))))");
+      insns.push_back(
+          "(parallel[ (set (reg/i:DI 2 v0) (plus:DI (reg:DI 79) (sign_extend:DI (reg:SI 80)))) "
+          "(clobber (reg:SI 81)) ] ) "
+          "(expr_list:REG_DEAD (reg:DI 79) (expr_list:REG_DEAD (reg:SI 80) "
+          "(expr_list:REG_UNUSED (reg:SI 81) (nil))))");
+    } else {
+      insns.push_back(
+          "(parallel[ (set (reg:DI 80) (mult:DI (zero_extend:DI (reg:SI 4 a0)) "
+          "(zero_extend:DI (reg:SI 5 a1)))) (clobber (reg:SI 66 accum)) ] ) "
+          "(expr_list:REG_DEAD (reg:SI 4 a0) (expr_list:REG_DEAD (reg:SI 5 a1) "
+          "(expr_list:REG_UNUSED (reg:SI 66 accum) (nil))))");
+      insns.push_back(
+          "(parallel[ (set (reg/i:DI 2 v0) (plus:DI (reg:DI 79) (reg:DI 80))) "
+          "(clobber (reg:SI 81)) ] ) "
+          "(expr_list:REG_DEAD (reg:DI 79) (expr_list:REG_DEAD (reg:DI 80) "
+          "(expr_list:REG_UNUSED (reg:SI 81) (nil))))");
+    }
+    insns.push_back("(use (reg/i:DI 2 v0))");
+    cfg.rpo_blocks.push_back(RtlBasicBlock{.id = 0, .instructions = std::move(insns)});
+    cfg.sideband.max_regno = 82;
+    cfg.sideband.reg_renumber = {{80, 4}, {81, 6}};
+    return cfg;
+  };
+
+  {
+    const absl::StatusOr<RtlControlFlowGraph> pos =
+        InvertGlobalAlloc(build_cfg(/*explicit_hi_clobber=*/false), o2_prof);
+    ASSERT_TRUE(pos.ok()) << pos.status();
+    ASSERT_TRUE(pos->sideband.reg_renumber.contains(79));
+    EXPECT_EQ(pos->sideband.reg_renumber.at(79), 64);
+  }
+  {
+    const absl::StatusOr<RtlControlFlowGraph> neg =
+        InvertGlobalAlloc(build_cfg(/*explicit_hi_clobber=*/true), o2_prof);
+    ASSERT_TRUE(neg.ok()) << neg.status();
+    const bool assigned_hi =
+        neg->sideband.reg_renumber.contains(79) && neg->sideband.reg_renumber.at(79) == 64;
+    EXPECT_FALSE(assigned_hi);
+  }
+}
+
+TEST_F(InvertGlobalAllocTest, PreservesReloadHardRegUseOrderAcrossPhasesOnlyWhenClassExhausted) {
+  const CompilationProfile o2_prof{2, {"-O2", "-mips2", "-mcpu=r4000"}, {}};
+
+  // Mirrors `reload1.c:3606-3712` (`order_regs_for_reload`, `hard_reg_use_compare`):
+  // When local `block_alloc` reconciliation bumps local `r90` (`$f0`, originally
+  // 2 refs) above global `r72` (`$f20`, originally 3 refs),
+  // `PreserveReloadHardRegUseOrderAcrossPhases` uniformly scales global
+  // `FP_REGS` `reg_n_refs` iff `FP_REGS` has `< 2` unused even hard registers
+  // (positive), and leaves global `reg_n_refs` unscaled when `>= 2` even FPRs
+  // are unused (negative).
+  auto build_cfg = [](bool exhaust_fp_class) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    std::vector<std::string> b0_insns = {
+        "(set (reg:SF 72) (mem:SF (reg:SI 4 a0)))",
+    };
+    absl::flat_hash_map<int, int> renum = {{72, 52}};
+    int next_p = 73;
+    if (exhaust_fp_class) {
+      // Occupy all remaining even FPRs (`$f4..$f18`, `$f22..$f30`) in B0 so
+      // `free_fp == 0 < 2` (`$f0` and `$f2` are occupied by `r90`/`r91` in B1),
+      // without changing `r72`'s own reference count (`3`).
+      for (int hr : {36, 38, 40, 42, 44, 46, 48, 50, 54, 56, 58, 60, 62}) {
+        const int p = next_p++;
+        const int off = (p - 72) * 4;
+        b0_insns.push_back("(set (reg:SF " + std::to_string(p) +
+                           ") (mem:SF (plus:SI (reg:SI 4 a0) (const_int " + std::to_string(off) +
+                           "))))");
+        b0_insns.push_back("(set (mem:SF (plus:SI (reg:SI 5 a1) (const_int " + std::to_string(off) +
+                           "))) (reg:SF " + std::to_string(p) + ")) (expr_list:REG_DEAD (reg:SF " +
+                           std::to_string(p) + ") (nil))");
+        renum[p] = hr;
+      }
+    }
+    b0_insns.push_back(
+        "(set (pc) (if_then_else (eq:SI (reg:SI 5 a1) (const_int 0)) (label_ref L1) (pc)))");
+
+    // In B1, `r90` (span 5, target `$f0=32`) and `r91` (span 2, target `$f2=34`)
+    // overlap; because `r91` has shorter span, `local_alloc` would give `$f0` to
+    // `r91` unless `ReconcileSingleBlockLocalPriorities` bumps `r90`'s `n_refs`
+    // above `r91` (and above global `r72`'s natural `orig_refs == 3`).
+    std::vector<std::string> b1_insns = {
+        "(set (reg:SF 90) (mem:SF (reg:SI 4 a0)))",
+        "(set (reg:SF 91) (mem:SF (plus:SI (reg:SI 4 a0) (const_int 4))))",
+        "(set (reg:SF 92) (plus:SF (reg:SF 72) (reg:SF 91))) "
+        "(expr_list:REG_DEAD (reg:SF 91) (nil))",
+        "(set (reg:SF 92) (plus:SF (reg:SF 92) (reg:SF 72))) "
+        "(expr_list:REG_DEAD (reg:SF 72) (nil))",
+        "(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 92) (reg:SF 90))) "
+        "(expr_list:REG_DEAD (reg:SF 92) (expr_list:REG_DEAD (reg:SF 90) (nil)))",
+        "(use (reg/i:SF 32 $f0))",
+    };
+    renum[90] = 32;
+    renum[91] = 34;
+    renum[92] = 36;
+
+    RtlBasicBlock b0;
+    b0.id = 0;
+    b0.instructions = std::move(b0_insns);
+    b0.successors = {1};
+    RtlBasicBlock b1;
+    b1.id = 1;
+    b1.has_label = true;
+    b1.instructions = std::move(b1_insns);
+    cfg.rpo_blocks.push_back(std::move(b0));
+    cfg.rpo_blocks.push_back(std::move(b1));
+    cfg.sideband.max_regno = 93;
+    cfg.sideband.reg_renumber = std::move(renum);
+    return cfg;
+  };
+
+  // Positive: `FP_REGS` exhausted (`free_fp == 0 < 2`). `r90` (`$f0`) is bumped
+  // above `r91`, and global `r72` (`$f20`, originally 3 refs > 2) is scaled so
+  // `refs[72] > refs[90]`.
+  const absl::StatusOr<RtlControlFlowGraph> pos =
+      InvertGlobalAlloc(build_cfg(/*exhaust_fp_class=*/true), o2_prof);
+  ASSERT_TRUE(pos.ok()) << pos.status();
+  ASSERT_TRUE(pos->sideband.reg_n_refs.contains(72));
+  ASSERT_TRUE(pos->sideband.reg_n_refs.contains(90));
+  EXPECT_GT(pos->sideband.reg_n_refs.at(90), 2);
+  EXPECT_GT(pos->sideband.reg_n_refs.at(72), pos->sideband.reg_n_refs.at(90));
+
+  // Negative: `FP_REGS` NOT exhausted (`free_fp >= 2`). Even when `r90` (`$f0`)
+  // is bumped above `r91`, global `r72` (`$f20`) stays at its natural ref count
+  // (`3`) without uniform class scaling.
+  const absl::StatusOr<RtlControlFlowGraph> neg =
+      InvertGlobalAlloc(build_cfg(/*exhaust_fp_class=*/false), o2_prof);
+  ASSERT_TRUE(neg.ok()) << neg.status();
+  ASSERT_TRUE(neg->sideband.reg_n_refs.contains(72));
+  ASSERT_TRUE(neg->sideband.reg_n_refs.contains(90));
+  EXPECT_GT(neg->sideband.reg_n_refs.at(90), 2);
+  EXPECT_EQ(neg->sideband.reg_n_refs.at(72), 3);
+  EXPECT_GT(pos->sideband.reg_n_refs.at(72), neg->sideband.reg_n_refs.at(72));
+}
+
+TEST_F(InvertGlobalAllocTest,
+       ErasesPreferencePoisoningLocalPseudoOnlyWhenReducingGlobalMismatches) {
+  const CompilationProfile o1_prof{1, {"-O1", "-mips2", "-Wa,-g"}, {}};
+  // Mirrors `global.c:1535-1605` (`set_preference`): global pseudo `r72`
+  // (`exp = $2 v0`) is copied from local pseudo `r73` (`$5 a1`). If `r73` stays
+  // pre-allocated to `$5 a1` in `reg_renumber`, `set_preference` biases `r72`
+  // toward `$5 a1` instead of `$2 v0`.
+  // Positive (`r72` wants `$2` while `r73` holds `$5`): `InvertGlobalAlloc`
+  // erases `r73` from `reg_renumber` so `global_alloc` allocates `r72` to `$2`
+  // and `r73` to `$5` cleanly without mismatch.
+  // Negative (`r72` wants `$5`, matching `r73` = `$5`): zero mismatches exist,
+  // so `r73` retains its pre-allocated `reg_renumber[73] == 5`.
+  auto build_cfg = [](int r72_target_hr) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.sideband.max_regno = 75;
+    cfg.sideband.reg_renumber = {{72, r72_target_hr}, {73, 5}};
+    RtlBasicBlock b0;
+    b0.id = 0;
+    b0.instructions = {
+        "(set (reg:SI 2 v0) (const_int 10))",
+        "(set (reg:SI 3 v1) (const_int 20))",
+        "(set (reg:SI 4 a0) (const_int 30))",
+        "(set (reg:SI 73) (plus:SI (reg:SI 16 s0) (const_int 4)))",
+        "(set (mem:SI (reg:SI 16 s0)) (reg:SI 2 v0)) (expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+        "(set (mem:SI (plus:SI (reg:SI 16 s0) (const_int 4))) (reg:SI 3 v1)) "
+        "(expr_list:REG_DEAD (reg:SI 3 v1) (nil))",
+        "(set (mem:SI (plus:SI (reg:SI 16 s0) (const_int 8))) (reg:SI 4 a0)) "
+        "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+        "(set (reg:SI 72) (reg:SI 73)) (expr_list:REG_DEAD (reg:SI 73) (nil))",
+        "(set (pc) (if_then_else (eq:SI (reg:SI 16 s0) (const_int 0)) (label_ref L1) (pc)))",
+    };
+    b0.successors = {2, 1};
+    RtlBasicBlock b1;
+    b1.id = 1;
+    b1.instructions = {
+        "(set (reg:SI 72) (plus:SI (reg:SI 72) (const_int 1)))",
+    };
+    b1.successors = {2};
+    RtlBasicBlock b2;
+    b2.id = 2;
+    b2.has_label = true;
+    b2.instructions = {
+        "(set (mem:SI (reg:SI 16 s0)) (reg:SI 72)) (expr_list:REG_DEAD (reg:SI 72) (nil))",
+        "(set (reg/i:SI 2 v0) (const_int 0))",
+        "(use (reg/i:SI 2 v0))",
+    };
+    cfg.rpo_blocks = {std::move(b0), std::move(b1), std::move(b2)};
+    return cfg;
+  };
+
+  {
+    const RtlControlFlowGraph cfg = build_cfg(/*r72_target_hr=*/2);
+    const absl::StatusOr<RtlControlFlowGraph> lifted = InvertGlobalAlloc(cfg, o1_prof);
+    ASSERT_TRUE(lifted.ok()) << lifted.status();
+    EXPECT_FALSE(lifted->sideband.reg_renumber.contains(73))
+        << "Expected preference-poisoning local r73 ($5) to be erased for global r72 ($2)";
+    EXPECT_FALSE(lifted->sideband.reg_renumber.contains(72));
+  }
+  {
+    const RtlControlFlowGraph cfg = build_cfg(/*r72_target_hr=*/5);
+    const absl::StatusOr<RtlControlFlowGraph> lifted = InvertGlobalAlloc(cfg, o1_prof);
+    ASSERT_TRUE(lifted.ok()) << lifted.status();
+    ASSERT_TRUE(lifted->sideband.reg_renumber.contains(73));
+    EXPECT_EQ(lifted->sideband.reg_renumber.at(73), 5)
+        << "Expected aligned local r73 ($5) to be preserved when global r72 also wants $5";
+  }
+}
+
+TEST_F(InvertGlobalAllocTest,
+       LocalBlockAllocModelHandlesPseudoSubregBirthNoConflictCombineAndCase3Order) {
+  const CompilationProfile o2_prof{.optimize_level = 2,
+                                   .c_flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"}};
+
+  // 1. `local-alloc.c:1317-1352, 1958-1985` + `rtlanal.c:note_stores`:
+  //    `(set (subreg:SI (reg:DI 74) 1) ...)` must NOT offset pseudo 74 to 75,
+  //    and `(clobber (reg:DI 73)) (REG_LIBCALL)` + `(REG_NO_CONFLICT 72)` +
+  //    `(set (reg:DI 73) (reg:DI 73)) (REG_RETVAL) (REG_EQUAL (sign_extend:DI 72))`
+  //    combines 72 and 73 into one quantity without corrupting `reg_n_refs[75]`.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.sideband.max_regno = 76;
+    cfg.sideband.reg_renumber = {{72, 16}, {73, 16}, {74, 18}, {75, 20}};
+    cfg.sideband.reg_n_refs = {{72, 3}, {73, 4}, {74, 5}, {75, 2}};
+    cfg.sideband.reg_n_sets = {{72, 1}, {73, 3}, {74, 3}, {75, 1}};
+    cfg.sideband.reg_n_deaths = {{72, 1}, {73, 1}, {74, 1}, {75, 1}};
+    cfg.sideband.reg_n_calls_crossed = {{72, 1}, {73, 0}, {74, 1}, {75, 2}};
+    cfg.rpo_blocks.resize(1);
+    cfg.rpo_blocks[0].id = 0;
+    cfg.rpo_blocks[0].instructions = {
+        "(set (reg:SI 75) (reg:SI 5 a1)) (expr_list:REG_DEAD (reg:SI 5 a1) (nil))",
+        "(set (reg:SI 72) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+        "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"FnA\"))) (const_int 16))) "
+        "(clobber (reg:SI 31 ra)) ] )",
+        "(clobber (reg:DI 73)) (insn_list:REG_LIBCALL (nil))",
+        "(set (subreg:SI (reg:DI 73) 1) (reg:SI 72)) (expr_list:REG_NO_CONFLICT (reg:SI 72) (nil))",
+        "(set (subreg:SI (reg:DI 73) 0) (ashiftrt:SI (reg:SI 72) (const_int 31))) "
+        "(expr_list:REG_DEAD (reg:SI 72) (expr_list:REG_NO_CONFLICT (reg:SI 72) (nil)))",
+        "(set (reg:DI 73) (reg:DI 73)) "
+        "(insn_list:REG_RETVAL (expr_list:REG_EQUAL (sign_extend:DI (reg:SI 72)) (nil)))",
+        "(clobber (reg:DI 74)) (insn_list:REG_LIBCALL (nil))",
+        "(set (subreg:SI (reg:DI 74) 1) (reg:SI 2 v0))",
+        "(set (subreg:SI (reg:DI 74) 0) (ashiftrt:SI (reg:SI 2 v0) (const_int 31))) "
+        "(expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+        "(set (reg:SI 4 a0) (reg:SI 75)) (expr_list:REG_DEAD (reg:SI 75) (nil))",
+        "(set (reg:DI 6 a2) (reg:DI 73)) (expr_list:REG_DEAD (reg:DI 73) (nil))",
+        "(parallel[ (set (reg:DI 2 v0) (call (mem:SI (symbol_ref:SI (\"FnB\"))) (const_int 16))) "
+        "(clobber (reg:SI 31 ra)) ] )",
+        "(set (reg/i:DI 2 v0) (xor:DI (reg:DI 2 v0) (reg:DI 74))) "
+        "(expr_list:REG_DEAD (reg:DI 74) (nil))",
+        "(use (reg/i:DI 2 v0))",
+    };
+    cfg.rpo_blocks[0].SyncRtlInsnsFromInstructions();
+
+    const absl::StatusOr<RtlControlFlowGraph> pre_global = InvertGlobalAlloc(cfg, o2_prof);
+    ASSERT_TRUE(pre_global.ok()) << pre_global.status();
+    EXPECT_EQ(pre_global->sideband.reg_renumber.at(72), 16);
+    EXPECT_EQ(pre_global->sideband.reg_renumber.at(73), 16);
+    EXPECT_EQ(pre_global->sideband.reg_renumber.at(74), 18);
+    EXPECT_EQ(pre_global->sideband.reg_renumber.at(75), 20);
+    EXPECT_LE(pre_global->sideband.reg_n_refs.at(75), pre_global->sideband.reg_n_refs.at(74));
+  }
+
+  // 2. `local-alloc.c:1491-1505` (`case 3:`): with 3 local quantities in a block
+  //    where `q2` (`r76`) is Pass-1 settled on `4 a0`, `q1` (`r74, r75 -> 2 v0`)
+  //    only beats `q0` (`r72, r73 -> 3 v1`) when `pri(q2) > pri(q1) > pri(q0)`;
+  //    `ReconcileSingleBlockLocalPriorities` must raise `reg_n_refs[76]` so `q2`
+  //    breaks the double-swap of `case 3:` -> `case 2:`.
+  {
+    const CompilationProfile mips1_prof{.optimize_level = 2,
+                                        .c_flags = {"-O2", "-mips1", "-Wa,-O2"}};
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.sideband.max_regno = 80;
+    cfg.sideband.reg_renumber = {{72, 5}, {73, 3}, {74, 3}, {75, 2},
+                                 {76, 2}, {77, 2}, {78, 8}, {79, 4}};
+    cfg.sideband.reg_n_refs = {{72, 4}, {73, 2}, {74, 2}, {75, 2},
+                               {76, 2}, {77, 2}, {78, 3}, {79, 2}};
+    cfg.sideband.reg_n_sets = {{72, 1}, {73, 1}, {74, 1}, {75, 1},
+                               {76, 1}, {77, 1}, {78, 1}, {79, 1}};
+    cfg.sideband.reg_n_deaths = {{72, 1}, {73, 1}, {74, 1}, {75, 1},
+                                 {76, 1}, {77, 1}, {78, 1}, {79, 1}};
+    cfg.rpo_blocks.resize(2);
+    cfg.rpo_blocks[0].id = 0;
+    cfg.rpo_blocks[0].successors = {1};
+    cfg.rpo_blocks[0].instructions = {
+        "(set (reg:SI 72) (reg:SI 5 a1)) (expr_list:REG_DEAD (reg:SI 5 a1) (nil))",
+        "(set (reg:SI 73) (ashift:SI (reg:SI 4 a0) (const_int 1)))",
+        "(set (reg:SI 74) (plus:SI (reg:SI 73) (reg:SI 4 a0))) "
+        "(expr_list:REG_DEAD (reg:SI 73) (nil))",
+        "(set (reg:SI 75) (ashift:SI (reg:SI 72) (const_int 3)))",
+        "(set (reg:SI 76) (minus:SI (reg:SI 75) (reg:SI 72))) "
+        "(expr_list:REG_DEAD (reg:SI 75) (nil))",
+        "(set (reg:SI 77) (plus:SI (reg:SI 76) (reg:SI 74))) "
+        "(expr_list:REG_DEAD (reg:SI 76) (expr_list:REG_DEAD (reg:SI 74) (nil)))",
+        "(set (reg:SI 78) (ashift:SI (reg:SI 77) (const_int 1))) "
+        "(expr_list:REG_DEAD (reg:SI 77) (nil))",
+        "(set (reg:SI 79) (lt:SI (reg:SI 4 a0) (const_int 6))) "
+        "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+        "(set (pc) (if_then_else (ne:SI (reg:SI 79) (const_int 0)) (label_ref L1) (pc))) "
+        "(expr_list:REG_DEAD (reg:SI 79) (nil))",
+    };
+    cfg.rpo_blocks[1].id = 1;
+    cfg.rpo_blocks[1].has_label = true;
+    cfg.rpo_blocks[1].successors = {};
+    cfg.rpo_blocks[1].instructions = {
+        "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 78) (reg:SI 72))) "
+        "(expr_list:REG_DEAD (reg:SI 78) (expr_list:REG_DEAD (reg:SI 72) (nil)))",
+        "(use (reg/i:SI 2 v0))",
+    };
+    for (auto& blk : cfg.rpo_blocks) {
+      blk.SyncRtlInsnsFromInstructions();
+    }
+
+    const absl::StatusOr<RtlControlFlowGraph> pre_global = InvertGlobalAlloc(cfg, mips1_prof);
+    ASSERT_TRUE(pre_global.ok()) << pre_global.status();
+    EXPECT_GT(pre_global->sideband.reg_n_refs.at(79), 2);
+  }
 }
 
 class InvertGlobalAllocCorpusTest : public InvertGlobalAllocTest,

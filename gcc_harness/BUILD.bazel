@@ -15,6 +15,7 @@ cc_library(
         "-Wl,--wrap=immed_real_const",
         "-Wl,--wrap=immed_real_const_1",
         "-Wl,--wrap=force_const_mem",
+        "-Wl,--wrap=reload",
     ],
     deps = [
         "//core:c_ast",

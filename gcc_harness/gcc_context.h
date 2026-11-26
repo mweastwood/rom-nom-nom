@@ -335,6 +335,22 @@ class GccContext {
   // `force_const_mem` adds a constant-pool entry during `yyparse()`.
   static void SetCc1ConstantPoolCaptureTarget(std::vector<Stage0ConstantPoolEntry>* target);
 
+  // Scoped guard that intercepts GCC's `reload()` via `-Wl,--wrap=reload` and
+  // returns `0` immediately without mutating `reg_renumber` or RTL. Used only
+  // around `RunGlobalAlloc` inside `SubfunctionId::kGlobalAlloc` so
+  // `global_alloc()` (`global.c:580`) does not run `reload()` a first time
+  // before the separate `SubfunctionId::kReload` boundary step.
+  class ScopedSkipReloadInGlobalAlloc {
+   public:
+    ScopedSkipReloadInGlobalAlloc();
+    ~ScopedSkipReloadInGlobalAlloc();
+    ScopedSkipReloadInGlobalAlloc(const ScopedSkipReloadInGlobalAlloc&) = delete;
+    ScopedSkipReloadInGlobalAlloc& operator=(const ScopedSkipReloadInGlobalAlloc&) = delete;
+
+   private:
+    bool prev_ = false;
+  };
+
  private:
   static void EnsureGlobalInit();
 

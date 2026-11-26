@@ -1570,17 +1570,20 @@ TEST(ReconstructHardRegLivenessTest, DeadLoopCombineUseHandlesMultiBlockLoopAndS
   RtlControlFlowGraph o1_load_cfg = make_loop_cfg(/*first_insn_is_load=*/true);
   ReconstructPostDbrHardRegLivenessAndReturnUse(&o1_load_cfg, profile_o1);
   ASSERT_EQ(o1_load_cfg.rpo_blocks[1].instructions.size(), 4u) << o1_load_cfg.FormatSummary();
-  EXPECT_EQ(o1_load_cfg.rpo_blocks[1].instructions[0], "(use (reg:SI 24 t8))");
+  EXPECT_EQ(o1_load_cfg.rpo_blocks[1].instructions[0],
+            "(use (reg:SI 24 t8)) (expr_list:REG_DEAD (reg:SI 24 t8) (nil))");
 
   RtlControlFlowGraph o2_load_cfg = make_loop_cfg(/*first_insn_is_load=*/true);
   ReconstructPostDbrHardRegLivenessAndReturnUse(&o2_load_cfg, profile_o2);
   ASSERT_EQ(o2_load_cfg.rpo_blocks[1].instructions.size(), 4u) << o2_load_cfg.FormatSummary();
-  EXPECT_EQ(o2_load_cfg.rpo_blocks[1].instructions[1], "(use (reg:SI 24 t8))");
+  EXPECT_EQ(o2_load_cfg.rpo_blocks[1].instructions[1],
+            "(use (reg:SI 24 t8)) (expr_list:REG_DEAD (reg:SI 24 t8) (nil))");
 
   RtlControlFlowGraph o2_alu_cfg = make_loop_cfg(/*first_insn_is_load=*/false);
   ReconstructPostDbrHardRegLivenessAndReturnUse(&o2_alu_cfg, profile_o2);
   ASSERT_EQ(o2_alu_cfg.rpo_blocks[1].instructions.size(), 4u) << o2_alu_cfg.FormatSummary();
-  EXPECT_EQ(o2_alu_cfg.rpo_blocks[1].instructions[0], "(use (reg:SI 24 t8))");
+  EXPECT_EQ(o2_alu_cfg.rpo_blocks[1].instructions[0],
+            "(use (reg:SI 24 t8)) (expr_list:REG_DEAD (reg:SI 24 t8) (nil))");
 }
 
 TEST(ReconstructHardRegLivenessTest, SharedReturnMoveWitnessSupportsFourExitPredsAndDfReturn) {
@@ -2069,6 +2072,2292 @@ TEST(ReconstructHardRegLivenessTest,
   ASSERT_EQ(spill_call_cfg.rpo_blocks[0].rtl_insns[14].call_fusage.size(), 1u);
   EXPECT_EQ(spill_call_cfg.rpo_blocks[0].rtl_insns[14].call_fusage[0].ToGccPrintRtlString(),
             "(use (reg:SI 4 a0))");
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     PreservesCcFpRawModeAndReturnVsAnnulledSlotAndCallArgDeadNotes) {
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips2", "-mcpu=r4000"});
+  const CompilationProfile profile_o1 = MakeProfile(1, {"-O1", "-mips2", "-mcpu=r4000"});
+
+  // 1. `raw_mode` preservation (`CC_FP` / `CC_REV_FP`): `(reg:CC_FP 67 $fcr31)` has `mode ==
+  //    kUnknown` with `raw_mode == "CC_FP"`. Reconstructed `REG_DEAD` must preserve `:CC_FP`
+  //    rather than degrading to `VOIDmode` `(reg 67 $fcr31)`.
+  RtlControlFlowGraph ccfp_cfg;
+  ccfp_cfg.pass = RtlPassKind::kDbr;
+  ccfp_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:CC_FP 67 $fcr31) (lt:CC_FP (reg:SF 44 $f12) (reg:SF 46 $f14)))",
+                    "(set (pc) (if_then_else (ne:CC_FP (reg:CC_FP 67 $fcr31) (const_int 0)) "
+                    "(label_ref L0) (pc)))",
+                },
+                {1, 1}),
+      MakeBlock(1, true,
+                {
+                    "(set (reg/i:SI 2 v0) (const_int 0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&ccfp_cfg, profile_o2);
+  EXPECT_NE(ccfp_cfg.rpo_blocks[0].instructions[1].find("REG_DEAD (reg:CC_FP 67 $fcr31)"),
+            std::string::npos)
+      << ccfp_cfg.rpo_blocks[0].instructions[1];
+  EXPECT_EQ(ccfp_cfg.rpo_blocks[0].instructions[1].find("REG_DEAD (reg 67 $fcr31)"),
+            std::string::npos)
+      << ccfp_cfg.rpo_blocks[0].instructions[1];
+
+  // 2. Loop-carried return accumulator `(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 4
+  //    a0)))` whose backedge reads `v0` again must NOT receive a bogus self-`REG_DEAD v0`
+  //    (zero `REG_DEAD` placeholders on the slot since both `v0` and `a0` are live around the
+  //    loop).
+  RtlControlFlowGraph loop_acc_cfg;
+  loop_acc_cfg.pass = RtlPassKind::kDbr;
+  loop_acc_cfg.rpo_blocks = {
+      MakeBlock(0, false, {"(set (reg:SI 2 v0) (const_int 0))"}, {1}),
+      MakeBlock(
+          1, true,
+          {
+              "(set (reg:SI 5 a1) (plus:SI (reg:SI 5 a1) (const_int -1)))",
+              "(sequence [(jump_insn (set (pc) (if_then_else (ne:SI (reg:SI 5 a1) (const_int 0)) "
+              "(label_ref L0) (pc)))) (insn (set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) "
+              "(reg:SI 4 a0))))])",
+          },
+          {1, 2}),
+      MakeBlock(2, false, {"(parallel[ (return) (use (reg:SI 31 ra)) ] )"}, {}),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&loop_acc_cfg, profile_o2);
+  EXPECT_EQ(loop_acc_cfg.rpo_blocks[1].instructions[1].find("REG_DEAD"), std::string::npos)
+      << loop_acc_cfg.rpo_blocks[1].instructions[1];
+
+  // 3. Contrast case: an annulled branch-likely (`in_struct`) delay slot writing `(reg/i:DF 32
+  //    $f0)` executes ONLY on the taken edge (`B2`, which returns immediately), NOT on the
+  //    fallthrough edge (`B1`, which reads `$f0`). Therefore the slot DOES receive two
+  //    `REG_DEAD (const_int 0)` placeholders (one for `$f2`, one for `$f0`).
+  RtlControlFlowGraph annulled_cfg;
+  annulled_cfg.pass = RtlPassKind::kDbr;
+  annulled_cfg.rpo_blocks = {
+      MakeBlock(
+          0, false,
+          {
+              "(set (reg:DF 32 $f0) (reg:DF 6 a2))",
+              "(set (reg:DF 34 $f2) (mem:DF (plus:SI (reg:SI 29 sp) (const_int 16))))",
+              "(sequence [(jump_insn/u (set (pc) (if_then_else (gt:SI (reg:SI 4 a0) (const_int 0)) "
+              "(label_ref L0) (pc)))) (insn/s (set (reg:DF 32 $f0) (plus:DF (reg:DF 32 $f0) "
+              "(reg:DF 34 $f2))))])",
+          },
+          {2, 1}),
+      MakeBlock(1, false,
+                {
+                    "(set (reg:DF 32 $f0) (minus:DF (reg:DF 32 $f0) (reg:DF 34 $f2)))",
+                },
+                {2}),
+      MakeBlock(2, true, {"(parallel[ (return) (use (reg:SI 31 ra)) ] )"}, {}),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&annulled_cfg, profile_o1);
+  EXPECT_NE(annulled_cfg.rpo_blocks[0].instructions[2].find(
+                "(expr_list:REG_DEAD (const_int 0) (expr_list:REG_DEAD (const_int 0) (nil)))"),
+            std::string::npos)
+      << annulled_cfg.rpo_blocks[0].instructions[2];
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     Stage0LocalScratchDeadNoteHandlesReorgReturnUseAndAnnulledDelaySlotKills) {
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips2"});
+
+  // 1a. Positive case (`reorg.c:fill_simple_delay_slots`): `(set (reg/i:SI 2 v0) ...)` moved past
+  //     `(use (reg/i:SI 2 v0))` into `(return)`'s delay slot must NOT block Stage 0 from seeing
+  //     that `v0` dies on the earlier local RMW (`v0 = v0 + a0`).
+  RtlControlFlowGraph bypassed_ret_cfg;
+  bypassed_ret_cfg.pass = RtlPassKind::kDbr;
+  bypassed_ret_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 2 v0) (ashift:SI (reg:SI 4 a0) (const_int 2)))",
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 4 a0)))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] )) "
+                    "(insn (set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 5 a1))))])",
+                },
+                {}),
+  };
+  NormalizePostReloadHardRegNotes(&bypassed_ret_cfg, profile_o2);
+  EXPECT_TRUE(TopLevelInsnHasNote(bypassed_ret_cfg.rpo_blocks[0].instructions[1],
+                                  RtlMachineMode::kRegDead, 2))
+      << bypassed_ret_cfg.rpo_blocks[0].instructions[1];
+
+  // 1b. Negative case: when `(use (reg/i:SI 2 v0))` is NOT followed by an `in_slot` `/i` overwrite
+  //     of `v0`, the earlier unpinned RMW feeds `(use (reg/i:SI 2 v0))` directly and must NOT
+  //     receive a spurious `REG_DEAD v0`.
+  RtlControlFlowGraph unpinned_direct_ret_cfg;
+  unpinned_direct_ret_cfg.pass = RtlPassKind::kDbr;
+  unpinned_direct_ret_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 2 v0) (ashift:SI (reg:SI 4 a0) (const_int 2)))",
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 4 a0)))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  NormalizePostReloadHardRegNotes(&unpinned_direct_ret_cfg, profile_o2);
+  EXPECT_FALSE(TopLevelInsnHasNote(unpinned_direct_ret_cfg.rpo_blocks[0].instructions[1],
+                                   RtlMachineMode::kRegDead, 2))
+      << unpinned_direct_ret_cfg.rpo_blocks[0].instructions[1];
+
+  // 2a. Positive case (`reorg.c:fill_slots_from_thread`): annulled (`insn/s`) taken-branch delay
+  //     slot overwrites `v0` without reading it while `v0` is dead on the fallthrough edge (`B1`).
+  RtlControlFlowGraph annulled_kill_cfg;
+  annulled_kill_cfg.pass = RtlPassKind::kDbr;
+  annulled_kill_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 2 v0) (ashift:SI (reg:SI 4 a0) (const_int 1)))",
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 1)))",
+                    "(set (mem:SI (reg:SI 4 a0)) (reg:SI 2 v0))",
+                    "(sequence [(jump_insn/u (set (pc) (if_then_else "
+                    "(ne:SI (reg:SI 5 a1) (const_int 0)) (label_ref L0) (pc)))) "
+                    "(insn/s (set (reg:SI 2 v0) (mem:SI (reg:SI 6 a2))))])",
+                },
+                {2, 1}),
+      MakeBlock(1, false,
+                {
+                    "(set (reg/i:SI 2 v0) (const_int 0))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+      MakeBlock(2, true,
+                {
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 3)))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  RtlControlFlowGraph annulled_live_ft_cfg = annulled_kill_cfg;
+  NormalizePostReloadHardRegNotes(&annulled_kill_cfg, profile_o2);
+  EXPECT_TRUE(TopLevelInsnHasNote(annulled_kill_cfg.rpo_blocks[0].instructions[1],
+                                  RtlMachineMode::kRegDead, 2))
+      << annulled_kill_cfg.rpo_blocks[0].instructions[1];
+
+  // 2b. Negative case: when `v0` is STILL live on the fallthrough edge (`B1`) into a loop
+  //     accumulator, the annulled taken-edge overwrite does NOT make `v0` block-local, so `B0[1]`
+  //     must NOT receive `REG_DEAD v0`.
+  annulled_live_ft_cfg.rpo_blocks[1] =
+      MakeBlock(1, true,
+                {
+                    "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 9)))",
+                    "(set (reg:SI 5 a1) (plus:SI (reg:SI 5 a1) (const_int -1)))",
+                    "(set (pc) (if_then_else (ne:SI (reg:SI 5 a1) (const_int 0)) "
+                    "(label_ref L1) (pc)))",
+                },
+                {1, 2});
+  NormalizePostReloadHardRegNotes(&annulled_live_ft_cfg, profile_o2);
+  EXPECT_FALSE(TopLevelInsnHasNote(annulled_live_ft_cfg.rpo_blocks[0].instructions[1],
+                                   RtlMachineMode::kRegDead, 2))
+      << annulled_live_ft_cfg.rpo_blocks[0].instructions[1];
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     Stage0LocalScratchDeadNoteHandlesNarrowBitfieldCalleeSavedAndChainedRmw) {
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips2"});
+
+  // 1. Narrow 16-bit bitfield mask `(and v1 255)` followed by `(ior v1 a2)` (`0 < mask <= 65535`)
+  //    plus a subsequent consumer after a 2-insn `lui; ori` constant split: both allocate fresh
+  //    pseudos and must receive `REG_DEAD`.
+  RtlControlFlowGraph bitfield_cfg;
+  bitfield_cfg.pass = RtlPassKind::kSched2;
+  bitfield_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 3 v1) (zero_extend:SI (mem/s:QI (reg:SI 4 a0))))",
+                    "(set (reg:SI 3 v1) (and:SI (reg:SI 3 v1) (const_int 240)))",
+                    "(set (reg:SI 3 v1) (ior:SI (reg:SI 3 v1) (reg:SI 5 a1)))",
+                    "(set (mem/s:QI (reg:SI 4 a0)) (subreg:QI (reg:SI 3 v1) 0))",
+                    "(set (reg:SI 8 t0) (const_int 65536))",
+                    "(set (reg:SI 8 t0) (ior:SI (reg:SI 8 t0) (const_int 5)))",
+                    "(set (reg:SI 8 t0) (and:SI (reg:SI 8 t0) (reg:SI 6 a2)))",
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 3 v1) (reg:SI 8 t0)))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  NormalizePostReloadHardRegNotes(&bitfield_cfg, profile_o2);
+  EXPECT_TRUE(
+      TopLevelInsnHasNote(bitfield_cfg.rpo_blocks[0].instructions[2], RtlMachineMode::kRegDead, 3))
+      << bitfield_cfg.rpo_blocks[0].instructions[2];
+  EXPECT_FALSE(
+      TopLevelInsnHasNote(bitfield_cfg.rpo_blocks[0].instructions[5], RtlMachineMode::kRegDead, 8))
+      << bitfield_cfg.rpo_blocks[0].instructions[5];
+  EXPECT_TRUE(
+      TopLevelInsnHasNote(bitfield_cfg.rpo_blocks[0].instructions[6], RtlMachineMode::kRegDead, 8))
+      << bitfield_cfg.rpo_blocks[0].instructions[6];
+
+  // 2a. Leaf callee-saved register `$s0` (`16`) dying-input reuse without an intervening call
+  //     (`local-alloc.c:1395-1450`) attaches `REG_DEAD 16`.
+  RtlControlFlowGraph leaf_cs_cfg;
+  leaf_cs_cfg.pass = RtlPassKind::kSched2;
+  leaf_cs_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 16 s0) (mem:SI (reg:SI 4 a0)))",
+                    "(set (reg:SI 16 s0) (plus:SI (reg:SI 16 s0) (const_int 7)))",
+                    "(set (reg/i:SI 2 v0) (xor:SI (reg:SI 16 s0) (reg:SI 5 a1)))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  NormalizePostReloadHardRegNotes(&leaf_cs_cfg, profile_o2);
+  EXPECT_TRUE(
+      TopLevelInsnHasNote(leaf_cs_cfg.rpo_blocks[0].instructions[1], RtlMachineMode::kRegDead, 16))
+      << leaf_cs_cfg.rpo_blocks[0].instructions[1];
+
+  // 2b. Negative case: callee-saved `$s0` mutated in place AFTER an intervening `call_insn`
+  //     represents a cross-call user variable and must NOT receive `REG_DEAD 16`.
+  RtlControlFlowGraph across_call_cs_cfg;
+  across_call_cs_cfg.pass = RtlPassKind::kSched2;
+  across_call_cs_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 16 s0) (mem:SI (reg:SI 4 a0)))",
+                    "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"helper\"))) "
+                    "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+                    "(set (reg:SI 16 s0) (plus:SI (reg:SI 16 s0) (reg:SI 2 v0)))",
+                    "(set (reg/i:SI 2 v0) (reg:SI 16 s0))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  NormalizePostReloadHardRegNotes(&across_call_cs_cfg, profile_o2);
+  EXPECT_FALSE(TopLevelInsnHasNote(across_call_cs_cfg.rpo_blocks[0].instructions[2],
+                                   RtlMachineMode::kRegDead, 16))
+      << across_call_cs_cfg.rpo_blocks[0].instructions[2];
+
+  // 3. Chained local-to-live-out RMW (`VariableShiftBitmaskCheckWithTableUpdate` pattern):
+  //    `B0[1]` defines a local RMW killed by `B0[2]`, which itself is a live-out RMW into `B1`.
+  //    Both `B0[1]` and `B0[2]` must receive `REG_DEAD 3`.
+  RtlControlFlowGraph chained_cfg;
+  chained_cfg.pass = RtlPassKind::kSched2;
+  chained_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 3 v1) (mem:SI (reg:SI 4 a0)))",
+                    "(set (reg:SI 3 v1) (and:SI (reg:SI 3 v1) (const_int 31)))",
+                    "(set (reg:SI 3 v1) (ashift:SI (reg:SI 5 a1) (reg:SI 3 v1)))",
+                    "(set (pc) (if_then_else (eq:SI (reg:SI 6 a2) (const_int 0)) "
+                    "(label_ref L0) (pc)))",
+                },
+                {2, 1}),
+      MakeBlock(1, false,
+                {
+                    "(set (mem:SI (reg:SI 4 a0)) (reg:SI 3 v1))",
+                },
+                {2}),
+      MakeBlock(2, true,
+                {
+                    "(set (reg/i:SI 2 v0) (reg:SI 3 v1))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  NormalizePostReloadHardRegNotes(&chained_cfg, profile_o2);
+  EXPECT_TRUE(
+      TopLevelInsnHasNote(chained_cfg.rpo_blocks[0].instructions[1], RtlMachineMode::kRegDead, 3))
+      << chained_cfg.rpo_blocks[0].instructions[1];
+  EXPECT_TRUE(
+      TopLevelInsnHasNote(chained_cfg.rpo_blocks[0].instructions[2], RtlMachineMode::kRegDead, 3))
+      << chained_cfg.rpo_blocks[0].instructions[2];
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     PureEntryAbiArgRmwFeedingImmediateCallOmitsSelfDeadAndFallthroughDelaySlotTracksFtLive) {
+  const CompilationProfile profile_o2{.optimize_level = 2, .c_flags = {"-O2", "-mips2"}};
+
+  // 1a. Pure entry ABI arg `$a0` modified in place and immediately passed to a
+  //     call (`flow.c:2507-2550` [`flow.c:2511`] / `sched.c:2872`): both source and destination are
+  //     ABI-pinned to `$a0`, so neither direct ALU nor pointer dereference may
+  //     carry `REG_DEAD (reg:SI 4 a0)`.
+  RtlControlFlowGraph alu_call_cfg;
+  alu_call_cfg.pass = RtlPassKind::kDbr;
+  alu_call_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 4 a0) (plus:SI (reg:SI 4 a0) (const_int 5)))",
+                    "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"callee\"))) "
+                    "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  alu_call_cfg.rpo_blocks[0].rtl_insns[1].has_explicit_call_fusage = true;
+  alu_call_cfg.rpo_blocks[0].rtl_insns[1].call_fusage = {
+      RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kSi, 4)),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&alu_call_cfg, profile_o2);
+  EXPECT_FALSE(
+      TopLevelInsnHasNote(alu_call_cfg.rpo_blocks[0].instructions[0], RtlMachineMode::kRegDead, 4))
+      << alu_call_cfg.rpo_blocks[0].instructions[0];
+
+  RtlControlFlowGraph load_call_cfg;
+  load_call_cfg.pass = RtlPassKind::kDbr;
+  load_call_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 4 a0) (mem:SI (reg:SI 4 a0)))",
+                    "(parallel[ (call (mem:SI (symbol_ref:SI (\"notify\"))) (const_int 16)) "
+                    "(clobber (reg:SI 31 ra)) ] )",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  load_call_cfg.rpo_blocks[0].rtl_insns[1].has_explicit_call_fusage = true;
+  load_call_cfg.rpo_blocks[0].rtl_insns[1].call_fusage = {
+      RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kSi, 4)),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&load_call_cfg, profile_o2);
+  EXPECT_FALSE(
+      TopLevelInsnHasNote(load_call_cfg.rpo_blocks[0].instructions[0], RtlMachineMode::kRegDead, 4))
+      << load_call_cfg.rpo_blocks[0].instructions[0];
+
+  // 1b. Contrast: when `$a0` was defined by a prior non-entry instruction in `B0`,
+  //     that prior value lifts to a pseudo while the outgoing call arg stays `$a0`,
+  //     so RMW `REG_DEAD 4` IS legitimately attached.
+  RtlControlFlowGraph defined_call_cfg;
+  defined_call_cfg.pass = RtlPassKind::kDbr;
+  defined_call_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 4 a0) (mem:SI (reg:SI 5 a1)))",
+                    "(set (reg:SI 4 a0) (plus:SI (reg:SI 4 a0) (const_int 5)))",
+                    "(parallel[ (call (mem:SI (symbol_ref:SI (\"notify\"))) (const_int 16)) "
+                    "(clobber (reg:SI 31 ra)) ] )",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  defined_call_cfg.rpo_blocks[0].rtl_insns[2].has_explicit_call_fusage = true;
+  defined_call_cfg.rpo_blocks[0].rtl_insns[2].call_fusage = {
+      RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kSi, 4)),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&defined_call_cfg, profile_o2);
+  EXPECT_TRUE(TopLevelInsnHasNote(defined_call_cfg.rpo_blocks[0].instructions[1],
+                                  RtlMachineMode::kRegDead, 4))
+      << defined_call_cfg.rpo_blocks[0].instructions[1];
+
+  // 2. Fallthrough-stolen non-annulled conditional-branch delay slot
+  //    (`reorg.c:3375-3436`, `reorg.c:918-920`): `xor $v0, $v1, $a2` was stolen
+  //    from single-pred fallthrough `B1` into `B0`'s branch delay slot (where
+  //    `$v0` is read by the branch and dead on taken `B2`). Even though `$v1`
+  //    and `$a2` remain live on `B2`, both die on `B1`, so the delay slot must
+  //    carry two `(REG_DEAD (const_int 0))` notes matching `.11.dbr`.
+  RtlControlFlowGraph ft_steal_cfg;
+  ft_steal_cfg.pass = RtlPassKind::kDbr;
+  ft_steal_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 3 v1) (mem:SI (reg:SI 4 a0)))",
+                    "(set (reg:SI 5 a1) (mem:SI (plus:SI (reg:SI 4 a0) (const_int 4))))",
+                    "(set (reg:SI 2 v0) (lt:SI (reg:SI 5 a1) (reg:SI 3 v1)))",
+                    "(set (reg:SI 6 a2) (mem:SI (plus:SI (reg:SI 4 a0) (const_int 8))))",
+                    "(sequence[ (jump_insn (set (pc) (if_then_else (ne:SI (reg:SI 2 v0) "
+                    "(const_int 0)) (label_ref L0) (pc)))) "
+                    "(insn (set (reg:SI 2 v0) (xor:SI (reg:SI 3 v1) (reg:SI 6 a2)))) ] )",
+                },
+                {2, 1}),
+      MakeBlock(1, false,
+                {
+                    "(set (mem:SI (plus:SI (reg:SI 4 a0) (const_int 4))) (reg:SI 2 v0))",
+                    "(set (reg/i:SI 2 v0) (reg:SI 5 a1))",
+                    "(set (pc) (label_ref L1))",
+                },
+                {3}),
+      MakeBlock(2, true,
+                {
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 3 v1) (reg:SI 6 a2)))",
+                },
+                {3}),
+      MakeBlock(3, true,
+                {
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&ft_steal_cfg, profile_o2);
+  const std::string& seq_str = ft_steal_cfg.rpo_blocks[0].instructions.back();
+  EXPECT_NE(seq_str.find("(expr_list:REG_DEAD (const_int 0) "
+                         "(expr_list:REG_DEAD (const_int 0) (nil)))"),
+            std::string::npos)
+      << seq_str;
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     SynthesizeStage0MemRegEquivNotesGuardsCrossBlockAndWarDelaySlots) {
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips2", "-mcpu=r4000"});
+
+  // 1. Fallthrough-stolen branch delay-slot `REG_EQUIV` (`reorg.c:3280`,
+  //    `local-alloc.c:992`): only synthesize `REG_EQUIV` when `B1`'s first
+  //    active step reads the slot's defined reg (`IsStage0FirstFtStepReadsMask`).
+  auto make_ft_slot_cfg = [](bool first_ft_step_reads_v1) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kDbr;
+    std::vector<std::string> b1_insns;
+    if (first_ft_step_reads_v1) {
+      b1_insns = {
+          "(set (reg:SI 2 v0) (plus:SI (reg:SI 3 v1) (const_int 1)))",
+          "(set (mem:SI (reg:SI 5 a1)) (reg:SI 2 v0))",
+      };
+    } else {
+      b1_insns = {
+          "(set (reg:SI 6 a2) (const_int 7))",
+          "(set (reg:SI 2 v0) (plus:SI (reg:SI 3 v1) (reg:SI 6 a2)))",
+      };
+    }
+    cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(sequence [(jump_insn (set (pc) (if_then_else (eq:SI (reg:SI 4 a0) "
+                      "(const_int 0)) (label_ref L0) (pc)))) "
+                      "(insn (set (reg:SI 3 v1) (mem:SI (symbol_ref:SI (\"g_counter\")))))])",
+                  },
+                  {2, 1}),
+        MakeBlock(1, false, std::move(b1_insns), {2}),
+        MakeBlock(2, true,
+                  {
+                      "(set (reg/i:SI 2 v0) (const_int 0))",
+                      "(use (reg/i:SI 2 v0))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    return cfg;
+  };
+  RtlControlFlowGraph ft_reads = make_ft_slot_cfg(/*first_ft_step_reads_v1=*/true);
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&ft_reads, profile_o2);
+  EXPECT_NE(ft_reads.rpo_blocks[0].instructions[0].find("REG_EQUIV (mem:SI (symbol_ref"),
+            std::string::npos)
+      << ft_reads.rpo_blocks[0].instructions[0];
+
+  RtlControlFlowGraph ft_no_read = make_ft_slot_cfg(/*first_ft_step_reads_v1=*/false);
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&ft_no_read, profile_o2);
+  EXPECT_EQ(ft_no_read.rpo_blocks[0].instructions[0].find("REG_EQUIV"), std::string::npos)
+      << ft_no_read.rpo_blocks[0].instructions[0];
+
+  // 2. Bypassed symbolic-store Rule A WAR guard (`reorg.c:fill_simple_delay_slots`):
+  //    when the delay-slot instruction `s_dead` overwrites `r` (`$v1`), it could
+  //    never have preceded `(set (mem (symbol_ref ...)) (reg v1))`, so `REG_EQUIV`
+  //    must be suppressed; contrast when `s_dead` only reads `$v1`.
+  auto make_sym_store_cfg = [](bool slot_redefines_v1) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kDbr;
+    const std::string slot_insn =
+        slot_redefines_v1 ? "(insn (set (reg:SI 3 v1) (plus:SI (reg:SI 3 v1) (const_int 5))))"
+                          : "(insn (set (reg/i:SI 2 v0) (plus:SI (reg:SI 3 v1) (const_int 5))))";
+    cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (reg:SI 3 v1) (plus:SI (reg:SI 4 a0) (const_int 1)))",
+                      "(set (mem:SI (symbol_ref:SI (\"g_seq\"))) (reg:SI 3 v1))",
+                      "(sequence [(jump_insn (parallel[ (return) (use (reg:SI 31 ra)) ] )) " +
+                          slot_insn + "])",
+                  },
+                  {}),
+    };
+    return cfg;
+  };
+  RtlControlFlowGraph war_slot = make_sym_store_cfg(/*slot_redefines_v1=*/true);
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&war_slot, profile_o2);
+  EXPECT_EQ(war_slot.rpo_blocks[0].instructions[0].find("REG_EQUIV"), std::string::npos)
+      << war_slot.rpo_blocks[0].instructions[0];
+
+  RtlControlFlowGraph read_only_slot = make_sym_store_cfg(/*slot_redefines_v1=*/false);
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&read_only_slot, profile_o2);
+  EXPECT_NE(read_only_slot.rpo_blocks[0].instructions[0].find("REG_EQUIV (mem:SI (symbol_ref"),
+            std::string::npos)
+      << read_only_slot.rpo_blocks[0].instructions[0];
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     SynthesizeStage0CrossJumpJoinStoreEquivMatchesJump2StructuralCriteria) {
+  const CompilationProfile profile_o1 = MakeProfile(1, {"-O1", "-mips2", "-mcpu=r4000"});
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips2", "-mcpu=r4000"});
+
+  auto make_two_pred_join_cfg = [](bool pred2_defines_v0, bool join_has_call_after_store) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kDbr;
+    std::vector<std::string> b2_insns;
+    if (pred2_defines_v0) {
+      b2_insns = {
+          "(set (reg:SI 2 v0) (plus:SI (reg:SI 5 a1) (const_int 1)))",
+      };
+    } else {
+      b2_insns = {
+          "(set (reg:SI 6 a2) (plus:SI (reg:SI 5 a1) (const_int 1)))",
+      };
+    }
+    std::vector<std::string> b3_insns = {
+        "(set (mem:SI (symbol_ref:SI (\"g_next\"))) (reg:SI 2 v0))",
+    };
+    if (join_has_call_after_store) {
+      b3_insns.push_back(
+          "(set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"helper_fn\"))) (const_int 0)))");
+      b3_insns.push_back("(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 1)))");
+    } else {
+      b3_insns.push_back("(set (reg:SI 3 v1) (mem:SI (symbol_ref:SI (\"g_inv\"))))");
+      b3_insns.push_back("(set (reg/i:SI 2 v0) (plus:SI (reg:SI 3 v1) (const_int 1)))");
+    }
+    b3_insns.push_back("(use (reg/i:SI 2 v0))");
+    b3_insns.push_back("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+
+    std::vector<std::string> b0_insns;
+    if (!pred2_defines_v0) {
+      b0_insns.push_back("(set (reg:SI 2 v0) (const_int 7))");
+    }
+    b0_insns.push_back(
+        "(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) (label_ref L0) (pc)))");
+    cfg.rpo_blocks = {
+        MakeBlock(0, false, std::move(b0_insns), {2, 1}),
+        MakeBlock(1, false,
+                  {
+                      "(set (reg:SI 2 v0) (const_int 1000))",
+                      "(set (pc) (label_ref L1))",
+                  },
+                  {3}),
+        MakeBlock(2, true, std::move(b2_insns), {3}),
+        MakeBlock(3, true, std::move(b3_insns), {}),
+    };
+    return cfg;
+  };
+
+  // 1. Positive (`-O1`, `jump.c:1978` `minimum = 1`, 2 compatible predecessors,
+  //    join store before `REG_EQUIV`-stopped load): both predecessors get `REG_EQUIV`.
+  RtlControlFlowGraph o1_pos =
+      make_two_pred_join_cfg(/*pred2_defines_v0=*/true, /*join_has_call_after_store=*/false);
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&o1_pos, profile_o1);
+  EXPECT_NE(o1_pos.rpo_blocks[1].instructions[0].find("REG_EQUIV (mem:SI (symbol_ref"),
+            std::string::npos)
+      << o1_pos.rpo_blocks[1].instructions[0];
+  EXPECT_NE(o1_pos.rpo_blocks[2].instructions[0].find("REG_EQUIV (mem:SI (symbol_ref"),
+            std::string::npos)
+      << o1_pos.rpo_blocks[2].instructions[0];
+
+  // 2. Negative (`-O2`, `RunsSched2()`): length-1 store prefix before `REG_EQUIV`-stopped
+  //    load is not cross-jump-split under `sched2`, so `$v0` stays multi-block.
+  RtlControlFlowGraph o2_single_store =
+      make_two_pred_join_cfg(/*pred2_defines_v0=*/true, /*join_has_call_after_store=*/false);
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&o2_single_store, profile_o2);
+  EXPECT_EQ(o2_single_store.rpo_blocks[1].instructions[0].find("REG_EQUIV"), std::string::npos)
+      << o2_single_store.rpo_blocks[1].instructions[0];
+  EXPECT_EQ(o2_single_store.rpo_blocks[2].instructions[0].find("REG_EQUIV"), std::string::npos)
+      << o2_single_store.rpo_blocks[2].instructions[0];
+
+  // 3. Negative (`-O1`, incompatible predecessor): `B2` inherits `$v0` instead of defining it,
+  //    so `find_cross_jump`/`InvertDoCrossJump` cannot merge matching `REG_EQUIV` across preds.
+  RtlControlFlowGraph o1_incompat_pred =
+      make_two_pred_join_cfg(/*pred2_defines_v0=*/false, /*join_has_call_after_store=*/false);
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&o1_incompat_pred, profile_o1);
+  EXPECT_EQ(o1_incompat_pred.rpo_blocks[1].instructions[0].find("REG_EQUIV"), std::string::npos)
+      << o1_incompat_pred.rpo_blocks[1].instructions[0];
+
+  // 4. Positive (`-O2`, multi-insn store + `CALL_INSN` prefix): `effective_shared_len >= 2`
+  //    with a `CALL_INSN` in the prefix is split even under `sched2`.
+  RtlControlFlowGraph o2_store_call =
+      make_two_pred_join_cfg(/*pred2_defines_v0=*/true, /*join_has_call_after_store=*/true);
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&o2_store_call, profile_o2);
+  EXPECT_NE(o2_store_call.rpo_blocks[1].instructions[0].find("REG_EQUIV (mem:SI (symbol_ref"),
+            std::string::npos)
+      << o2_store_call.rpo_blocks[1].instructions[0];
+  EXPECT_NE(o2_store_call.rpo_blocks[2].instructions[0].find("REG_EQUIV (mem:SI (symbol_ref"),
+            std::string::npos)
+      << o2_store_call.rpo_blocks[2].instructions[0];
+
+  // 5. Negative (`-O1`, 3 predecessors, `jump.c:1993` `minimum = 2`): a length-1 store
+  //    prefix before a `REG_EQUIV`-stopped load cannot satisfy `minimum = 2`.
+  RtlControlFlowGraph o1_three_preds;
+  o1_three_preds.pass = RtlPassKind::kDbr;
+  o1_three_preds.rpo_blocks = {
+      MakeBlock(0, false,
+                {"(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) "
+                 "(label_ref L0) (pc)))"},
+                {2, 1}),
+      MakeBlock(1, false,
+                {
+                    "(set (reg:SI 2 v0) (const_int 1000))",
+                    "(set (pc) (label_ref L3))",
+                },
+                {5}),
+      MakeBlock(2, true,
+                {"(set (pc) (if_then_else (eq:SI (reg:SI 5 a1) (const_int 0)) "
+                 "(label_ref L1) (pc)))"},
+                {4, 3}),
+      MakeBlock(3, false,
+                {
+                    "(set (reg:SI 2 v0) (const_int 2000))",
+                    "(set (pc) (label_ref L3))",
+                },
+                {5}),
+      MakeBlock(4, true,
+                {
+                    "(set (reg:SI 2 v0) (const_int 3000))",
+                },
+                {5}),
+      MakeBlock(5, true,
+                {
+                    "(set (mem:SI (symbol_ref:SI (\"g_next\"))) (reg:SI 2 v0))",
+                    "(set (reg:SI 3 v1) (mem:SI (symbol_ref:SI (\"g_inv\"))))",
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 3 v1) (const_int 1)))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&o1_three_preds, profile_o1);
+  EXPECT_EQ(o1_three_preds.rpo_blocks[1].instructions[0].find("REG_EQUIV"), std::string::npos)
+      << o1_three_preds.rpo_blocks[1].instructions[0];
+  EXPECT_EQ(o1_three_preds.rpo_blocks[3].instructions[0].find("REG_EQUIV"), std::string::npos)
+      << o1_three_preds.rpo_blocks[3].instructions[0];
+  EXPECT_EQ(o1_three_preds.rpo_blocks[4].instructions[0].find("REG_EQUIV"), std::string::npos)
+      << o1_three_preds.rpo_blocks[4].instructions[0];
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     ResolvePostReloadConstZeroRegDeadNotesSkipsEarlierAttributedDeathInSameLiveRange) {
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips2", "-mcpu=r4000"});
+
+  // Positive: `$a0`'s death in the current live range is already attributed to an
+  // earlier pure reader (`flow.c:2485-2515`, `sched.c:3573` stale `REG_DEAD`), so
+  // resolving `(REG_DEAD (const_int 0))` on the later store of `$a0` to `0($a1)`
+  // must skip `$a0` and resolve strictly to `$a1`.
+  RtlControlFlowGraph dedup_cfg;
+  dedup_cfg.pass = RtlPassKind::kSched2;
+  dedup_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 4 a0) (const_int 1))) "
+                    "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                    "(set (mem:SI (reg:SI 5 a1)) (reg:SI 4 a0)) "
+                    "(expr_list:REG_DEAD (const_int 0) (nil))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  ResolvePostReloadConstZeroRegDeadNotes(&dedup_cfg, profile_o2);
+  EXPECT_NE(dedup_cfg.rpo_blocks[0].instructions[1].find("REG_DEAD (reg:SI 5 a1)"),
+            std::string::npos)
+      << dedup_cfg.rpo_blocks[0].instructions[1];
+  EXPECT_EQ(dedup_cfg.rpo_blocks[0].instructions[1].find("REG_DEAD (reg:SI 4 a0)"),
+            std::string::npos)
+      << dedup_cfg.rpo_blocks[0].instructions[1];
+
+  // Negative: when `$a0` is redefined after the earlier `REG_DEAD $a0`, the new
+  // live range of `$a0` has no earlier attributed death and MUST resolve to `$a0`.
+  RtlControlFlowGraph redef_cfg;
+  redef_cfg.pass = RtlPassKind::kSched2;
+  redef_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 3 v1) (plus:SI (reg:SI 4 a0) (const_int 1))) "
+                    "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                    "(set (reg:SI 4 a0) (plus:SI (reg:SI 3 v1) (const_int 2))) "
+                    "(expr_list:REG_DEAD (reg:SI 3 v1) (nil))",
+                    "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 4 a0) (const_int 3))) "
+                    "(expr_list:REG_DEAD (const_int 0) (nil))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  ResolvePostReloadConstZeroRegDeadNotes(&redef_cfg, profile_o2);
+  EXPECT_NE(redef_cfg.rpo_blocks[0].instructions[2].find("REG_DEAD (reg:SI 4 a0)"),
+            std::string::npos)
+      << redef_cfg.rpo_blocks[0].instructions[2];
+}
+
+TEST(ReconstructHardRegLivenessTest, PureEntryAbiArgMemAddrRmwFeedingCrossJumpedCallOmitsSelfDead) {
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips2", "-mcpu=r4000"});
+
+  // Positive: unmodified entry ABI arg `$a0` rewritten in place via a
+  // `mem_addr_read` load `(set (reg:SI 4 a0) (mem:SI (plus:SI (reg:SI 4 a0) 4)))`
+  // before an unconditional jump to a cross-jumped successor `call_insn` reading
+  // `$a0` (`flow.c:2507-2550` [`flow.c:2511`], `sched.c:2872`): both source and
+  // destination are ABI-pinned to `$a0`, so it must NOT fall through to Case B
+  // and receive `REG_DEAD (reg:SI 4 a0)`.
+  RtlControlFlowGraph entry_cross_jump_cfg;
+  entry_cross_jump_cfg.pass = RtlPassKind::kDbr;
+  entry_cross_jump_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 4 a0) (mem:SI (plus:SI (reg:SI 4 a0) (const_int 4))))",
+                    "(set (pc) (label_ref L0))",
+                },
+                {1}),
+      MakeBlock(1, true,
+                {
+                    "(parallel[ (call (mem:SI (symbol_ref:SI (\"callee\"))) (const_int 16)) "
+                    "(clobber (reg:SI 31 ra)) ] )",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  entry_cross_jump_cfg.rpo_blocks[1].rtl_insns[0].has_explicit_call_fusage = true;
+  entry_cross_jump_cfg.rpo_blocks[1].rtl_insns[0].call_fusage = {
+      RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kSi, 4)),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&entry_cross_jump_cfg, profile_o2);
+  EXPECT_FALSE(TopLevelInsnHasNote(entry_cross_jump_cfg.rpo_blocks[0].instructions[0],
+                                   RtlMachineMode::kRegDead, 4))
+      << entry_cross_jump_cfg.rpo_blocks[0].instructions[0];
+
+  // Negative contrast: when `$a0` was defined by a prior non-entry instruction
+  // in `B0` before the `mem_addr_read` RMW feeding the cross-jumped call, the
+  // incoming value is a local pseudo rather than an entry ABI arg, so `REG_DEAD 4`
+  // IS legitimately attached.
+  RtlControlFlowGraph defined_cross_jump_cfg;
+  defined_cross_jump_cfg.pass = RtlPassKind::kDbr;
+  defined_cross_jump_cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 4 a0) (mem:SI (reg:SI 5 a1)))",
+                    "(set (reg:SI 4 a0) (mem:SI (plus:SI (reg:SI 4 a0) (const_int 4))))",
+                    "(set (pc) (label_ref L0))",
+                },
+                {1}),
+      MakeBlock(1, true,
+                {
+                    "(parallel[ (call (mem:SI (symbol_ref:SI (\"callee\"))) (const_int 16)) "
+                    "(clobber (reg:SI 31 ra)) ] )",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  defined_cross_jump_cfg.rpo_blocks[1].rtl_insns[0].has_explicit_call_fusage = true;
+  defined_cross_jump_cfg.rpo_blocks[1].rtl_insns[0].call_fusage = {
+      RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kSi, 4)),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&defined_cross_jump_cfg, profile_o2);
+  EXPECT_TRUE(TopLevelInsnHasNote(defined_cross_jump_cfg.rpo_blocks[0].instructions[1],
+                                  RtlMachineMode::kRegDead, 4))
+      << defined_cross_jump_cfg.rpo_blocks[0].instructions[1];
+}
+
+TEST(ReconstructHardRegLivenessTest, StripStage0Jump2NoopMoveConsumedDeathsOnPointerLoadRmw) {
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips2", "-mcpu=r4000"});
+
+  auto make_cfg = [](RtlPassKind pass_kind) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = pass_kind;
+    cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (reg:SI 3 v1) (const_int 0))",
+                  },
+                  {1}),
+        MakeBlock(1, true,
+                  {
+                      "(set (reg:SI 3 v1) (plus:SI (reg:SI 3 v1) (const_int 1)))",
+                      "(set (reg:SI 2 v0) (ashift:SI (reg:SI 3 v1) (const_int 2)))",
+                      "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 4 a0)))",
+                      "(set (reg:SI 2 v0) (mem:SI (reg:SI 2 v0)))",
+                      "(set (pc) (if_then_else (ne:SI (reg:SI 2 v0) (reg:SI 5 a1)) "
+                      "(label_ref L1) (pc)))",
+                  },
+                  {3, 2}),
+        MakeBlock(
+            2, false,
+            {
+                pass_kind == RtlPassKind::kDbr ? "(sequence [(jump_insn (set (pc) (label_ref L2))) "
+                                                 "(insn (set (reg/i:SI 2 v0) (reg:SI 3 v1)))])"
+                                               : "(set (reg/i:SI 2 v0) (reg:SI 3 v1))",
+            },
+            {5}),
+        MakeBlock(3, true,
+                  {
+                      "(set (pc) (if_then_else (ge:SI (reg:SI 2 v0) (const_int 0)) "
+                      "(label_ref L0) (pc)))",
+                  },
+                  {1, 4}),
+        MakeBlock(4, false, {"(set (reg/i:SI 2 v0) (const_int -1))"}, {5}),
+        MakeBlock(5, true,
+                  {
+                      "(use (reg/i:SI 2 v0))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    if (pass_kind != RtlPassKind::kDbr) {
+      cfg.rpo_blocks[2].AddPatternOnly("(set (pc) (label_ref L2))");
+    }
+    return cfg;
+  };
+
+  // Positive (`kDbr`, post-`jump2`): `jump.c:452-459` strips `REG_DEAD 2 v0`
+  // from `B1[3]` `(set (reg:SI 2 v0) (mem:SI (reg:SI 2 v0)))` because `B1[4]`
+  // is a live branch reading `$v0` before label-less fallthrough `B2` setting
+  // `$v0 = $v1` (in an unconditional jump delay slot).
+  RtlControlFlowGraph dbr_cfg = make_cfg(RtlPassKind::kDbr);
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&dbr_cfg, profile_o2);
+  EXPECT_FALSE(
+      TopLevelInsnHasNote(dbr_cfg.rpo_blocks[1].instructions[3], RtlMachineMode::kRegDead, 2))
+      << dbr_cfg.rpo_blocks[1].instructions[3];
+
+  // Negative (`kSched2`, pre-`jump2`): before `jump2` runs (`toplev.c:3140-3143`),
+  // `B1[3]` retains its `REG_DEAD 2 v0` note.
+  RtlControlFlowGraph sched2_cfg = make_cfg(RtlPassKind::kSched2);
+  NormalizePostReloadHardRegNotes(&sched2_cfg, profile_o2);
+  EXPECT_TRUE(
+      TopLevelInsnHasNote(sched2_cfg.rpo_blocks[1].instructions[3], RtlMachineMode::kRegDead, 2))
+      << sched2_cfg.rpo_blocks[1].instructions[3];
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     SelfRmwGlobalInLocalOutSkipsSplitWhenLowerRegAllocOrderGprFree) {
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips2"});
+
+  // Positive (`local-alloc.c:1762-1765, 2106-2181`, `#ifndef REG_ALLOC_ORDER` at
+  // `2178`, `config/mips/mips.h:1192, 1203`):
+  // `$3 v1` enters `B1` as an unpinned global-in pseudo and undergoes a self-RMW
+  // `(set (reg:SI 3 v1) (ior:SI (reg:SI 3 v1) (const_int 65536)))` followed by a
+  // local store `(set (mem:SI (reg:SI 4 a0)) (reg:SI 3 v1))`. Because `$2 v0`
+  // precedes `$3 v1` in MIPS's default GPR allocation order and is completely
+  // free across the local-out tail, `local-alloc` would assign a split local
+  // output pseudo to `$2 v0` (never `$3 v1`); Stage 0 must NOT attach a spurious
+  // `(REG_DEAD (reg:SI 3 v1))` to the RMW.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kSched2;
+    cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (reg:SI 3 v1) (mem:SI (reg:SI 4 a0)))",
+                      "(set (pc) (if_then_else (eq:SI (reg:SI 5 a1) (const_int 0)) "
+                      "(label_ref L1) (pc)))",
+                  },
+                  {2, 1}),
+        MakeBlock(1, false,
+                  {
+                      "(set (reg:SI 3 v1) (ior:SI (reg:SI 3 v1) (const_int 65536)))",
+                      "(set (mem:SI (reg:SI 4 a0)) (reg:SI 3 v1))",
+                  },
+                  {2}),
+        MakeBlock(2, true,
+                  {
+                      "(set (reg/i:SI 2 v0) (mem:SI (reg:SI 4 a0)))",
+                      "(use (reg/i:SI 2 v0))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    NormalizePostReloadHardRegNotes(&cfg, profile_o2);
+    EXPECT_FALSE(
+        TopLevelInsnHasNote(cfg.rpo_blocks[1].instructions[0], RtlMachineMode::kRegDead, 3))
+        << cfg.rpo_blocks[1].instructions[0];
+  }
+
+  // Negative contrast: when `$2 v0` IS live across the local-out tail (used
+  // after the store to compute the return value), `find_free_reg` skips `$2 v0`
+  // and assigns `$3 v1`, so Stage 0 DOES attach `(REG_DEAD (reg:SI 3 v1))` to
+  // the global-in -> local-out self-RMW.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kSched2;
+    cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (reg:SI 3 v1) (mem:SI (reg:SI 4 a0)))",
+                      "(set (reg:SI 2 v0) (plus:SI (reg:SI 5 a1) (const_int 7)))",
+                      "(set (pc) (if_then_else (eq:SI (reg:SI 5 a1) (const_int 0)) "
+                      "(label_ref L1) (pc)))",
+                  },
+                  {2, 1}),
+        MakeBlock(1, false,
+                  {
+                      "(set (reg:SI 3 v1) (ior:SI (reg:SI 3 v1) (const_int 65536)))",
+                      "(set (mem:SI (reg:SI 4 a0)) (reg:SI 3 v1))",
+                      "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 1)))",
+                  },
+                  {2}),
+        MakeBlock(2, true,
+                  {
+                      "(use (reg/i:SI 2 v0))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    NormalizePostReloadHardRegNotes(&cfg, profile_o2);
+    EXPECT_TRUE(TopLevelInsnHasNote(cfg.rpo_blocks[1].instructions[0], RtlMachineMode::kRegDead, 3))
+        << cfg.rpo_blocks[1].instructions[0];
+  }
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     SynthesizesStoreRegEquivAcrossChainedPureFallthroughStoreTails) {
+  const CompilationProfile profile_o2 = {
+      .optimize_level = 2,
+      .c_flags = {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-O2"},
+  };
+  auto build_cfg = [](bool bare_return_exit, bool load_in_b1) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kDbr;
+    cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {"(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) "
+                   "(label_ref L0) (pc)))"},
+                  {2, 1}),
+        MakeBlock(1, false,
+                  {
+                      load_in_b1 ? "(set (reg:QI 2 v0) (mem:QI (symbol_ref:SI (\"g_ext\"))))"
+                                 : "(set (reg:QI 2 v0) (const_int 199))",
+                      "(sequence [ (jump_insn 0 0 0 (set (pc) (label_ref L2))) "
+                      "(insn 0 0 0 (set (mem:QI (symbol_ref:SI (\"g_c2\"))) (reg:QI 2 v0))) ])",
+                  },
+                  {5}),
+        MakeBlock(2, true,
+                  {"(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 1)) "
+                   "(label_ref L1) (pc)))"},
+                  {4, 3}),
+        MakeBlock(3, false,
+                  {
+                      "(sequence [ (jump_insn 0 0 0 (set (pc) (label_ref L3))) "
+                      "(insn 0 0 0 (set (reg:QI 2 v0) (const_int 193))) ])",
+                  },
+                  {6}),
+        MakeBlock(4, true,
+                  {
+                      "(set (reg:QI 2 v0) (const_int 194))",
+                  },
+                  {5}),
+        MakeBlock(5, true,
+                  {
+                      "(set (mem:QI (symbol_ref:SI (\"g_c3\"))) (reg:QI 2 v0))",
+                      "(set (reg:QI 2 v0) (const_int 196))",
+                      "(set (mem:QI (symbol_ref:SI (\"g_c4\"))) (reg:QI 2 v0))",
+                      "(set (reg:QI 2 v0) (const_int 197))",
+                  },
+                  {6}),
+        MakeBlock(6, true,
+                  {
+                      "(set (mem:QI (symbol_ref:SI (\"g_c5\"))) (reg:QI 2 v0))",
+                  },
+                  {7}),
+        MakeBlock(
+            7, true,
+            {
+                bare_return_exit ? "(return)" : "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+            },
+            {}),
+    };
+    return cfg;
+  };
+
+  // 1. Positive (`local-alloc.c:990-1000`, `jump.c:1978, 2371-2560`, `sched.c:1488, 2428`):
+  //    Stage 0 attaches `REG_EQUIV (mem:QI "g_c3")` onto `B1[0]` and `B4[0]` (even with
+  //    intermediate non-aliasing store `g_c2` in `B1`'s delay slot) and `REG_EQUIV (mem:QI "g_c5")`
+  //    onto `B3`'s delay slot and `B5[3]`.
+  {
+    RtlControlFlowGraph cfg = build_cfg(/*bare_return_exit=*/false, /*load_in_b1=*/false);
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, profile_o2);
+    EXPECT_NE(
+        cfg.rpo_blocks[1].instructions[0].find("REG_EQUIV (mem:QI (symbol_ref:SI (\"g_c3\"))"),
+        std::string::npos)
+        << cfg.rpo_blocks[1].instructions[0];
+    EXPECT_NE(
+        cfg.rpo_blocks[4].instructions[0].find("REG_EQUIV (mem:QI (symbol_ref:SI (\"g_c3\"))"),
+        std::string::npos)
+        << cfg.rpo_blocks[4].instructions[0];
+    EXPECT_NE(
+        cfg.rpo_blocks[3].instructions[0].find("REG_EQUIV (mem:QI (symbol_ref:SI (\"g_c5\"))"),
+        std::string::npos)
+        << cfg.rpo_blocks[3].instructions[0];
+    EXPECT_NE(
+        cfg.rpo_blocks[5].instructions[3].find("REG_EQUIV (mem:QI (symbol_ref:SI (\"g_c5\"))"),
+        std::string::npos)
+        << cfg.rpo_blocks[5].instructions[3];
+  }
+
+  // 2. Negative contrast (bare `(return)` in `B7`): `B6` is not a chained cross-jumpable tail,
+  //    so `B3` and `B5[3]` must NOT receive `REG_EQUIV (mem:QI "g_c5")`.
+  {
+    RtlControlFlowGraph cfg = build_cfg(/*bare_return_exit=*/true, /*load_in_b1=*/false);
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, profile_o2);
+    EXPECT_EQ(cfg.rpo_blocks[3].instructions[0].find("REG_EQUIV"), std::string::npos)
+        << cfg.rpo_blocks[3].instructions[0];
+    EXPECT_EQ(cfg.rpo_blocks[5].instructions[3].find("REG_EQUIV"), std::string::npos)
+        << cfg.rpo_blocks[5].instructions[3];
+  }
+
+  // 3. Negative contrast (multi-cycle load in `B1` under `-O2` `sched2`): `B5` is not
+  //    unit-latency-safe across predecessors, so `B4[0]` must NOT receive `REG_EQUIV "g_c3"`.
+  {
+    RtlControlFlowGraph cfg = build_cfg(/*bare_return_exit=*/false, /*load_in_b1=*/true);
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, profile_o2);
+    EXPECT_EQ(cfg.rpo_blocks[4].instructions[0].find("REG_EQUIV"), std::string::npos)
+        << cfg.rpo_blocks[4].instructions[0];
+  }
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     NormalizeStage0FprOutputReloadStripsDeadNoteAcrossPrologueSaveAndInheritedReader) {
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips2", "-mcpu=r4000"});
+  const CompilationProfile profile_o1 = MakeProfile(1, {"-O1", "-mips2", "-mcpu=r4000"});
+
+  auto make_cfg = [](bool clobber_fpr_between) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kDbr;
+    std::vector<std::string> insns = {
+        "(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int -80)))",
+        "(set (reg:SF 32 $f0) (plus:SF (reg:SF 32 $f0) (reg:SF 62 $f30)))",
+        "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))) (reg:SI 17 s1))",
+        clobber_fpr_between ? "(set (reg:SF 32 $f0) (mem/u:SF (reg:SI 4 a0)))"
+                            : "(set (reg:SF 44 $f12) (plus:SF (reg:SF 54 $f22) (reg:SF 32 $f0)))",
+        "(set (reg:SF 17 s1) (reg:SF 32 $f0))",
+        "(set (reg/i:SF 32 $f0) (const_double:SF (cc0) 0 1071644672))",
+        "(set (reg:SI 17 s1) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))))",
+        "(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int 80)))",
+        "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+    };
+    cfg.rpo_blocks = {MakeBlock(0, false, std::move(insns), {})};
+    return cfg;
+  };
+
+  // Positive (`toplev.c:3103`, `reload1.c:5186-5249, 5641`): under `-O2`
+  // (`RunsSched2()`), `mfc1 s1,$f0` separated from `add.s $f0,$f0,$f30` by a
+  // block-0 prologue save `sw $s1,20($sp)` and pure FP reader `add.s $f12`
+  // must have `(REG_DEAD $f0)` stripped.
+  {
+    RtlControlFlowGraph cfg = make_cfg(/*clobber_fpr_between=*/false);
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, profile_o2);
+    EXPECT_EQ(cfg.rpo_blocks[0].instructions[4].find("REG_DEAD"), std::string::npos)
+        << cfg.rpo_blocks[0].instructions[4];
+  }
+
+  // Negative 1: when an intervening insn overwrites `$f0` with a load,
+  // `mfc1 s1,$f0` is not an FP-op output reload and keeps `(REG_DEAD $f0)`.
+  {
+    RtlControlFlowGraph cfg = make_cfg(/*clobber_fpr_between=*/true);
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, profile_o2);
+    EXPECT_NE(cfg.rpo_blocks[0].instructions[4].find("REG_DEAD (reg:SF 32 $f0)"), std::string::npos)
+        << cfg.rpo_blocks[0].instructions[4];
+  }
+
+  // Negative 2: at `-O1` (`!RunsSched2()`), non-adjacent `mfc1 s1,$f0` across
+  // an intervening pure FP reader keeps `(REG_DEAD $f0)`.
+  {
+    RtlControlFlowGraph cfg = make_cfg(/*clobber_fpr_between=*/false);
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, profile_o1);
+    EXPECT_NE(cfg.rpo_blocks[0].instructions[4].find("REG_DEAD (reg:SF 32 $f0)"), std::string::npos)
+        << cfg.rpo_blocks[0].instructions[4];
+  }
+
+  // Negative 3 (`cse.c:481-486`): when `dst_gpr` is an outgoing call-arg reg
+  // `$a1` (`5`) read by a `CALL_INSN` and a pure FP reader consumed `$f0`
+  // before `mfc1 $a1,$f0`, `$f0` is a real multi-use `FP_REGS` pseudo copied
+  // to `$a1` (not an `"=f"` output reload into `$a1`), so `mfc1 $a1,$f0` must
+  // preserve `(REG_DEAD $f0)`.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kDbr;
+    std::vector<std::string> insns = {
+        "(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int -32)))",
+        "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 28))) (reg:SI 31 ra))",
+        "(set (reg:SF 32 $f0) (plus:SF (reg:SF 32 $f0) (reg:SF 36 $f4)))",
+        "(set (reg:SF 62 $f30) (plus:SF (reg:SF 62 $f30) (reg:SF 32 $f0)))",
+        "(set (reg:SF 5 a1) (reg:SF 32 $f0))",
+        "(parallel[ (set (reg:SF 32 $f0) (call (mem:SI (symbol_ref:SI (\"SinkF\"))) "
+        "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+        "(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 32 $f0) (reg:SF 62 $f30)))",
+        "(set (reg:SI 31 ra) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 28))))",
+        "(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int 32)))",
+        "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+    };
+    cfg.rpo_blocks = {MakeBlock(0, false, std::move(insns), {})};
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, profile_o2);
+    EXPECT_NE(cfg.rpo_blocks[0].instructions[4].find("REG_DEAD (reg:SF 32 $f0)"), std::string::npos)
+        << cfg.rpo_blocks[0].instructions[4];
+  }
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     RefineCallArgumentFusagePrunesConsumedScratchArgAcrossMultiCallDirectCallee) {
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips2", "-mcpu=r4000"});
+
+  auto build_cfg = [](bool consume_a2_before_call1, bool define_unread_a3_before_call1) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kDbr;
+    std::vector<std::string> insns = {
+        "(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int -32)))",
+        "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 28))) (reg:SI 31 ra))",
+        "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 24))) (reg:SI 16 s0))",
+        "(set (reg:SI 6 a2) (mem:SI (reg:SI 4 a0)))",
+    };
+    if (consume_a2_before_call1) {
+      insns.push_back("(set (reg:SI 16 s0) (xor:SI (reg:SI 6 a2) (const_int 37)))");
+    }
+    if (define_unread_a3_before_call1) {
+      insns.push_back("(set (reg:SI 7 a3) (const_int 99))");
+    }
+    insns.push_back("(set (reg:SI 4 a0) (plus:SI (reg:SI 4 a0) (const_int 1)))");
+    insns.push_back("(set (reg:SI 5 a1) (plus:SI (reg:SI 5 a1) (const_int 2)))");
+    insns.push_back(
+        "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"TransformStage\"))) "
+        "(const_int 16))) (clobber (reg:SI 31 ra)) ] )");
+    insns.push_back("(set (reg:SI 4 a0) (xor:SI (reg:SI 2 v0) (reg:SI 16 s0)))");
+    insns.push_back("(set (reg:SI 5 a1) (plus:SI (reg:SI 2 v0) (const_int 3)))");
+    insns.push_back(
+        "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"TransformStage\"))) "
+        "(const_int 16))) (clobber (reg:SI 31 ra)) ] )");
+    insns.push_back("(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 16 s0)))");
+    insns.push_back("(set (reg:SI 16 s0) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 24))))");
+    insns.push_back("(set (reg:SI 31 ra) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 28))))");
+    insns.push_back("(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int 32)))");
+    insns.push_back("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+    cfg.rpo_blocks = {MakeBlock(0, false, std::move(insns), {})};
+    return cfg;
+  };
+
+  auto has_call_fusage_reg = [](const RtlInsn& insn, int regno) {
+    for (const RtlExpr& u : insn.call_fusage) {
+      if (u.op == RtlOp::kUse && u.children.size() == 1 && u.children[0].op == RtlOp::kReg &&
+          u.children[0].RegNo() == regno) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // Positive (`calls.c:479`, `config/mips/mips.c:2850`, `local-alloc.c:2158`):
+  // `$a2` was consumed by `xor $s0, $a2, 37` before Call 1 to `TransformStage`
+  // and is not even defined at Call 2 to `TransformStage`; Call 1 must drop `$a2`
+  // while preserving `$a0` and `$a1`.
+  {
+    RtlControlFlowGraph cfg =
+        build_cfg(/*consume_a2_before_call1=*/true, /*define_unread_a3_before_call1=*/false);
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, profile_o2);
+    const RtlInsn& call1 = cfg.rpo_blocks[0].rtl_insns[7];
+    EXPECT_TRUE(has_call_fusage_reg(call1, 4));
+    EXPECT_TRUE(has_call_fusage_reg(call1, 5));
+    EXPECT_FALSE(has_call_fusage_reg(call1, 6));
+  }
+
+  // Negative 1: when `$a2` is NOT consumed before Call 1 (`cur_unread` set),
+  // Call 1 keeps `$a2` as an outgoing argument.
+  {
+    RtlControlFlowGraph cfg =
+        build_cfg(/*consume_a2_before_call1=*/false, /*define_unread_a3_before_call1=*/false);
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, profile_o2);
+    const RtlInsn& call1 = cfg.rpo_blocks[0].rtl_insns[6];
+    EXPECT_TRUE(has_call_fusage_reg(call1, 4));
+    EXPECT_TRUE(has_call_fusage_reg(call1, 5));
+    EXPECT_TRUE(has_call_fusage_reg(call1, 6));
+  }
+
+  // Negative 2: when `$a3` is also live/unread at Call 1, O32 argument prefix
+  // closure (`close_o32_arg_prefix`) preserves `$a2` between `$a1` and `$a3`.
+  {
+    RtlControlFlowGraph cfg =
+        build_cfg(/*consume_a2_before_call1=*/true, /*define_unread_a3_before_call1=*/true);
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, profile_o2);
+    const RtlInsn& call1 = cfg.rpo_blocks[0].rtl_insns[8];
+    EXPECT_TRUE(has_call_fusage_reg(call1, 4));
+    EXPECT_TRUE(has_call_fusage_reg(call1, 5));
+    EXPECT_TRUE(has_call_fusage_reg(call1, 6));
+    EXPECT_TRUE(has_call_fusage_reg(call1, 7));
+  }
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     Stage0LocalScratchDeadNoteCountsCondBranchHeadReadAfterDelaySlotOverwrite) {
+  const CompilationProfile profile_mips1 = MakeProfile(2, {"-O2", "-mips1", "-Wa,-O2"});
+
+  // Positive (`reorg.c:3258-3306` `fill_slots_from_thread`): in a non-annulled
+  // `-mips1` conditional-branch `SEQUENCE`, the delay slot overwrites `$v0 (2)`
+  // (from the fallthrough path) while the branch head reads `$v0` (`steps[k]`
+  // precedes `steps[k+1]`). Stage 0 must still observe the branch head's read
+  // of `$v0` before stopping at the delay-slot overwrite, and attach self-RMW
+  // `(REG_DEAD (reg:SI 2 v0))` to the earlier `$v0` load-and-shift RMW.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kDbr;
+    cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (reg:SI 2 v0) (mem/s:SI (symbol_ref:SI (\"g_val\"))))",
+                      "(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 1)))",
+                      "(sequence[ (jump_insn (set (pc) (if_then_else (eq:SI (reg:SI 2 v0) "
+                      "(const_int 0)) (label_ref L1) (pc)))) "
+                      "(insn (set (reg:SI 2 v0) (const_int 7))) ] )",
+                  },
+                  {2, 1}),
+        MakeBlock(1, false,
+                  {
+                      "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 4 a0)))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+        MakeBlock(2, true,
+                  {
+                      "(set (reg/i:SI 2 v0) (const_int 1))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    NormalizePostReloadHardRegNotes(&cfg, profile_mips1);
+    EXPECT_TRUE(TopLevelInsnHasNote(cfg.rpo_blocks[0].instructions[1], RtlMachineMode::kRegDead, 2))
+        << cfg.rpo_blocks[0].instructions[1];
+  }
+
+  // Negative: when the delay slot overwrites `$v0` while the branch head tests
+  // `$a0` (not `$v0`), `steps[k + 1]` does NOT read `$v0` (`saw_read == false`),
+  // so the earlier `$v0` RMW must NOT receive a spurious self-`REG_DEAD $v0`.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kDbr;
+    cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (reg:SI 2 v0) (mem/s:SI (symbol_ref:SI (\"g_val\"))))",
+                      "(set (reg:SI 2 v0) (ashift:SI (reg:SI 2 v0) (const_int 1)))",
+                      "(sequence[ (jump_insn (set (pc) (if_then_else (eq:SI (reg:SI 4 a0) "
+                      "(const_int 0)) (label_ref L1) (pc)))) "
+                      "(insn (set (reg:SI 2 v0) (const_int 7))) ] )",
+                  },
+                  {2, 1}),
+        MakeBlock(1, false,
+                  {
+                      "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 4 a0)))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+        MakeBlock(2, true,
+                  {
+                      "(set (reg/i:SI 2 v0) (const_int 1))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    NormalizePostReloadHardRegNotes(&cfg, profile_mips1);
+    EXPECT_FALSE(
+        TopLevelInsnHasNote(cfg.rpo_blocks[0].instructions[1], RtlMachineMode::kRegDead, 2))
+        << cfg.rpo_blocks[0].instructions[1];
+  }
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     EarlyReturnCondBranchInBlockReadSuppressesReturnValueIntegratedFlag) {
+  const CompilationProfile profile_mips1 = MakeProfile(2, {"-O2", "-mips1", "-Wa,-O2"});
+
+  // Positive (`stmt.c:2590`, `jump.c:308, 427-433`): in a conditional-branch
+  // early-return block `B0 -> {B2(exit), B1(other)}` where `$f0 (32)` is dead on
+  // `B1` and read inside `B0` by `c.eq.s` before the branch, the producer
+  // `(set (reg:SF 32 $f0) ...)` computed a pseudo allocated to `$f0` (not the
+  // `/i` return copy, which was deleted as a noop move) and must NOT carry `/i`.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kDbr;
+    cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (reg:SF 32 $f0) (mem:SF (reg:SI 4 a0)))",
+                      "(set (reg:CC_FP 67 $fcr31) (eq:CC_FP (reg:SF 32 $f0) (reg:SF 44 $f12)))",
+                      "(set (pc) (if_then_else (eq:CC_FP (reg:CC_FP 67 $fcr31) (const_int 0)) "
+                      "(label_ref L1) (pc)))",
+                  },
+                  {2, 1}),
+        MakeBlock(1, false,
+                  {
+                      "(set (reg:SF 32 $f0) (plus:SF (reg:SF 44 $f12) (reg:SF 46 $f14)))",
+                  },
+                  {2}),
+        MakeBlock(2, true, {"(parallel[ (return) (use (reg:SI 31 ra)) ] )"}, {}),
+    };
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, profile_mips1);
+    EXPECT_FALSE(InsnHasReturnValueSet(cfg.rpo_blocks[0].instructions[0], 32, RtlMachineMode::kSf))
+        << cfg.rpo_blocks[0].instructions[0];
+  }
+
+  // Negative: when `$f0` is NOT read inside `B0` before the branch (the branch
+  // compares `$a0` instead), `(set (reg/i:SF 32 $f0) ...)` feeds the early return
+  // directly and DOES carry `/i`.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kDbr;
+    cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (reg:SF 32 $f0) (mem:SF (reg:SI 4 a0)))",
+                      "(set (pc) (if_then_else (eq:SI (reg:SI 5 a1) (const_int 0)) "
+                      "(label_ref L1) (pc)))",
+                  },
+                  {2, 1}),
+        MakeBlock(1, false,
+                  {
+                      "(set (reg:SF 32 $f0) (plus:SF (reg:SF 44 $f12) (reg:SF 46 $f14)))",
+                  },
+                  {2}),
+        MakeBlock(2, true, {"(parallel[ (return) (use (reg:SI 31 ra)) ] )"}, {}),
+    };
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, profile_mips1);
+    EXPECT_TRUE(InsnHasReturnValueSet(cfg.rpo_blocks[0].instructions[0], 32, RtlMachineMode::kSf))
+        << cfg.rpo_blocks[0].instructions[0];
+  }
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     CallDelaySlotRmwDeadNoteAndLiveGprCrossBankFprReloadResolution) {
+  const CompilationProfile profile_mips1 = MakeProfile(2, {"-O2", "-mips1", "-Wa,-O2"});
+
+  // Part 1 (`reorg.c:2889-3025` + `reload1.c:5641-6155`):
+  // In a `call_insn` delay slot, a self-RMW `(set (reg:SF 62 $f30) (plus:SF
+  // (reg:SF 62 $f30) (reg:SF 40 $f8)))` where `$f8` was loaded by a cross-bank
+  // `"f"` input reload `(set (reg:SF 40 $f8) (reg:SF 16 s0))` from a still-live
+  // `$s0` (no `REG_DEAD $s0`) must receive `(REG_DEAD (const_int 0))` in Stage 0
+  // (`IsLiveGprCrossBankFprReloadStep` + `TryAttachStage0LoadOrLocalScratchDeadNote`
+  // allowing `is_call_delay_slot` reading call-clobbered `$f8`), and
+  // `ResolvePostReloadConstZeroRegDeadNotes` must resolve `(const_int 0)` to
+  // `(reg:SF 62 $f30)` rather than `$f8` (positive).
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kDbr;
+    cfg.rpo_blocks = {
+        MakeBlock(
+            0, false,
+            {
+                "(set (reg:SF 62 $f30) (mem/u:SF (reg:SI 4 a0)))",
+                "(set (reg:SF 16 s0) (mem/u:SF (reg:SI 5 a1)))",
+                "(set (reg:SF 40 $f8) (reg:SF 16 s0))",
+                "(sequence[ (call_insn (set (reg:SF 32 $f0) (call (mem:SI (symbol_ref:SI "
+                "(\"callee\"))) (const_int 16)))) "
+                "(insn (set (reg:SF 62 $f30) (plus:SF (reg:SF 62 $f30) (reg:SF 40 $f8)))) ] )",
+                "(set (mem:SF (reg:SI 4 a0)) (reg:SF 16 s0))",
+                "(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 32 $f0) (reg:SF 62 $f30)))",
+                "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+            },
+            {}),
+    };
+    NormalizePostReloadHardRegNotes(&cfg, profile_mips1);
+    const std::string& seq_str = cfg.rpo_blocks[0].instructions[3];
+    // The delay slot must carry `(REG_DEAD (const_int 0))` for the `$f30` self-RMW
+    // (NOT zero notes and NOT two notes from miscounting `$f8`).
+    const size_t first_zero = seq_str.find("REG_DEAD (const_int 0)");
+    EXPECT_NE(first_zero, std::string::npos) << seq_str;
+    if (first_zero != std::string::npos) {
+      EXPECT_EQ(seq_str.find("REG_DEAD (const_int 0)", first_zero + 1), std::string::npos)
+          << seq_str;
+    }
+
+    // After unpacking the delay slot into `.10.sched2`, `ResolvePostReloadConstZeroRegDeadNotes`
+    // must resolve `(const_int 0)` to `(reg:SF 62 $f30)` instead of reload scratch `$f8`.
+    RtlControlFlowGraph unpacked;
+    unpacked.pass = RtlPassKind::kSched2;
+    unpacked.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (reg:SF 62 $f30) (mem/u:SF (reg:SI 4 a0)))",
+                      "(set (reg:SF 16 s0) (mem/u:SF (reg:SI 5 a1)))",
+                      "(set (reg:SF 40 $f8) (reg:SF 16 s0))",
+                      "(set (reg:SF 62 $f30) (plus:SF (reg:SF 62 $f30) (reg:SF 40 $f8))) "
+                      "(expr_list:REG_DEAD (const_int 0) (nil))",
+                      "(set (reg:SF 32 $f0) (call (mem:SI (symbol_ref:SI (\"callee\"))) "
+                      "(const_int 16)))",
+                      "(set (mem:SF (reg:SI 4 a0)) (reg:SF 16 s0))",
+                      "(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 32 $f0) (reg:SF 62 $f30)))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    ResolvePostReloadConstZeroRegDeadNotes(&unpacked, profile_mips1);
+    EXPECT_TRUE(
+        TopLevelInsnHasNote(unpacked.rpo_blocks[0].instructions[3], RtlMachineMode::kRegDead, 62))
+        << unpacked.rpo_blocks[0].instructions[3];
+    EXPECT_FALSE(
+        TopLevelInsnHasNote(unpacked.rpo_blocks[0].instructions[3], RtlMachineMode::kRegDead, 40))
+        << unpacked.rpo_blocks[0].instructions[3];
+  }
+
+  // Negative contrast: when `$s0` IS dead at the FP consumer (no post-call read
+  // of `$s0`, and `mtc1` has no `REG_DEAD $s0`), `ResolvePostReloadConstZeroRegDeadNotes`
+  // resolves `(const_int 0)` to proxy GPR `(reg:SF 16 s0)`.
+  {
+    RtlControlFlowGraph unpacked;
+    unpacked.pass = RtlPassKind::kSched2;
+    unpacked.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (reg:SF 62 $f30) (mem/u:SF (reg:SI 4 a0)))",
+                      "(set (reg:SF 16 s0) (mem/u:SF (reg:SI 5 a1)))",
+                      "(set (reg:SF 40 $f8) (reg:SF 16 s0))",
+                      "(set (reg:SF 62 $f30) (plus:SF (reg:SF 62 $f30) (reg:SF 40 $f8))) "
+                      "(expr_list:REG_DEAD (const_int 0) (nil))",
+                      "(set (reg/i:SF 32 $f0) (reg:SF 62 $f30))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    ResolvePostReloadConstZeroRegDeadNotes(&unpacked, profile_mips1);
+    EXPECT_TRUE(
+        TopLevelInsnHasNote(unpacked.rpo_blocks[0].instructions[3], RtlMachineMode::kRegDead, 16))
+        << unpacked.rpo_blocks[0].instructions[3];
+  }
+
+  // Negative contrast 2 (`reorg.c:2889-3025` + `flow.c:2485-2515`):
+  // In a `call_insn` delay slot, a callee-saved `DFmode` `reg/v` accumulator
+  // (`l.d $f22 -> add.d $f22, $f22, $f0 -> mul.d $f22, $f22, $f20`) undergoing a
+  // subsequent non-dead in-place RMW after the call must NOT receive a spurious
+  // `(REG_DEAD (const_int 0))`, and an earlier multi-word `(REG_DEAD (reg:DF 32 $f0))`
+  // must mark both `$f0` and `$f1` (`33`) as already dead so `(const_int 0)` never
+  // resolves to `(reg:SI 33 $f1)`.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kDbr;
+    cfg.rpo_blocks = {
+        MakeBlock(
+            0, false,
+            {
+                "(set (reg:DF 54 $f22) (mem/u:DF (reg:SI 5 a1)))",
+                "(set (reg:DF 32 $f0) (mem/u:DF (plus:SI (reg:SI 5 a1) (const_int 8))))",
+                "(set (reg:DF 6 a2) (reg:DF 32 $f0)) (expr_list:REG_DEAD (reg:DF 32 $f0) "
+                "(nil))",
+                "(sequence[ (call_insn (set (reg:DF 32 $f0) (call (mem:SI (symbol_ref:SI "
+                "(\"callee\"))) (const_int 16)))) "
+                "(insn (set (reg:DF 54 $f22) (plus:DF (reg:DF 54 $f22) (reg:DF 32 $f0)))) ] )",
+                "(set (reg:DF 54 $f22) (mult:DF (reg:DF 54 $f22) (reg:DF 52 $f20)))",
+                "(set (reg/i:DF 32 $f0) (plus:DF (reg:DF 32 $f0) (reg:DF 54 $f22)))",
+                "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+            },
+            {}),
+    };
+    NormalizePostReloadHardRegNotes(&cfg, profile_mips1);
+    EXPECT_EQ(cfg.rpo_blocks[0].instructions[3].find("REG_DEAD (const_int 0)"), std::string::npos)
+        << cfg.rpo_blocks[0].instructions[3];
+
+    // Directly pin `already_dead_earlier` full-`RegBitMask` span check: even if
+    // a `(const_int 0)` placeholder is present on the post-`REG_DEAD (reg:DF 32 $f0)`
+    // insn, `$f1` (`33`) is already covered by `(reg:DF 32 $f0)` and must not
+    // absorb it as `(REG_DEAD (reg:SI 33 $f1))`.
+    RtlControlFlowGraph unpacked_df;
+    unpacked_df.pass = RtlPassKind::kSched2;
+    unpacked_df.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (reg:DF 54 $f22) (mem/u:DF (reg:SI 5 a1)))",
+                      "(set (reg:DF 32 $f0) (mem/u:DF (plus:SI (reg:SI 5 a1) (const_int 8))))",
+                      "(set (reg:DF 6 a2) (reg:DF 32 $f0)) "
+                      "(expr_list:REG_DEAD (reg:DF 32 $f0) (nil))",
+                      "(set (reg:DF 54 $f22) (plus:DF (reg:DF 54 $f22) (reg:DF 32 $f0))) "
+                      "(expr_list:REG_DEAD (const_int 0) (nil))",
+                      "(set (reg:DF 54 $f22) (mult:DF (reg:DF 54 $f22) (reg:DF 52 $f20)))",
+                      "(set (reg/i:DF 32 $f0) (plus:DF (reg:DF 32 $f0) (reg:DF 54 $f22)))",
+                  },
+                  {}),
+    };
+    ResolvePostReloadConstZeroRegDeadNotes(&unpacked_df, profile_mips1);
+    EXPECT_FALSE(TopLevelInsnHasNote(unpacked_df.rpo_blocks[0].instructions[3],
+                                     RtlMachineMode::kRegDead, 33))
+        << unpacked_df.rpo_blocks[0].instructions[3];
+  }
+}
+
+TEST(ReconstructHardRegLivenessTest, Sched2HoistedIndependentLoadForwardClosurePreservesMemEquiv) {
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips1", "-Wa,-O2"});
+
+  // Mirrors `sched.c:1685-1703, 1854-1874` (`IsStage0Sched2HoistedIndependentLoadKillingAddr`):
+  // `$f2 = mem/u[v1+16]` is followed by a hoisted independent load `$f20 = mem/u[v1+24]`
+  // killing `$v1` AND its pure register consumer `$f20 = $f20 + $f24` before `$f2` dies.
+  // Positive: because `$f20 = $f20 + $f24` is in the hoisted load's forward
+  // closure and independent of `dead_s`, `$f2 = mem/u[v1+16]` receives `REG_EQUIV`.
+  auto make_cfg = [](bool dead_s_reads_f20, bool closure_has_store) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kDbr;
+    std::vector<std::string> insns = {
+        "(set (reg:SI 3 v1) (reg:SI 4 a0))",
+        "(set (reg:SF 34 $f2) (mem/u:SF (plus:SI (reg:SI 3 v1) (const_int 16))))",
+        "(set (reg:SF 52 $f20) (mem/u:SF (plus:SI (reg:SI 3 v1) (const_int 24))))",
+        "(set (reg:SF 52 $f20) (plus:SF (reg:SF 52 $f20) (reg:SF 56 $f24)))",
+    };
+    if (closure_has_store) {
+      insns.push_back("(set (mem:SF (reg:SI 5 a1)) (reg:SF 52 $f20))");
+    }
+    if (dead_s_reads_f20) {
+      insns.push_back("(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 34 $f2) (reg:SF 52 $f20)))");
+    } else {
+      insns.push_back("(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 34 $f2) (reg:SF 44 $f12)))");
+      insns.push_back("(set (mem:SF (reg:SI 6 a2)) (reg:SF 52 $f20))");
+    }
+    insns.push_back("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+    cfg.rpo_blocks = {MakeBlock(0, false, std::move(insns), {})};
+    return cfg;
+  };
+
+  // Positive: pure register consumer in closure, `dead_s` independent of `$f20`.
+  {
+    RtlControlFlowGraph cfg = make_cfg(/*dead_s_reads_f20=*/false, /*closure_has_store=*/false);
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, profile_o2);
+    NormalizePostReloadHardRegNotes(&cfg, profile_o2);
+    EXPECT_NE(cfg.rpo_blocks[0].instructions[1].find("REG_EQUIV (mem/u:SF "), std::string::npos)
+        << cfg.rpo_blocks[0].instructions[1];
+  }
+  // Negative 1: `dead_s` reads `$f20` (entering the hoisted load's forward closure).
+  {
+    RtlControlFlowGraph cfg = make_cfg(/*dead_s_reads_f20=*/true, /*closure_has_store=*/false);
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, profile_o2);
+    NormalizePostReloadHardRegNotes(&cfg, profile_o2);
+    EXPECT_EQ(cfg.rpo_blocks[0].instructions[1].find("REG_EQUIV (mem/u:SF "), std::string::npos)
+        << cfg.rpo_blocks[0].instructions[1];
+  }
+  // Negative 2: a memory store enters the hoisted load's forward closure.
+  {
+    RtlControlFlowGraph cfg = make_cfg(/*dead_s_reads_f20=*/false, /*closure_has_store=*/true);
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, profile_o2);
+    NormalizePostReloadHardRegNotes(&cfg, profile_o2);
+    EXPECT_EQ(cfg.rpo_blocks[0].instructions[1].find("REG_EQUIV (mem/u:SF "), std::string::npos)
+        << cfg.rpo_blocks[0].instructions[1];
+  }
+}
+
+TEST(ReconstructHardRegLivenessTest, LibmUnaryBuiltinsAndInheritedFprArgGuards) {
+  CompilationProfile mips1_o2;
+  mips1_o2.optimize_level = 2;
+  mips1_o2.c_flags = {"-O2", "-mips1", "-funsigned-char", "-Wa,-O2"};
+
+  // Positive 42H-1: unary C libm builtins (`sqrtf`, `sqrt`) imply `$f12` SF/DF
+  // `call_fusage` (`expr.c:7239-7285`), while unknown symbols do not.
+  auto check_libm_call = [&](const std::string& sym, bool is_df) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kDbr;
+    cfg.sideband.frame_size_bytes = 24;
+    cfg.sideband.saved_gpr_regnos = {31};
+    cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int -24)))",
+                      "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 16))) (reg:SI 31 ra))",
+                      is_df ? "(set (reg:DF 44 $f12) (mem:DF (reg:SI 4 a0)))"
+                            : "(set (reg:SF 44 $f12) (mem:SF (reg:SI 4 a0)))",
+                      std::string("(parallel[ (set (reg:") + (is_df ? "DF" : "SF") +
+                          " 32 $f0) (call (mem:SI (symbol_ref:SI (\"" + sym +
+                          "\"))) (const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+                      is_df ? "(use (reg/i:DF 32 $f0))" : "(use (reg/i:SF 32 $f0))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, mips1_o2);
+    return cfg.rpo_blocks[0].rtl_insns[3].call_fusage;
+  };
+  {
+    const auto fusage_sqrtf = check_libm_call("sqrtf", /*is_df=*/false);
+    ASSERT_EQ(fusage_sqrtf.size(), 1u);
+    EXPECT_EQ(fusage_sqrtf[0].children[0].RegNo(), 44);
+    EXPECT_EQ(fusage_sqrtf[0].children[0].mode, RtlMachineMode::kSf);
+
+    const auto fusage_sqrt = check_libm_call("sqrt", /*is_df=*/true);
+    ASSERT_EQ(fusage_sqrt.size(), 1u);
+    EXPECT_EQ(fusage_sqrt[0].children[0].RegNo(), 44);
+    EXPECT_EQ(fusage_sqrt[0].children[0].mode, RtlMachineMode::kDf);
+  }
+
+  // Positive + Negative 42C: callee-saved FPR `$f20` arg save hoisted before
+  // `sw $ra` infers `(use (reg:DF 6 a2))` when no non-copy GPR ALU precedes it,
+  // but does NOT infer `(use (reg:DF 6 a2))` when a non-copy GPR ALU (`xor`)
+  // precedes `s.d $f20` with `arg_bytes <= 16`, and does NOT infer O32 padding
+  // slot `$a1` when `$a2` is written as `DFmode`.
+  auto run_inherited_fpr_check = [&](bool add_preceding_gpr_alu) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kDbr;
+    cfg.sideband.frame_size_bytes = 48;
+    cfg.sideband.saved_gpr_regnos = {16, 31};
+    cfg.sideband.saved_fpr_regnos = {52};
+    std::vector<std::string> insns = {
+        "(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int -48)))",
+        "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 16))) (reg:SI 16 s0))",
+        "(set (reg:SI 16 s0) (reg:SI 5 a1))",
+    };
+    if (add_preceding_gpr_alu) {
+      insns.push_back("(set (reg:SI 4 a0) (xor:SI (reg:SI 4 a0) (const_int 7)))");
+    }
+    insns.push_back("(set (mem:DF (plus:SI (reg:SI 29 sp) (const_int 32))) (reg:DF 52 $f20))");
+    const size_t mtc1_idx = insns.size();
+    insns.push_back("(set (reg:DF 52 $f20) (reg:DF 6 a2))");
+    insns.push_back("(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 20))) (reg:SI 31 ra))");
+    if (!add_preceding_gpr_alu) {
+      insns.push_back("(set (reg:SI 4 a0) (plus:SI (reg:SI 16 s0) (const_int 1)))");
+    }
+    insns.push_back(
+        "(parallel[ (set (reg:DF 32 $f0) (call (mem:SI (symbol_ref:SI (\"ext_fn\"))) "
+        "(const_int 16))) (clobber (reg:SI 31 ra)) ] )");
+    insns.push_back("(set (reg/i:DF 32 $f0) (plus:DF (reg:DF 32 $f0) (reg:DF 52 $f20)))");
+    insns.push_back("(use (reg/i:DF 32 $f0))");
+    insns.push_back("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+    cfg.rpo_blocks = {MakeBlock(0, false, std::move(insns), {})};
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, mips1_o2);
+    return std::make_pair(cfg.rpo_blocks[0].instructions[2],
+                          cfg.rpo_blocks[0].instructions[mtc1_idx]);
+  };
+  {
+    const auto [a1_copy_pos, mtc1_pos] = run_inherited_fpr_check(/*add_preceding_gpr_alu=*/false);
+    // Positive: `$a2` stays live into `ext_fn` (so `mtc1` does NOT carry
+    // `REG_DEAD (reg:DF 6 a2)`), while O32 alignment padding `$a1` dies
+    // immediately at `s0 = a1`.
+    EXPECT_EQ(mtc1_pos.find("REG_DEAD (reg:DF 6 a2)"), std::string::npos) << mtc1_pos;
+    EXPECT_NE(a1_copy_pos.find("REG_DEAD (reg:SI 5 a1)"), std::string::npos) << a1_copy_pos;
+
+    // Negative: when a non-copy GPR ALU precedes `s.d $f20` with `arg_bytes <= 16`,
+    // `$a2` is NOT inferred as a call arg and dies immediately at `mtc1`.
+    const auto [a1_copy_neg, mtc1_neg] = run_inherited_fpr_check(/*add_preceding_gpr_alu=*/true);
+    EXPECT_NE(mtc1_neg.find("REG_DEAD (reg:DF 6 a2)"), std::string::npos) << mtc1_neg;
+    EXPECT_NE(a1_copy_neg.find("REG_DEAD (reg:SI 5 a1)"), std::string::npos) << a1_copy_neg;
+  }
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     SelfRmwGlobalInLocalOutChecksAllLowerRegAllocOrderGprsAndJump2CallClobberStrip) {
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips2", "-mcpu=r4000"});
+
+  // 1. Generalized lower-reg-alloc-order GPR check (`local-alloc.c:2108-2182`,
+  //    `#ifndef REG_ALLOC_ORDER`): when `$2 v0` is live across the local-out
+  //    tail of `$6 a2`, `$3 v1 < $6 a2` being free still prevents a spurious
+  //    split `REG_DEAD` on `$6 a2`; contrast when all lower caller-saved GPRs
+  //    `$2..$5` are live across the local-out tail.
+  auto make_lower_gpr_cfg = [](bool keep_v1_a0_a1_live) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kSched2;
+    std::vector<std::string> b0 = {
+        "(set (reg:SI 6 a2) (mem:SI (reg:SI 4 a0)))",
+        "(set (reg:SI 2 v0) (plus:SI (reg:SI 5 a1) (const_int 7)))",
+    };
+    if (keep_v1_a0_a1_live) {
+      b0.push_back("(set (reg:SI 3 v1) (plus:SI (reg:SI 4 a0) (const_int 3)))");
+    }
+    b0.push_back(
+        "(set (pc) (if_then_else (eq:SI (reg:SI 5 a1) (const_int 0)) (label_ref L1) (pc)))");
+
+    std::vector<std::string> b1 = {
+        "(set (reg:SI 6 a2) (ior:SI (reg:SI 6 a2) (const_int 65536)))",
+        "(set (mem:SI (reg:SI 4 a0)) (reg:SI 6 a2))",
+        "(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (const_int 1)))",
+    };
+    if (keep_v1_a0_a1_live) {
+      b1.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 3 v1)))");
+      b1.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 4 a0)))");
+      b1.push_back("(set (reg:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 5 a1)))");
+    }
+    cfg.rpo_blocks = {
+        MakeBlock(0, false, std::move(b0), {2, 1}),
+        MakeBlock(1, false, std::move(b1), {2}),
+        MakeBlock(2, true,
+                  {
+                      "(set (reg/i:SI 2 v0) (reg:SI 2 v0))",
+                      "(use (reg/i:SI 2 v0))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    return cfg;
+  };
+  {
+    RtlControlFlowGraph pos = make_lower_gpr_cfg(/*keep_v1_a0_a1_live=*/false);
+    NormalizePostReloadHardRegNotes(&pos, profile_o2);
+    EXPECT_FALSE(
+        TopLevelInsnHasNote(pos.rpo_blocks[1].instructions[0], RtlMachineMode::kRegDead, 6))
+        << pos.rpo_blocks[1].instructions[0];
+
+    RtlControlFlowGraph neg = make_lower_gpr_cfg(/*keep_v1_a0_a1_live=*/true);
+    NormalizePostReloadHardRegNotes(&neg, profile_o2);
+    EXPECT_TRUE(TopLevelInsnHasNote(neg.rpo_blocks[1].instructions[0], RtlMachineMode::kRegDead, 6))
+        << neg.rpo_blocks[1].instructions[0];
+  }
+
+  // 2. `StripStage0Jump2NoopMoveConsumedDeaths` (`jump.c:452-459`):
+  //    - Positive 1: non-arg call-clobbered FPR `$f10` with `REG_DEAD $f10`
+  //      followed by `CALL` (with delay slot) and `(set $f10 $s3)` is stripped.
+  //    - Positive 2: non-arg FPR `$f6` loaded from `CONST_DOUBLE` and consumed
+  //      before `(set $f6 $s4)` is stripped.
+  //    - Negative: O32 call-arg GPR `$5 a1` read before direct `(set $5 $s0)`
+  //      (no intervening call clobber) retains `REG_DEAD $5`.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kDbr;
+    cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (reg:SF 42 $f10) (const_double:SF (cc0) 0 1072693248))",
+                      "(set (reg:SF 44 $f12) (plus:SF (reg:SF 44 $f12) (reg:SF 42 $f10)))",
+                      "(sequence [(call_insn (parallel[ (set (reg:SF 32 $f0) "
+                      "(call (mem:SI (symbol_ref:SI (\"ext_f\"))) (const_int 16))) "
+                      "(clobber (reg:SI 31 ra)) ] )) "
+                      "(insn (set (reg:SI 5 a1) (reg:SI 16 s0)))])",
+                      "(set (reg:SF 42 $f10) (reg:SF 19 s3))",
+                      "(set (reg:SF 38 $f6) (const_double:SF (cc0) 0 1071644672))",
+                      "(set (reg:SF 32 $f0) (mult:SF (reg:SF 32 $f0) (reg:SF 38 $f6)))",
+                      "(set (reg:SF 38 $f6) (reg:SF 20 s4))",
+                      "(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 32 $f0) (reg:SF 42 $f10)))",
+                      "(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 32 $f0) (reg:SF 38 $f6)))",
+                      "(use (reg/i:SF 32 $f0))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, profile_o2);
+    EXPECT_FALSE(
+        TopLevelInsnHasNote(cfg.rpo_blocks[0].instructions[1], RtlMachineMode::kRegDead, 42))
+        << cfg.rpo_blocks[0].instructions[1];
+    EXPECT_FALSE(
+        TopLevelInsnHasNote(cfg.rpo_blocks[0].instructions[5], RtlMachineMode::kRegDead, 38))
+        << cfg.rpo_blocks[0].instructions[5];
+  }
+  {
+    RtlControlFlowGraph neg_cfg;
+    neg_cfg.pass = RtlPassKind::kDbr;
+    neg_cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (reg:SI 4 a0) (plus:SI (reg:SI 5 a1) (reg:SI 4 a0)))",
+                      "(set (reg:SI 5 a1) (reg:SI 16 s0))",
+                      "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"ext_i\"))) "
+                      "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+                      "(use (reg/i:SI 2 v0))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&neg_cfg, profile_o2);
+    EXPECT_TRUE(
+        TopLevelInsnHasNote(neg_cfg.rpo_blocks[0].instructions[0], RtlMachineMode::kRegDead, 5))
+        << neg_cfg.rpo_blocks[0].instructions[0];
+  }
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     Zone3SpillSlotMultiUseInheritedMtc1AndProvenFpSpillConstDoubleDeadStripping) {
+  const CompilationProfile profile_o2 = MakeProfile(2, {"-O2", "-mips2", "-mcpu=r4000"});
+
+  // Positive (`reload1.c:1446, 3445-3508, 5186-5258, 5641-6640`):
+  // 1. Zone-3 reload-loop spill slot `80($sp)` (strictly between caller-save
+  //    slot `64($sp)` and prologue save `96($sp)`) proves `$f8 (40)` is a block
+  //    FP spill register, so `(set $f8 (const_double ...))` feeding pure FP
+  //    consumers (including an in-place RMW `(set $f8 (mult $f4 $f8))`) strips
+  //    `REG_DEAD $f8`.
+  // 2. Multi-use inherited callee-saved cross-bank reload `(set $f6 $s1)`
+  //    consumed by two pure FP insns strips `REG_DEAD $f6` on the final consumer.
+  // Negative (`reload1.c:4712`):
+  // 3. An output-reload store `(set [sp+80] $f2)` alone (reusing a dying
+  //    allocated pseudo's hard reg `$f2`) does NOT mark `$f2` as a spilled reg,
+  //    so a later `(set $f2 (const_double ...))` consumer preserves `REG_DEAD $f2`.
+  // 4. An incoming ABI arg copy `(set $f0 $a1)` does NOT mark `$f0` as a spill
+  //    reg, so a later `(set $f0 (const_double ...))` consumer preserves `REG_DEAD $f0`.
+  RtlControlFlowGraph cfg;
+  cfg.pass = RtlPassKind::kDbr;
+  cfg.sideband.frame_size_bytes = 160;
+  cfg.sideband.saved_gpr_regnos = {16, 17, 31};
+  cfg.sideband.saved_fpr_regnos = {52, 54, 56, 58, 60, 62};
+  cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int -160)))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 96))) (reg:SI 16 s0))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 100))) (reg:SI 17 s1))",
+                    "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 104))) (reg:SI 31 ra))",
+                    "(set (mem:DF (plus:SI (reg:SI 29 sp) (const_int 112))) (reg:DF 52 $f20))",
+                    "(set (mem:DF (plus:SI (reg:SI 29 sp) (const_int 120))) (reg:DF 54 $f22))",
+                    "(set (mem:DF (plus:SI (reg:SI 29 sp) (const_int 128))) (reg:DF 56 $f24))",
+                    "(set (mem:DF (plus:SI (reg:SI 29 sp) (const_int 136))) (reg:DF 58 $f26))",
+                    "(set (mem:DF (plus:SI (reg:SI 29 sp) (const_int 144))) (reg:DF 60 $f28))",
+                    "(set (mem:DF (plus:SI (reg:SI 29 sp) (const_int 152))) (reg:DF 62 $f30))",
+                    // Caller-save slot at `68($sp)` around a call.
+                    "(set (reg:SF 48 $f16) (mem:SF (reg:SI 4 a0)))",
+                    "(set (mem:SF (plus:SI (reg:SI 29 sp) (const_int 68))) (reg:SF 48 $f16))",
+                    "(parallel[ (set (reg:SF 32 $f0) (call (mem:SI (symbol_ref:SI (\"ext_f\"))) "
+                    "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+                    "(set (reg:SF 48 $f16) (mem:SF (plus:SI (reg:SI 29 sp) (const_int 68))))",
+                    // Output-reload store reusing `$f2 (34)` into Zone-3 slot `84($sp)`.
+                    "(set (reg:SF 34 $f2) (plus:SF (reg:SF 48 $f16) (reg:SF 32 $f0)))",
+                    "(set (mem:SF (plus:SI (reg:SI 29 sp) (const_int 84))) (reg:SF 34 $f2))",
+                    // Zone-3 spill load into `$f8 (40)` proves `$f8` is a spill reg.
+                    "(set (reg:SF 40 $f8) (mem:SF (plus:SI (reg:SI 29 sp) (const_int 84))))",
+                    "(set (reg:SF 36 $f4) (plus:SF (reg:SF 40 $f8) (reg:SF 48 $f16)))",
+                    // Proven spill `$f8` const_double + RMW consumer -> strips `REG_DEAD $f8`.
+                    "(set (reg:SF 40 $f8) (const_double:SF (cc0) 0 1070596096))",
+                    "(set (reg:SF 40 $f8) (mult:SF (reg:SF 36 $f4) (reg:SF 40 $f8)))",
+                    "(set (mem:SF (plus:SI (reg:SI 29 sp) (const_int 84))) (reg:SF 40 $f8))",
+                    // Multi-use inherited callee-saved `mtc1 $s1 -> $f6` -> strips `REG_DEAD $f6`.
+                    "(set (reg:SF 38 $f6) (reg:SF 17 s1))",
+                    "(set (reg:SF 36 $f4) (plus:SF (reg:SF 36 $f4) (reg:SF 38 $f6)))",
+                    "(set (reg:SF 48 $f16) (mult:SF (reg:SF 48 $f16) (reg:SF 38 $f6)))",
+                    // Non-spill `$f2` const_double -> preserves `REG_DEAD $f2`.
+                    "(set (reg:SF 34 $f2) (const_double:SF (cc0) 0 1071644672))",
+                    "(set (reg:SF 36 $f4) (plus:SF (reg:SF 36 $f4) (reg:SF 34 $f2)))",
+                    // Incoming ABI arg copy `$a1 -> $f0` -> does NOT prove `$f0` is a spill reg.
+                    "(set (reg:SF 32 $f0) (reg:SF 5 a1))",
+                    "(set (reg:SF 36 $f4) (plus:SF (reg:SF 36 $f4) (reg:SF 32 $f0)))",
+                    "(set (reg:SF 32 $f0) (const_double:SF (cc0) 0 1072693248))",
+                    "(set (reg:SF 36 $f4) (plus:SF (reg:SF 36 $f4) (reg:SF 32 $f0)))",
+                    "(set (reg/i:SF 32 $f0) (plus:SF (reg:SF 36 $f4) (reg:SF 48 $f16)))",
+                    "(use (reg/i:SF 32 $f0))",
+                    "(set (reg:SI 16 s0) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 96))))",
+                    "(set (reg:SI 17 s1) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 100))))",
+                    "(set (reg:SI 31 ra) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 104))))",
+                    "(set (reg:DF 52 $f20) (mem:DF (plus:SI (reg:SI 29 sp) (const_int 112))))",
+                    "(set (reg:DF 54 $f22) (mem:DF (plus:SI (reg:SI 29 sp) (const_int 120))))",
+                    "(set (reg:DF 56 $f24) (mem:DF (plus:SI (reg:SI 29 sp) (const_int 128))))",
+                    "(set (reg:DF 58 $f26) (mem:DF (plus:SI (reg:SI 29 sp) (const_int 136))))",
+                    "(set (reg:DF 60 $f28) (mem:DF (plus:SI (reg:SI 29 sp) (const_int 144))))",
+                    "(set (reg:DF 62 $f30) (mem:DF (plus:SI (reg:SI 29 sp) (const_int 152))))",
+                    "(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int 160)))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+  ReconstructPostDbrHardRegLivenessAndReturnUse(&cfg, profile_o2);
+  // Positive 1: `$f8` const_double RMW consumer at [19] has no `REG_DEAD $f8`.
+  EXPECT_FALSE(
+      TopLevelInsnHasNote(cfg.rpo_blocks[0].instructions[19], RtlMachineMode::kRegDead, 40))
+      << cfg.rpo_blocks[0].instructions[19];
+  // Positive 2: multi-use inherited callee-saved `mtc1 $s1 -> $f6` final consumer at [23] has no
+  // `REG_DEAD $f6`.
+  EXPECT_FALSE(
+      TopLevelInsnHasNote(cfg.rpo_blocks[0].instructions[23], RtlMachineMode::kRegDead, 38))
+      << cfg.rpo_blocks[0].instructions[23];
+  // Negative 1: `$f2` (only stored to spill slot, never loaded) keeps `REG_DEAD $f2` at [25].
+  EXPECT_TRUE(TopLevelInsnHasNote(cfg.rpo_blocks[0].instructions[25], RtlMachineMode::kRegDead, 34))
+      << cfg.rpo_blocks[0].instructions[25];
+  // Negative 2: `$f0` (only copied from ABI arg `$a1`, not callee-saved GPR) keeps `REG_DEAD $f0`
+  // at [29].
+  EXPECT_TRUE(TopLevelInsnHasNote(cfg.rpo_blocks[0].instructions[29], RtlMachineMode::kRegDead, 32))
+      << cfg.rpo_blocks[0].instructions[29];
+}
+
+TEST(ReconstructHardRegLivenessTest, Stage0Extendsidi2SignDeadAndDiLoadPtrDeadNotes) {
+  const CompilationProfile o1_prof = MakeProfile(1, {"-O1", "-mips2", "-Wa,-g"});
+
+  // Positive 1 (`flow.c:2507-2550`): non-integrated `DI` load whose base pointer
+  // `$5` (`a1`) lies inside destination pair `{4, 5}` (`dst.mode != ptr.mode`)
+  // receives `(REG_DEAD (reg:SI 5 a1))`, whereas an integrated `/i` `DI` load
+  // (negative) does not.
+  auto make_di_load_cfg = [](bool integrated_dst) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kSched2;
+    cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (reg:SI 5 a1) (plus:SI (reg:SI 4 a0) (const_int 8)))",
+                      integrated_dst ? "(set (reg/i:DI 4 a0) (mem:DI (reg:SI 5 a1)))"
+                                     : "(set (reg:DI 4 a0) (mem:DI (reg:SI 5 a1)))",
+                      "(set (reg/i:DI 2 v0) (reg:DI 4 a0))",
+                      "(use (reg/i:DI 2 v0))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    return cfg;
+  };
+  {
+    RtlControlFlowGraph pos = make_di_load_cfg(/*integrated_dst=*/false);
+    NormalizePostReloadHardRegNotes(&pos, o1_prof);
+    EXPECT_TRUE(TopLevelInsnHasNote(pos.rpo_blocks[0].instructions[1], RtlMachineMode::kRegDead, 5))
+        << pos.rpo_blocks[0].instructions[1];
+
+    RtlControlFlowGraph neg = make_di_load_cfg(/*integrated_dst=*/true);
+    NormalizePostReloadHardRegNotes(&neg, o1_prof);
+    EXPECT_FALSE(
+        TopLevelInsnHasNote(neg.rpo_blocks[0].instructions[1], RtlMachineMode::kRegDead, 5))
+        << neg.rpo_blocks[0].instructions[1];
+  }
+
+  // Positive 2 (`flow.c:2507-2550` + `optabs.c:2495`): `extendsidi2`
+  // self-RMW `ashiftrt:SI 31` (`move $3, $2 ; sra $2, $2, 31`) carrying
+  // `REG_NO_CONFLICT` preserves `(REG_DEAD (reg:SI 2 v0))` ahead of
+  // `REG_NO_CONFLICT`.
+  {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kSched2;
+    cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (reg:SI 2 v0) (mem:SI (reg:SI 5 a1)))",
+                      "(set (reg:SI 3 v1) (reg:SI 2 v0)) "
+                      "(expr_list:REG_NO_CONFLICT (reg:SI 2 v0) (nil))",
+                      "(set (reg:SI 2 v0) (ashiftrt:SI (reg:SI 2 v0) (const_int 31))) "
+                      "(expr_list:REG_NO_CONFLICT (reg:SI 2 v0) (nil))",
+                      "(set (reg/i:DI 2 v0) (reg:DI 2 v0))",
+                      "(use (reg/i:DI 2 v0))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    NormalizePostReloadHardRegNotes(&cfg, o1_prof);
+    const std::string& sra = cfg.rpo_blocks[0].instructions[2];
+    const size_t dead_pos = sra.find("REG_DEAD (reg:SI 2 v0)");
+    const size_t nc_pos = sra.find("REG_NO_CONFLICT (reg:SI 2 v0)");
+    ASSERT_NE(dead_pos, std::string::npos) << sra;
+    ASSERT_NE(nc_pos, std::string::npos) << sra;
+    EXPECT_LT(dead_pos, nc_pos) << sra;
+  }
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     Stage0PinnedCallArgDefSuppressesSelfRmwDeadAndSubregPreservesDiModeDead) {
+  const CompilationProfile o2_prof = MakeProfile(2, {"-O2", "-mips2", "-mcpu=r4000", "-Wa,-g"});
+
+  // 1. Positive + Negative (`flow.c:2506-2515`, `sched.c:2872`,
+  //    `Stage0DefReachesPinnedCallArgUse`):
+  //    `$a0` is defined in `B0` and reaches both a `call_fusage` read in `B1`
+  //    and a self-RMW `(set (reg:SI 4 a0) (plus:SI (reg:SI 4 a0) (const_int 1)))`
+  //    in `B2`. Because the reaching def feeds a sibling `call_fusage` read of
+  //    `$a0`, `$a0` is ABI-pinned (not an unpinned global pseudo), so `B2`'s
+  //    self-RMW must NOT receive an illegal `(REG_DEAD (reg:SI 4 a0))` (positive).
+  //    Without the sibling `call_fusage` read (negative), `$a0` enters `B2` as
+  //    an unpinned global pseudo and the self-RMW feeding a local consumer DOES
+  //    receive `(REG_DEAD (reg:SI 4 a0))`.
+  auto make_call_arg_sibling_cfg = [](bool sibling_reads_a0_in_call_fusage) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kSched2;
+    cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (reg:SI 4 a0) (plus:SI (reg:SI 5 a1) (const_int 3)))",
+                      "(set (reg:SI 2 v0) (const_int 11))",
+                      "(set (reg:SI 3 v1) (const_int 13))",
+                      "(set (pc) (if_then_else (eq:SI (reg:SI 6 a2) (const_int 0)) "
+                      "(label_ref L2) (pc)))",
+                  },
+                  {2, 1}),
+        MakeBlock(1, false,
+                  {
+                      "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"callee\"))) "
+                      "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+                      "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 3 v1)))",
+                      "(use (reg/i:SI 2 v0))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+        MakeBlock(2, true,
+                  {
+                      "(set (reg:SI 4 a0) (plus:SI (reg:SI 4 a0) (const_int 1)))",
+                      "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 4 a0) (reg:SI 2 v0)))",
+                      "(set (reg/i:SI 2 v0) (plus:SI (reg/i:SI 2 v0) (reg:SI 3 v1)))",
+                      "(use (reg/i:SI 2 v0))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    cfg.rpo_blocks[1].rtl_insns[0].has_explicit_call_fusage = true;
+    if (sibling_reads_a0_in_call_fusage) {
+      cfg.rpo_blocks[1].rtl_insns[0].call_fusage = {
+          RtlExpr::MakeUse(RtlExpr::MakeReg(RtlMachineMode::kSi, 4)),
+      };
+    }
+    return cfg;
+  };
+  {
+    RtlControlFlowGraph pos = make_call_arg_sibling_cfg(/*sibling_reads_a0_in_call_fusage=*/true);
+    NormalizePostReloadHardRegNotes(&pos, o2_prof);
+    EXPECT_FALSE(
+        TopLevelInsnHasNote(pos.rpo_blocks[2].instructions[0], RtlMachineMode::kRegDead, 4))
+        << pos.rpo_blocks[2].instructions[0];
+  }
+  {
+    RtlControlFlowGraph neg = make_call_arg_sibling_cfg(/*sibling_reads_a0_in_call_fusage=*/false);
+    NormalizePostReloadHardRegNotes(&neg, o2_prof);
+    EXPECT_TRUE(TopLevelInsnHasNote(neg.rpo_blocks[2].instructions[0], RtlMachineMode::kRegDead, 4))
+        << neg.rpo_blocks[2].instructions[0];
+  }
+
+  // 2. Positive + Negative (`flow.c:2387-2406`, `sched.c:2937-2942`):
+  //    reading `(subreg:SI (reg:DI 10 t2) 1)` when both words of `$t2/$t3` die
+  //    attaches full `(REG_DEAD (reg:DI 10 t2))` (positive); when word 0 (`$t2`)
+  //    stays live into a later consumer, attaches only `(REG_DEAD (reg:SI 11 t3))`
+  //    (negative).
+  auto make_di_subreg_cfg = [](bool word0_stays_live) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kSched2;
+    std::vector<std::string> insns = {
+        "(set (reg:DI 10 t2) (mem:DI (reg:SI 4 a0)))",
+        "(set (reg:SI 2 v0) (plus:SI (subreg:SI (reg:DI 10 t2) 1) (reg:SI 5 a1)))",
+    };
+    if (word0_stays_live) {
+      insns.push_back("(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 10 t2)))");
+    } else {
+      insns.push_back("(set (reg/i:SI 2 v0) (reg:SI 2 v0))");
+    }
+    insns.push_back("(use (reg/i:SI 2 v0))");
+    insns.push_back("(parallel[ (return) (use (reg:SI 31 ra)) ] )");
+    cfg.rpo_blocks = {MakeBlock(0, false, std::move(insns), {})};
+    return cfg;
+  };
+  {
+    RtlControlFlowGraph pos = make_di_subreg_cfg(/*word0_stays_live=*/false);
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&pos, o2_prof);
+    EXPECT_NE(pos.rpo_blocks[0].instructions[1].find("REG_DEAD (reg:DI 10 t2)"), std::string::npos)
+        << pos.rpo_blocks[0].instructions[1];
+  }
+  {
+    RtlControlFlowGraph neg = make_di_subreg_cfg(/*word0_stays_live=*/true);
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&neg, o2_prof);
+    EXPECT_NE(neg.rpo_blocks[0].instructions[1].find("REG_DEAD (reg:SI 11 t3)"), std::string::npos)
+        << neg.rpo_blocks[0].instructions[1];
+    EXPECT_EQ(neg.rpo_blocks[0].instructions[1].find("REG_DEAD (reg:DI 10 t2)"), std::string::npos)
+        << neg.rpo_blocks[0].instructions[1];
+  }
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     RefineCallArgumentFusageAcrossCfgDropsConsumedScratchWritesButForwardsUnread) {
+  // Mirrors `calls.c:1850-1915`, `local-alloc.c:2158`: a scratch argument-reg
+  // write (`$a3`) consumed inside its defining predecessor block must not leak
+  // across CFG edges into a downstream call's `CALL_INSN_FUNCTION_USAGE` (which
+  // would wrongly keep `$a3` live into the branch and suppress `(REG_DEAD a3)`),
+  // whereas an unread predecessor-block write (`$a3` never read before the
+  // branch) IS still forwarded across the edge into the call.
+  const CompilationProfile o2_prof{.optimize_level = 2,
+                                   .c_flags = {"-O2", "-mips2", "-mcpu=r4000"}};
+
+  auto make_cfg = [](bool read_a3_in_b0) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kDbr;
+    std::vector<std::string> b0_insns = {
+        "(set (reg:SI 7 a3) (plus:SI (reg:SI 4 a0) (const_int 16)))",
+    };
+    if (read_a3_in_b0) {
+      b0_insns.push_back("(set (reg:SI 16 s0) (mem:SI (reg:SI 7 a3)))");
+    } else {
+      b0_insns.push_back("(set (reg:SI 16 s0) (mem:SI (reg:SI 4 a0)))");
+    }
+    b0_insns.push_back(
+        "(set (pc) (if_then_else (eq:SI (reg:SI 5 a1) (const_int 0)) (label_ref L1) (pc)))");
+    cfg.rpo_blocks = {
+        MakeBlock(0, false, std::move(b0_insns), {2, 1}),
+        MakeBlock(1, false,
+                  {
+                      "(set (reg:SI 4 a0) (reg:SI 16 s0))",
+                      "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"callee\"))) "
+                      "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+                  },
+                  {2}),
+        MakeBlock(2, true,
+                  {
+                      "(set (reg/i:SI 2 v0) (reg:SI 16 s0))",
+                      "(use (reg/i:SI 2 v0))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    return cfg;
+  };
+
+  // Positive: `$a3` is read inside `B0` before branching to `B1`, so `$a3` must
+  // NOT be forwarded into `B1`'s `CALL_INSN_FUNCTION_USAGE`, and `B0[1]` gets
+  // `(REG_DEAD (reg:SI 7 a3))`.
+  {
+    RtlControlFlowGraph pos = make_cfg(/*read_a3_in_b0=*/true);
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&pos, o2_prof);
+    const auto& fusage = pos.rpo_blocks[1].rtl_insns[1].call_fusage;
+    bool has_a3 = false;
+    for (const RtlExpr& fu : fusage) {
+      if (fu.ToGccPrintRtlString().find("(reg:SI 7 a3)") != std::string::npos) {
+        has_a3 = true;
+      }
+    }
+    EXPECT_FALSE(has_a3) << pos.FormatSummary();
+    EXPECT_TRUE(TopLevelInsnHasNote(pos.rpo_blocks[0].instructions[1], RtlMachineMode::kRegDead, 7))
+        << pos.rpo_blocks[0].instructions[1];
+  }
+
+  // Negative: `$a3` is written in `B0` and NEVER read in `B0`, so the unread
+  // cross-block argument setup IS forwarded into `B1`'s `CALL_INSN_FUNCTION_USAGE`.
+  {
+    RtlControlFlowGraph neg = make_cfg(/*read_a3_in_b0=*/false);
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&neg, o2_prof);
+    const auto& fusage = neg.rpo_blocks[1].rtl_insns[1].call_fusage;
+    bool has_a3 = false;
+    for (const RtlExpr& fu : fusage) {
+      if (fu.ToGccPrintRtlString().find("(reg:SI 7 a3)") != std::string::npos) {
+        has_a3 = true;
+      }
+    }
+    EXPECT_TRUE(has_a3) << neg.FormatSummary();
+  }
+
+  // Negative 2: when `$a1` is computed by `plus` and read as a non-address
+  // store value (`sw $a1, 4($a0)`) rather than a `MEM` base pointer, it may
+  // still be a live-through call argument in `B1` and IS preserved in `call_fusage`.
+  {
+    RtlControlFlowGraph neg_val;
+    neg_val.pass = RtlPassKind::kDbr;
+    neg_val.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (reg:SI 5 a1) (plus:SI (reg:SI 2 v0) (reg:SI 5 a1)))",
+                      "(set (mem:SI (plus:SI (reg:SI 4 a0) (const_int 4))) (reg:SI 5 a1))",
+                      "(set (pc) (if_then_else (eq:SI (reg:SI 3 v1) (const_int 0)) "
+                      "(label_ref L1) (pc)))",
+                  },
+                  {2, 1}),
+        MakeBlock(1, false,
+                  {
+                      "(set (reg:SI 4 a0) (mem:SI (reg:SI 4 a0)))",
+                      "(parallel[ (call (mem:SI (symbol_ref:SI (\"notify\"))) (const_int 16)) "
+                      "(clobber (reg:SI 31 ra)) ] )",
+                  },
+                  {2}),
+        MakeBlock(2, true,
+                  {
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&neg_val, o2_prof);
+    const auto& fusage = neg_val.rpo_blocks[1].rtl_insns[1].call_fusage;
+    bool has_a1 = false;
+    for (const RtlExpr& fu : fusage) {
+      if (fu.ToGccPrintRtlString().find("(reg:SI 5 a1)") != std::string::npos) {
+        has_a1 = true;
+      }
+    }
+    EXPECT_TRUE(has_a1) << neg_val.FormatSummary();
+  }
+
+  // Negative 3 (`calls.c:1850-1915`): when `$a0` is computed via `plus` and
+  // dereferenced in `B0` while `B1` sets higher O32 argument `$a1` before
+  // `jal foo`, `$a0` remains in `must_valid` so O32 prefix closure retains
+  // `$a0` in `call_fusage`.
+  {
+    RtlControlFlowGraph neg_prefix;
+    neg_prefix.pass = RtlPassKind::kDbr;
+    neg_prefix.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (reg:SI 4 a0) (plus:SI (reg:SI 16 s0) (const_int 16)))",
+                      "(set (reg:SI 17 s1) (mem:SI (reg:SI 4 a0)))",
+                      "(set (pc) (if_then_else (eq:SI (reg:SI 17 s1) (const_int 0)) "
+                      "(label_ref L1) (pc)))",
+                  },
+                  {2, 1}),
+        MakeBlock(1, false,
+                  {
+                      "(set (reg:SI 5 a1) (reg:SI 17 s1))",
+                      "(parallel[ (set (reg:SI 2 v0) (call (mem:SI (symbol_ref:SI (\"foo\"))) "
+                      "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+                  },
+                  {2}),
+        MakeBlock(2, true,
+                  {
+                      "(set (reg/i:SI 2 v0) (reg:SI 17 s1))",
+                      "(use (reg/i:SI 2 v0))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    ReconstructPostDbrHardRegLivenessAndReturnUse(&neg_prefix, o2_prof);
+    const auto& fusage = neg_prefix.rpo_blocks[1].rtl_insns[1].call_fusage;
+    bool has_a0 = false;
+    for (const RtlExpr& fu : fusage) {
+      if (fu.ToGccPrintRtlString().find("(reg:SI 4 a0)") != std::string::npos) {
+        has_a0 = true;
+      }
+    }
+    EXPECT_TRUE(has_a0) << neg_prefix.FormatSummary();
+  }
+}
+
+TEST(ReconstructHardRegLivenessTest,
+     NormalizeStage0PostReloadRegNotesOrdersAttachDeathsBeforeSpillUpgrade) {
+  // Mirrors `sched.c:2956-2986` (`attach_deaths`) + `reload1.c:6134-6140`:
+  // when `RunsSched1()` is true (`-O2`), `NormalizeStage0PostReloadRegNotes`
+  // orders multi-operand `REG_DEAD` notes into `attach_deaths` operand preorder
+  // BEFORE upgrading a reload-scratch death to `(REG_DEAD (mem [sp+off]))`,
+  // whereas `-O1` (`!RunsSched1()`) upgrades the spill death in place without
+  // `attach_deaths` reordering.
+  const CompilationProfile o2_prof{.optimize_level = 2,
+                                   .c_flags = {"-O2", "-mips1", "-funsigned-char"}};
+  const CompilationProfile o1_prof{.optimize_level = 1,
+                                   .c_flags = {"-O1", "-mips1", "-funsigned-char"}};
+
+  auto make_cfg = []() {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kSched2;
+    cfg.sideband.frame_size_bytes = 128;
+    cfg.sideband.saved_gpr_regnos = {31};
+    cfg.sideband.saved_fpr_regnos = {52, 54, 56, 58, 60, 62};
+    cfg.rpo_blocks = {
+        MakeBlock(0, false,
+                  {
+                      "(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int -128)))",
+                      "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 72))) (reg:SI 31 ra))",
+                      "(set (mem:DF (plus:SI (reg:SI 29 sp) (const_int 80))) (reg:DF 52 $f20))",
+                      "(set (mem:DF (plus:SI (reg:SI 29 sp) (const_int 88))) (reg:DF 54 $f22))",
+                      "(set (mem:DF (plus:SI (reg:SI 29 sp) (const_int 96))) (reg:DF 56 $f24))",
+                      "(set (mem:DF (plus:SI (reg:SI 29 sp) (const_int 104))) (reg:DF 58 $f26))",
+                      "(set (mem:DF (plus:SI (reg:SI 29 sp) (const_int 112))) (reg:DF 60 $f28))",
+                      "(set (mem:DF (plus:SI (reg:SI 29 sp) (const_int 120))) (reg:DF 62 $f30))",
+                      "(set (mem:SF (plus:SI (reg:SI 29 sp) (const_int 28))) (reg:SF 44 $f12))",
+                      "(parallel[ (set (reg:SF 32 $f0) (call (mem:SI (symbol_ref:SI (\"callee\"))) "
+                      "(const_int 16))) (clobber (reg:SI 31 ra)) ] )",
+                      "(set (reg:SF 34 $f2) (mem:SF (plus:SI (reg:SI 29 sp) (const_int 28))))",
+                      "(set (reg:SF 36 $f4) (plus:SF (reg:SF 32 $f0) (reg:SF 34 $f2))) "
+                      "(expr_list:REG_DEAD (reg:SF 34 $f2) "
+                      "(expr_list:REG_DEAD (reg:SF 32 $f0) (nil)))",
+                      "(set (mem:SF (reg:SI 4 a0)) (reg:SF 36 $f4))",
+                      "(set (reg:SI 31 ra) (mem:SI (plus:SI (reg:SI 29 sp) (const_int 72))))",
+                      "(set (reg:SI 29 sp) (plus:SI (reg:SI 29 sp) (const_int 128)))",
+                      "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                  },
+                  {}),
+    };
+    return cfg;
+  };
+
+  // Positive (`-O2`, `RunsSched1()`): `attach_deaths` visits `SET_SRC` right-to-left
+  // (`$f2` then `$f0`) and prepends each note, placing `$f0` before `$f2`; after
+  // spill-slot upgrade of `$f2` to `(mem:SF [sp+28])`, `$f0` precedes `mem:SF`.
+  {
+    RtlControlFlowGraph pos = make_cfg();
+    NormalizePostReloadHardRegNotes(&pos, o2_prof);
+    const std::string& add_insn = pos.rpo_blocks[0].instructions[11];
+    const size_t f0_pos = add_insn.find("REG_DEAD (reg:SF 32 $f0)");
+    const size_t mem_pos = add_insn.find("REG_DEAD (mem:SF");
+    ASSERT_NE(f0_pos, std::string::npos) << add_insn;
+    ASSERT_NE(mem_pos, std::string::npos) << add_insn;
+    EXPECT_LT(f0_pos, mem_pos) << add_insn;
+  }
+
+  // Negative (`-O1`, `!RunsSched1()`): `attach_deaths` reordering does NOT run,
+  // so the upgraded `(mem:SF [sp+28])` note remains ahead of `$f0`.
+  {
+    RtlControlFlowGraph neg = make_cfg();
+    NormalizePostReloadHardRegNotes(&neg, o1_prof);
+    const std::string& add_insn = neg.rpo_blocks[0].instructions[11];
+    const size_t f0_pos = add_insn.find("REG_DEAD (reg:SF 32 $f0)");
+    const size_t mem_pos = add_insn.find("REG_DEAD (mem:SF");
+    ASSERT_NE(f0_pos, std::string::npos) << add_insn;
+    ASSERT_NE(mem_pos, std::string::npos) << add_insn;
+    EXPECT_LT(mem_pos, f0_pos) << add_insn;
+  }
+
+  // Positive 2 (`sched.c:2978-2986` `attach_deaths_insn`): on a store
+  // `(set (mem:SF (reg:SI 4 a0)) (reg:SF 34 $f2))` where `$f2` is a spilled
+  // reload scratch and `$a0` also dies, `SET_DEST` `MEM` address death (`$a0`)
+  // precedes `SET_SRC` death (`(mem:SF [sp+28])`) under `-O2` (`RunsSched1()`).
+  {
+    RtlControlFlowGraph store_cfg = make_cfg();
+    store_cfg.rpo_blocks[0].instructions[11] =
+        "(set (mem:SF (reg:SI 4 a0)) (reg:SF 34 $f2)) "
+        "(expr_list:REG_DEAD (reg:SF 34 $f2) (expr_list:REG_DEAD (reg:SI 4 a0) (nil)))";
+    store_cfg.rpo_blocks[0].instructions[12] = "(set (reg:SI 4 a0) (const_int 0))";
+    store_cfg.rpo_blocks[0].SyncRtlInsnsFromInstructions();
+    NormalizePostReloadHardRegNotes(&store_cfg, o2_prof);
+    const std::string& st_insn = store_cfg.rpo_blocks[0].instructions[11];
+    const size_t a0_pos = st_insn.find("REG_DEAD (reg:SI 4 a0)");
+    const size_t mem_pos = st_insn.find("REG_DEAD (mem:SF");
+    ASSERT_NE(a0_pos, std::string::npos) << st_insn;
+    ASSERT_NE(mem_pos, std::string::npos) << st_insn;
+    EXPECT_LT(a0_pos, mem_pos) << st_insn;
+  }
 }
 
 }  // namespace

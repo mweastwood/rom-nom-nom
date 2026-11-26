@@ -108,13 +108,17 @@ void CollectHardRegReads(const RtlExpr& expr, bool gp64, bool fp64, MipsHardRegS
 }
 
 void ApplyCallClobbersAndUses(const RtlPatternAndNotes& call_pn, bool gp64, bool fp64,
-                              MipsHardRegSet* defs, MipsHardRegSet* uses) {
+                              MipsHardRegSet* defs, MipsHardRegSet* uses,
+                              bool include_call_arg_uses = true) {
   static constexpr int kCallClobbered[] = {
       1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 24, 25, 31, 32, 33, 34,
       35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 64, 65, 66, 67,
   };
   for (int r : kCallClobbered) {
     defs->Set(r);
+  }
+  if (!include_call_arg_uses) {
+    return;
   }
   if (call_pn.has_explicit_call_fusage) {
     for (const RtlExpr& fu : call_pn.call_fusage) {
@@ -134,7 +138,8 @@ std::vector<MipsHardRegSet> ComputeBlockHardRegLiveAfter(
     const RtlControlFlowGraph& cfg, size_t b, const std::vector<RtlPatternAndNotes>& insns,
     bool gp64, bool fp64,
     const std::optional<RtlPatternAndNotes>* epilogue_delay_override = nullptr,
-    bool compute_live_in_when_sideband_empty = false) {
+    bool compute_live_in_when_sideband_empty = false,
+    bool include_unannotated_call_arg_uses = true) {
   MipsHardRegSet cur_live;
   const auto& blk = cfg.rpo_blocks[b];
   if (blk.successors.empty()) {
@@ -199,9 +204,11 @@ std::vector<MipsHardRegSet> ComputeBlockHardRegLiveAfter(
       if (is_call_seq) {
         auto sub0 = RtlPatternAndNotes::FromSequenceSubInsn(pat.children[0]);
         if (sub0.ok() && sub0->has_explicit_call_fusage) {
-          ApplyCallClobbersAndUses(*sub0, gp64, fp64, &head_defs, &head_uses);
+          ApplyCallClobbersAndUses(*sub0, gp64, fp64, &head_defs, &head_uses,
+                                   include_unannotated_call_arg_uses);
         } else {
-          ApplyCallClobbersAndUses(insns[i], gp64, fp64, &head_defs, &head_uses);
+          ApplyCallClobbersAndUses(insns[i], gp64, fp64, &head_defs, &head_uses,
+                                   include_unannotated_call_arg_uses);
         }
       }
       MipsHardRegSet slot_defs;
@@ -225,7 +232,8 @@ std::vector<MipsHardRegSet> ComputeBlockHardRegLiveAfter(
     MipsHardRegSet uses;
     CollectHardRegDefsAndUses(pat, gp64, fp64, &defs, &uses);
     if (ExprContainsCall(pat)) {
-      ApplyCallClobbersAndUses(insns[i], gp64, fp64, &defs, &uses);
+      ApplyCallClobbersAndUses(insns[i], gp64, fp64, &defs, &uses,
+                               include_unannotated_call_arg_uses);
     }
     cur_live.AndNot(defs);
     cur_live.Or(uses);
@@ -244,6 +252,62 @@ int PickDeadCallerSavedGpr(const MipsHardRegSet& live_after, const MipsHardRegSe
     }
   }
   return -1;
+}
+
+// Per `optabs.c:2485-2525` (`emit_no_conflict_block`) and `local-alloc.c:1317-1352`
+// (`combine_regs`), when a live single-word GPR `src` later feeds an overlapping
+// `extendsidi2` (`move dl, src; sra dh, src, 31` with `dh == src || dl == src`),
+// `local-alloc` ties `src` and `(reg:DI dh)` into a single 2-word `DImode` qty
+// spanning `src`'s entire lifetime, so both `dh` and `dl` are occupied while
+// `src` is live and cannot be chosen as an unused `match_scratch` clobber.
+void MarkForwardOverlapExtendsidi2PartnerRegsForbidden(absl::Span<const RtlPatternAndNotes> insns,
+                                                       size_t start_idx,
+                                                       const MipsHardRegSet& live_after_at_start,
+                                                       MipsHardRegSet* forbidden) {
+  if (forbidden == nullptr) {
+    return;
+  }
+  MipsHardRegSet still_live = live_after_at_start;
+  for (size_t k = start_idx + 1; k < insns.size(); ++k) {
+    const RtlExpr& pat = insns[k].pattern;
+    int dl = -1;
+    int src = -1;
+    if (pat.IsSet() && IsPlainSiGpr(pat.SetDest(), &dl) && IsPlainSiGpr(pat.SetSrc(), &src) &&
+        still_live.Test(src) && (dl % 2) == 1 && IsValidGp32DiPair(dl - 1)) {
+      const int dh = dl - 1;
+      if (dh == src || dl == src) {
+        for (size_t m = k + 1; m < insns.size(); ++m) {
+          const RtlExpr& mpat = insns[m].pattern;
+          if (ExprContainsCall(mpat) || mpat.op == RtlOp::kSequence) {
+            break;
+          }
+          int m_dst = -1;
+          int m_src = -1;
+          if (mpat.IsSet() && IsPlainSiGpr(mpat.SetDest(), &m_dst) && m_dst == dh &&
+              mpat.SetSrc().op == RtlOp::kAshiftrt && mpat.SetSrc().children.size() == 2 &&
+              IsPlainSiGpr(mpat.SetSrc().children[0], &m_src) && m_src == src &&
+              mpat.SetSrc().children[1].IsConstInt() && mpat.SetSrc().children[1].int_val == 31) {
+            forbidden->Set(dh);
+            forbidden->Set(dl);
+            break;
+          }
+          MipsHardRegSet m_defs;
+          MipsHardRegSet m_uses;
+          CollectHardRegDefsAndUses(mpat, /*gp64=*/false, /*fp64=*/false, &m_defs, &m_uses);
+          if (m_defs.Test(src) || m_defs.Test(dh) || m_defs.Test(dl)) {
+            break;
+          }
+        }
+      }
+    }
+    MipsHardRegSet defs;
+    MipsHardRegSet uses;
+    CollectHardRegDefsAndUses(pat, /*gp64=*/false, /*fp64=*/false, &defs, &uses);
+    if (ExprContainsCall(pat)) {
+      ApplyCallClobbersAndUses(insns[k], /*gp64=*/false, /*fp64=*/false, &defs, &uses);
+    }
+    still_live.AndNot(defs);
+  }
 }
 
 RtlExpr MakeDiConstDouble(int64_t lo_word, int64_t hi_word) {
@@ -381,15 +445,22 @@ bool MatchMovstrLoad(const RtlExpr& pat, int* out_reg, int* out_base, int64_t* o
 bool MatchMovstrStore(const RtlExpr& pat, int* out_reg, int* out_base, int64_t* out_off,
                       int* out_width) {
   if (!pat.IsSet() || !pat.SetDest().IsMem() || pat.SetDest().flags.volatil ||
-      pat.SetDest().flags.in_struct || pat.SetDest().children.size() != 1 ||
-      !pat.SetSrc().IsReg()) {
+      pat.SetDest().flags.in_struct || pat.SetDest().children.size() != 1) {
     return false;
   }
   const RtlMachineMode mem_mode = pat.SetDest().mode;
-  if (pat.SetSrc().mode != mem_mode) {
+  const RtlExpr& src = pat.SetSrc();
+  int r = -1;
+  if (src.IsReg() && src.mode == mem_mode) {
+    r = src.RegNo();
+  } else if (src.IsSubreg() && src.mode == mem_mode && src.int_val == 0 &&
+             src.children.size() == 1 && src.children[0].IsReg() &&
+             (mem_mode == RtlMachineMode::kQi || mem_mode == RtlMachineMode::kHi) &&
+             src.children[0].mode == RtlMachineMode::kSi) {
+    r = src.children[0].RegNo();
+  } else {
     return false;
   }
-  const int r = pat.SetSrc().RegNo();
   if (r < 1 || r > 25) {
     return false;
   }
@@ -414,6 +485,11 @@ bool MatchMovstrStore(const RtlExpr& pat, int* out_reg, int* out_base, int64_t* 
 
 RtlExpr MakeMovstrsiAddr(int base_reg, int64_t base_off) {
   RtlExpr base = RtlExpr::MakeReg(RtlMachineMode::kSi, base_reg);
+  if (base_reg == 30) {
+    // Mirrors `config/mips/mips.h` (`REGISTER_NAMES`): hard frame pointer reg 30
+    // prints as `$fp` in post-reload RTL (`print-rtl.c:218`).
+    base.str_val = "$fp";
+  }
   if (base_off == 0) {
     return base;
   }
@@ -896,7 +972,23 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
                                         /*epilogue_delay_override=*/nullptr,
                                         compute_live_in_when_sideband_empty);
   };
+  // Per `mips.md` (`adddi3_internal_1`, `subdi3_internal`, `ashldi3_internal3`,
+  // `ashrdi3_internal3`, `lshrdi3_internal3`, `adddi3_internal_2`), the carry/
+  // shift temp `tmp` is a `match_scratch` already overwritten by the assembly
+  // sequence and never live into an unannotated `CALL_INSN` unless explicitly
+  // referenced in `call_fusage`.
+  auto recompute_live_after_scratch = [&]() {
+    return ComputeBlockHardRegLiveAfter(cfg, b, *insns, /*gp64=*/false, /*fp64=*/false,
+                                        /*epilogue_delay_override=*/nullptr,
+                                        compute_live_in_when_sideband_empty,
+                                        /*include_unannotated_call_arg_uses=*/false);
+  };
   std::vector<MipsHardRegSet> live_after = recompute_live_after();
+  std::vector<MipsHardRegSet> live_after_scratch = recompute_live_after_scratch();
+  auto refresh_liveness = [&]() {
+    live_after = recompute_live_after();
+    live_after_scratch = recompute_live_after_scratch();
+  };
 
   for (size_t i = 0; i < insns->size(); ++i) {
     // 1. Widening 32x32->64 multiply (`mulsidi3_internal` / `umulsidi3_internal`),
@@ -951,6 +1043,7 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
                 mark_newly_folded_sentinel);
             insns->erase(insns->begin() + static_cast<ptrdiff_t>(j + 1));
             live_after = recompute_live_after();
+            live_after_scratch = recompute_live_after_scratch();
             changed = true;
             break;
           }
@@ -997,7 +1090,8 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
         }
         if (IsValidGp32DiPair(d_hi) && d_lo == d_hi + 1 && d_hi2 == d_hi && cmp_lo == d_lo &&
             sum_matches && a_hi != -1 && IsValidGp32DiPair(a_hi) && IsValidGp32DiPair(b_hi) &&
-            carry_rhs == b_hi + 1 && tmp != d_hi && tmp != d_lo && !live_after[i + 3].Test(tmp)) {
+            carry_rhs == b_hi + 1 && tmp != d_hi && tmp != d_lo &&
+            !live_after_scratch[i + 3].Test(tmp)) {
           const RtlFlags dst_flags = p3.SetDest().flags;
           (*insns)[i] = MakeFoldedInsn(
               RtlExpr::MakeParallel({
@@ -1011,7 +1105,7 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
               mark_newly_folded_sentinel);
           insns->erase(insns->begin() + static_cast<ptrdiff_t>(i + 1),
                        insns->begin() + static_cast<ptrdiff_t>(i + 4));
-          live_after = recompute_live_after();
+          refresh_liveness();
           changed = true;
           continue;
         }
@@ -1033,7 +1127,7 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
           IsPlainSiGpr(p3.SetSrc().children[1], &sum_rhs) && IsValidGp32DiPair(d_hi) &&
           d_lo == d_hi + 1 && x_hi == d_hi && y_lo == d_lo && x_lo == d_lo && d_hi2 == d_hi &&
           ((sum_lhs == d_hi && sum_rhs == tmp) || (sum_lhs == tmp && sum_rhs == d_hi)) &&
-          tmp != d_hi && tmp != d_lo && !live_after[i + 3].Test(tmp)) {
+          tmp != d_hi && tmp != d_lo && !live_after_scratch[i + 3].Test(tmp)) {
         const RtlFlags dst_flags = p3.SetDest().flags;
         (*insns)[i] = MakeFoldedInsn(
             RtlExpr::MakeParallel({
@@ -1046,7 +1140,7 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
             mark_newly_folded_sentinel);
         insns->erase(insns->begin() + static_cast<ptrdiff_t>(i + 1),
                      insns->begin() + static_cast<ptrdiff_t>(i + 4));
-        live_after = recompute_live_after();
+        refresh_liveness();
         changed = true;
         continue;
       }
@@ -1068,7 +1162,7 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
           d_lo == d_hi + 1 && IsValidGp32DiPair(x_hi) && x_lo == x_hi + 1 &&
           IsValidGp32DiPair(y_hi) && y_lo == y_hi + 1 && cmp_lo == x_lo && carry_rhs == y_lo &&
           d_hi2 == d_hi && sum_lhs == d_hi && sum_rhs == tmp && tmp != d_hi && tmp != d_lo &&
-          !live_after[i + 3].Test(tmp)) {
+          !live_after_scratch[i + 3].Test(tmp)) {
         const RtlFlags dst_flags = p3.SetDest().flags;
         (*insns)[i] = MakeFoldedInsn(
             RtlExpr::MakeParallel({
@@ -1081,7 +1175,7 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
             mark_newly_folded_sentinel);
         insns->erase(insns->begin() + static_cast<ptrdiff_t>(i + 1),
                      insns->begin() + static_cast<ptrdiff_t>(i + 4));
-        live_after = recompute_live_after();
+        refresh_liveness();
         changed = true;
         continue;
       }
@@ -1105,7 +1199,7 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
             p3.SetSrc().children[1].int_val == k && IsValidGp32DiPair(d_hi) && d_lo == d_hi + 1 &&
             IsValidGp32DiPair(s_hi) && s_lo == s_hi + 1 && s_lo2 == s_lo && d_hi_or == d_hi &&
             ((or_lhs == d_hi && or_rhs == tmp) || (or_lhs == tmp && or_rhs == d_hi)) &&
-            tmp != d_hi && tmp != d_lo && !live_after[i + 3].Test(tmp)) {
+            tmp != d_hi && tmp != d_lo && !live_after_scratch[i + 3].Test(tmp)) {
           const RtlFlags dst_flags = p2.SetDest().flags;
           (*insns)[i] = MakeFoldedInsn(
               RtlExpr::MakeParallel({
@@ -1118,7 +1212,7 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
               mark_newly_folded_sentinel);
           insns->erase(insns->begin() + static_cast<ptrdiff_t>(i + 1),
                        insns->begin() + static_cast<ptrdiff_t>(i + 4));
-          live_after = recompute_live_after();
+          refresh_liveness();
           changed = true;
           continue;
         }
@@ -1145,7 +1239,7 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
             p3.SetSrc().children[1].int_val == k && IsValidGp32DiPair(d_hi) && d_lo == d_hi + 1 &&
             IsValidGp32DiPair(s_hi) && s_lo == s_hi + 1 && s_hi2 == s_hi && d_lo_or == d_lo &&
             ((or_lhs == d_lo && or_rhs == tmp) || (or_lhs == tmp && or_rhs == d_lo)) &&
-            tmp != d_hi && tmp != d_lo && !live_after[i + 3].Test(tmp)) {
+            tmp != d_hi && tmp != d_lo && !live_after_scratch[i + 3].Test(tmp)) {
           const RtlFlags dst_flags = p3.SetDest().flags;
           (*insns)[i] = MakeFoldedInsn(
               RtlExpr::MakeParallel({
@@ -1158,15 +1252,16 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
               mark_newly_folded_sentinel);
           insns->erase(insns->begin() + static_cast<ptrdiff_t>(i + 1),
                        insns->begin() + static_cast<ptrdiff_t>(i + 4));
-          live_after = recompute_live_after();
+          refresh_liveness();
           changed = true;
           continue;
         }
       }
     }
 
-    // 2c. 3-insn `adddi3_internal_2` (`1 <= C <= 32767`: `addiu dL, aL, C; sltiu tmp, dL, C;
-    // addu dH, aH, tmp`).
+    // 2c. 3-insn `adddi3_internal_2` (`config/mips/mips.md:482-494`,
+    // `1 <= C <= 32767`: `addiu dL, aL, C; sltiu tmp, dL, C; addu dH, aH, tmp`).
+    // For `C == 1`, `sltiu tmp, dL, 1` is decoded as `(eq:SI dL (const_int 0))`.
     if (i + 2 < insns->size()) {
       const RtlExpr& p0 = (*insns)[i].pattern;
       const RtlExpr& p1 = (*insns)[i + 1].pattern;
@@ -1175,16 +1270,19 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
       if (p0.IsSet() && IsPlainSiGpr(p0.SetDest(), &d_lo) && p0.SetSrc().op == RtlOp::kPlus &&
           p0.SetSrc().children.size() == 2 && IsPlainSiGpr(p0.SetSrc().children[0], &a_lo) &&
           p0.SetSrc().children[1].IsConstInt() && p1.IsSet() && IsPlainSiGpr(p1.SetDest(), &tmp) &&
-          p1.SetSrc().op == RtlOp::kLtu && p1.SetSrc().children.size() == 2 &&
-          IsPlainSiGpr(p1.SetSrc().children[0], &cmp_lo) && p1.SetSrc().children[1].IsConstInt() &&
-          p2.IsSet() && IsPlainSiGpr(p2.SetDest(), &d_hi) && p2.SetSrc().op == RtlOp::kPlus &&
-          p2.SetSrc().children.size() == 2 && IsPlainSiGpr(p2.SetSrc().children[0], &a_hi) &&
+          (p1.SetSrc().op == RtlOp::kLtu || p1.SetSrc().op == RtlOp::kEq) &&
+          p1.SetSrc().children.size() == 2 && IsPlainSiGpr(p1.SetSrc().children[0], &cmp_lo) &&
+          p1.SetSrc().children[1].IsConstInt() && p2.IsSet() && IsPlainSiGpr(p2.SetDest(), &d_hi) &&
+          p2.SetSrc().op == RtlOp::kPlus && p2.SetSrc().children.size() == 2 &&
+          IsPlainSiGpr(p2.SetSrc().children[0], &a_hi) &&
           IsPlainSiGpr(p2.SetSrc().children[1], &rhs)) {
         const int64_t c_val = p0.SetSrc().children[1].int_val;
-        if (c_val > 0 && c_val < 32768 && p1.SetSrc().children[1].int_val == c_val &&
-            IsValidGp32DiPair(d_hi) && d_lo == d_hi + 1 && IsValidGp32DiPair(a_hi) &&
-            a_lo == a_hi + 1 && cmp_lo == d_lo && rhs == tmp && tmp != d_hi && tmp != d_lo &&
-            !live_after[i + 2].Test(tmp)) {
+        const bool carry_matches =
+            (p1.SetSrc().op == RtlOp::kLtu && p1.SetSrc().children[1].int_val == c_val) ||
+            (c_val == 1 && p1.SetSrc().op == RtlOp::kEq && p1.SetSrc().children[1].int_val == 0);
+        if (c_val > 0 && c_val < 32768 && carry_matches && IsValidGp32DiPair(d_hi) &&
+            d_lo == d_hi + 1 && IsValidGp32DiPair(a_hi) && a_lo == a_hi + 1 && cmp_lo == d_lo &&
+            rhs == tmp && tmp != d_hi && tmp != d_lo && !live_after_scratch[i + 2].Test(tmp)) {
           const RtlFlags dst_flags = p2.SetDest().flags;
           (*insns)[i] = MakeFoldedInsn(
               RtlExpr::MakeParallel({
@@ -1197,7 +1295,7 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
               mark_newly_folded_sentinel);
           insns->erase(insns->begin() + static_cast<ptrdiff_t>(i + 1),
                        insns->begin() + static_cast<ptrdiff_t>(i + 3));
-          live_after = recompute_live_after();
+          refresh_liveness();
           changed = true;
           continue;
         }
@@ -1206,8 +1304,8 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
 
     // 4b & 5b. 2-insn `ashldi3_internal2` (`sll dH, sL, k_lo; move dL, $0`, `1 <= k_lo <= 31`),
     // `lshrdi3_internal2` (`srl dL, sH, k_lo; move dH, $0`, `1 <= k_lo <= 31`), and
-    // `ashrdi3_internal2` (`sra dL, sH, k_lo; sra dH, sH, 31`, strictly `1 <= k_lo <= 30` so
-    // `extendsidi2` `move dL, s; sra dH, s, 31` is never touched).
+    // `ashrdi3_internal2` (`sra dL, sH, k_lo; sra dH, sH, 31`, `0 <= k_lo <= 30`;
+    // `k_lo == 0` is `sra dL, sH, 0`, distinct from `extendsidi2` `move dL, s`).
     if (i + 1 < insns->size()) {
       const RtlExpr& p0 = (*insns)[i].pattern;
       const RtlExpr& p1 = (*insns)[i + 1].pattern;
@@ -1226,6 +1324,8 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
             forbidden.Set(r1);
             forbidden.Set(s_hi);
             forbidden.Set(s0);
+            MarkForwardOverlapExtendsidi2PartnerRegsForbidden(*insns, i + 1, live_after[i + 1],
+                                                              &forbidden);
             const int scratch = PickDeadCallerSavedGpr(live_after[i + 1], forbidden);
             if (scratch >= 2) {
               const RtlFlags dst_flags = p0.SetDest().flags;
@@ -1241,6 +1341,7 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
                   mark_newly_folded_sentinel);
               insns->erase(insns->begin() + static_cast<ptrdiff_t>(i + 1));
               live_after = recompute_live_after();
+              live_after_scratch = recompute_live_after_scratch();
               changed = true;
               continue;
             }
@@ -1257,6 +1358,8 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
             forbidden.Set(r0);
             forbidden.Set(s0);
             forbidden.Set(s0 + 1);
+            MarkForwardOverlapExtendsidi2PartnerRegsForbidden(*insns, i + 1, live_after[i + 1],
+                                                              &forbidden);
             const int scratch = PickDeadCallerSavedGpr(live_after[i + 1], forbidden);
             if (scratch >= 2) {
               const RtlFlags dst_flags = p1.SetDest().flags;
@@ -1272,6 +1375,7 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
                   mark_newly_folded_sentinel);
               insns->erase(insns->begin() + static_cast<ptrdiff_t>(i + 1));
               live_after = recompute_live_after();
+              live_after_scratch = recompute_live_after_scratch();
               changed = true;
               continue;
             }
@@ -1283,14 +1387,23 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
             IsPlainSiGpr(p1.SetSrc().children[0], &s1) && p1.SetSrc().children[1].IsConstInt() &&
             p1.SetSrc().children[1].int_val == 31) {
           const int64_t k_lo = p0.SetSrc().children[1].int_val;
-          if (k_lo >= 1 && k_lo <= 30 && IsValidGp32DiPair(r1) && r0 == r1 + 1 &&
-              IsValidGp32DiPair(s0) && s1 == s0 &&
+          // `config/mips/mips.md:3983-3996, 4015-4028` (`ashrdi3_internal2` and
+          // its post-reload big-endian `define_split`): shift counts in `[32, 62]`
+          // emit `sra d_lo, s_hi, (amt & 31); sra d_hi, s_hi, 31`, so `k_lo == 0`
+          // uniquely identifies `amt == 32` (GCC never emits a 32-bit `sra r, s, 0`).
+          // Partial-word liveness (`flow.c:2529-2553`) preserves `s0 + 1` live
+          // via a single-word `(REG_DEAD (reg:SI s0))` when `s0 + 1` is still read.
+          const bool k_lo_ok = (k_lo >= 0 && k_lo <= 30);
+          if (k_lo_ok && IsValidGp32DiPair(r1) && r0 == r1 + 1 && IsValidGp32DiPair(s0) &&
+              s1 == s0 &&
               !IsNarrowSignExtendShiftTemp(*insns, i, s0, k_lo, r1, live_after[i + 1])) {
             MipsHardRegSet forbidden;
             forbidden.Set(r1);
             forbidden.Set(r0);
             forbidden.Set(s0);
             forbidden.Set(s0 + 1);
+            MarkForwardOverlapExtendsidi2PartnerRegsForbidden(*insns, i + 1, live_after[i + 1],
+                                                              &forbidden);
             const int scratch = PickDeadCallerSavedGpr(live_after[i + 1], forbidden);
             if (scratch >= 2) {
               const RtlFlags dst_flags = p1.SetDest().flags;
@@ -1306,6 +1419,7 @@ bool TryFoldGp32DiMultiInsnIdiomsInBlock(const RtlControlFlowGraph& cfg, size_t 
                   mark_newly_folded_sentinel);
               insns->erase(insns->begin() + static_cast<ptrdiff_t>(i + 1));
               live_after = recompute_live_after();
+              live_after_scratch = recompute_live_after_scratch();
               changed = true;
               continue;
             }
@@ -1653,25 +1767,81 @@ bool TryFoldGp32DiWitnessedIdioms(const RtlControlFlowGraph& cfg, int frame_size
   }
 
   // 3. Collect all even GPRs now known to hold `DImode` values, and fold contiguous
-  // 64-bit constant loads `[i] dH <- const_int hi; [i+1] dL <- const_int lo`.
+  // 64-bit constant loads into `(dH, dL = dH + 1)`, where each 32-bit half is
+  // either a 1-insn `const_int`/`ori $r, $0, C` or a 2-insn GAS-expanded
+  // `lui $r, HI; ori $r, $r, LO` (`config/mips/mips.c:1368-1402`, `mips_move_2words`).
   absl::flat_hash_set<int> di_even_regs = compare_di_pairs;
   bool dummy_any_di = false;
   CollectExistingDiEvenRegs(*blocks, &di_even_regs, &dummy_any_di);
 
+  auto parse_si_const_half = [](const std::vector<RtlPatternAndNotes>& blk_insns, size_t pos,
+                                int* out_reg, int64_t* out_val, size_t* out_len,
+                                bool* out_was_split) -> bool {
+    if (pos >= blk_insns.size()) {
+      return false;
+    }
+    const RtlExpr& p0 = blk_insns[pos].pattern;
+    int r0 = -1;
+    if (!p0.IsSet() || !IsPlainSiGpr(p0.SetDest(), &r0)) {
+      return false;
+    }
+    if (pos + 1 < blk_insns.size() && p0.SetSrc().IsConstInt()) {
+      const int64_t hi = p0.SetSrc().int_val;
+      const RtlExpr& p1 = blk_insns[pos + 1].pattern;
+      int r1 = -1;
+      if (hi != 0 && (hi & 0xffff) == 0 && p1.IsSet() && IsPlainSiGpr(p1.SetDest(), &r1) &&
+          r1 == r0 && p1.SetSrc().op == RtlOp::kIor && p1.SetSrc().mode == RtlMachineMode::kSi &&
+          p1.SetSrc().children.size() == 2 && p1.SetSrc().children[0].IsReg() &&
+          p1.SetSrc().children[0].mode == RtlMachineMode::kSi &&
+          p1.SetSrc().children[0].RegNo() == r0 && p1.SetSrc().children[1].IsConstInt() &&
+          p1.SetSrc().children[1].int_val > 0 && p1.SetSrc().children[1].int_val <= 0xffff) {
+        const uint32_t combined =
+            static_cast<uint32_t>(hi) | static_cast<uint32_t>(p1.SetSrc().children[1].int_val);
+        *out_reg = r0;
+        *out_val = static_cast<int32_t>(combined);
+        *out_len = 2;
+        *out_was_split = true;
+        return true;
+      }
+    }
+    if (p0.SetSrc().IsConstInt()) {
+      *out_reg = r0;
+      *out_val = p0.SetSrc().int_val;
+      *out_len = 1;
+      *out_was_split = false;
+      return true;
+    }
+    if (p0.SetSrc().op == RtlOp::kIor && p0.SetSrc().mode == RtlMachineMode::kSi &&
+        p0.SetSrc().children.size() == 2 && p0.SetSrc().children[0].IsReg() &&
+        !p0.SetSrc().children[0].IsArgPointerReg() && p0.SetSrc().children[0].RegNo() == 0 &&
+        p0.SetSrc().children[1].IsConstInt() && p0.SetSrc().children[1].int_val >= 0 &&
+        p0.SetSrc().children[1].int_val <= 0xffff) {
+      *out_reg = r0;
+      *out_val = p0.SetSrc().children[1].int_val;
+      *out_len = 1;
+      *out_was_split = false;
+      return true;
+    }
+    return false;
+  };
+
   for (size_t b = 0; b < blocks->size(); ++b) {
     auto& insns = (*blocks)[b];
     for (size_t i = 0; i + 1 < insns.size(); ++i) {
-      const RtlExpr& p0 = insns[i].pattern;
-      const RtlExpr& p1 = insns[i + 1].pattern;
       int d_hi = -1, d_lo = -1;
-      if (p0.IsSet() && p1.IsSet() && IsPlainSiGpr(p0.SetDest(), &d_hi) &&
-          IsPlainSiGpr(p1.SetDest(), &d_lo) && IsValidGp32DiPair(d_hi) && d_lo == d_hi + 1 &&
-          p0.SetSrc().IsConstInt() && p1.SetSrc().IsConstInt() && di_even_regs.contains(d_hi)) {
+      int64_t hi_val = 0, lo_val = 0;
+      size_t len0 = 0, len1 = 0;
+      bool split0 = false, split1 = false;
+      if (parse_si_const_half(insns, i, &d_hi, &hi_val, &len0, &split0) &&
+          IsValidGp32DiPair(d_hi) && di_even_regs.contains(d_hi) &&
+          parse_si_const_half(insns, i + len0, &d_lo, &lo_val, &len1, &split1) &&
+          d_lo == d_hi + 1) {
+        const size_t total_len = len0 + len1;
         // Guard against folding two unrelated 32-bit constants in `$2`/`$3` if the
         // very next instruction reads `d_hi` or `d_lo` in `SImode` outside a 64-bit compare.
-        if (i + 2 < insns.size() && !compare_di_pairs.contains(d_hi)) {
+        if (i + total_len < insns.size() && !compare_di_pairs.contains(d_hi)) {
           bool next_reads_si = false;
-          insns[i + 2].pattern.Visit([&](const RtlExpr& n) {
+          insns[i + total_len].pattern.Visit([&](const RtlExpr& n) {
             if (n.IsReg() && n.mode == RtlMachineMode::kSi &&
                 (n.RegNo() == d_hi || n.RegNo() == d_lo)) {
               next_reads_si = true;
@@ -1681,16 +1851,19 @@ bool TryFoldGp32DiWitnessedIdioms(const RtlControlFlowGraph& cfg, int frame_size
             continue;
           }
         }
-        const int64_t hi_val = p0.SetSrc().int_val;
-        const int64_t lo_val = p1.SetSrc().int_val;
-        const RtlFlags dst_flags = p0.SetDest().flags;
-        RtlExpr src_const = (hi_val == 0 && lo_val == 0) ? RtlExpr::MakeConstInt(0)
-                                                         : MakeDiConstDouble(lo_val, hi_val);
+        const RtlFlags dst_flags = insns[i].pattern.SetDest().flags;
+        RtlExpr src_const = (hi_val == 0 && lo_val == 0)
+                                ? RtlExpr::MakeConstInt(0)
+                                : (((split0 || split1) &&
+                                    ((hi_val == 0 && lo_val > 0) || (hi_val == -1 && lo_val < 0)))
+                                       ? RtlExpr::MakeConstInt(lo_val)
+                                       : MakeDiConstDouble(lo_val, hi_val));
         insns[i] =
             MakeFoldedInsn(RtlExpr::MakeSet(RtlExpr::MakeReg(RtlMachineMode::kDi, d_hi, dst_flags),
                                             std::move(src_const)),
                            options.mark_newly_folded_sentinel);
-        insns.erase(insns.begin() + static_cast<ptrdiff_t>(i + 1));
+        insns.erase(insns.begin() + static_cast<ptrdiff_t>(i + 1),
+                    insns.begin() + static_cast<ptrdiff_t>(i + total_len));
         changed = true;
       }
     }
@@ -2245,7 +2418,13 @@ bool TryFoldGp32DfInGprPairMoves(const RtlControlFlowGraph& cfg, int frame_size,
             const bool is_prologue_callee_save =
                 b == 0 && base_reg == 29 && IsSavedGprOrRaRegno(s0) && off0 >= 0 &&
                 off0 + 4 < frame_size && !defined_so_far.Test(s0) && !defined_so_far.Test(s1);
-            if (!is_prologue_callee_save) {
+            // `mips.c:4998-5020` (`mips_expand_prologue`): variadic GP arg home
+            // stores (`$a0..$a3` -> `0..12($sp)`) are emitted as separate `SImode`
+            // stores before `$sp` adjustment, never as a folded `DFmode` store.
+            const bool is_prologue_variadic_arg_home =
+                b == 0 && base_reg == 29 && (s0 == 4 || s0 == 6) && off0 == (s0 - 4) * 4 &&
+                !defined_so_far.Test(29) && !defined_so_far.Test(s0) && !defined_so_far.Test(s1);
+            if (!is_prologue_callee_save && !is_prologue_variadic_arg_home) {
               insns[i] = MakeFoldedInsn(
                   RtlExpr::MakeSet(RtlExpr::MakeMem(RtlMachineMode::kDf, p0.SetDest().children[0]),
                                    RtlExpr::MakeReg(RtlMachineMode::kDf, s0)),
@@ -2718,19 +2897,53 @@ void RestoreNoConflictExtendClobbersInBlock(const RtlControlFlowGraph& cfg, size
           already_has_clobber = true;
           break;
         }
+        // `sched.c:2201-2234` + `config/mips/mips.h` (`CALL_USED_REGISTERS`):
+        // `sched2` can hoist a callee-saved `(clobber (reg:DI s_even))` (`$s0-$s7`,
+        // even pairs `16, 18, 20, 22`) across a `CALL_INSN` because calls do not
+        // clobber callee-saved registers.
+        const bool call_clobbers_pair = insns[rev - 1].is_call && (dh < 16 || dh > 22);
         if (insns[rev - 1].write_regs.Test(dh) || insns[rev - 1].write_regs.Test(dl) ||
-            insns[rev - 1].is_call) {
+            insns[rev - 1].read_regs.Test(dh) || insns[rev - 1].read_regs.Test(dl) ||
+            call_clobbers_pair) {
           break;
         }
       }
       if (!already_has_clobber) {
         size_t insert_pos = lo_pos;
+        const bool is_zero_extend_hi_after_lo = runs_sched2 && j > i &&
+                                                insns[j].parsed.pattern.IsSet() &&
+                                                insns[j].parsed.pattern.SetSrc().IsConstInt() &&
+                                                insns[j].parsed.pattern.SetSrc().int_val == 0;
         for (size_t rev = lo_pos; rev > 0; --rev) {
           const size_t cand = rev - 1;
           const RtlExpr& cpat = insns[cand].parsed.pattern;
           if (insns[cand].is_call || insns[cand].is_jump_or_ret || insns[cand].read_regs.Test(dh) ||
               insns[cand].read_regs.Test(dl) || insns[cand].write_regs.Test(dh) ||
-              insns[cand].write_regs.Test(dl) || insns[cand].write_regs.Test(src_reg)) {
+              insns[cand].write_regs.Test(dl)) {
+            break;
+          }
+          if (insns[cand].write_regs.Test(src_reg)) {
+            // Per `optabs.c:2485-2525` (`emit_no_conflict_block`) and
+            // `sched.c:2362-2407`: when a zero-extend `lo` consumer immediately
+            // follows an ALU producer of `src_reg` that stalls on an earlier
+            // load within 2 insns, `sched2` schedules the zero-cost
+            // `(clobber (reg:DI dh))` into the load-delay slot ahead of that
+            // producer.
+            if (is_zero_extend_hi_after_lo && cand == lo_pos - 1 && cand > 0) {
+              bool stalled_on_recent_load = false;
+              const size_t lo_win = (cand >= 2) ? (cand - 2) : 0;
+              for (size_t m = lo_win; m < cand; ++m) {
+                const RtlExpr& mpat = insns[m].parsed.pattern;
+                if (mpat.IsSet() && mpat.SetDest().IsHardReg() && mpat.SetSrc().IsMem() &&
+                    insns[cand].read_regs.Test(mpat.SetDest().RegNo())) {
+                  stalled_on_recent_load = true;
+                  break;
+                }
+              }
+              if (stalled_on_recent_load) {
+                insert_pos = cand;
+              }
+            }
             break;
           }
           if (IsNoConflictPrologueSaveStore(cpat)) {
@@ -2756,12 +2969,114 @@ void RestoreNoConflictExtendClobbersInBlock(const RtlControlFlowGraph& cfg, size
                 }
               }
             }
-            if (fed_to_di_consumer) {
+            // Per `optabs.c:2485-2525` and `sched.c:2362-2407`: when `src_reg`
+            // overlaps `dh/dl` and was defined earlier in the block (e.g., an
+            // entry-parameter copy into a scratch GPR) with only prologue saves
+            // and independent memory loads between that def and `lo_pos`,
+            // `sched2` hoists the loads past `lo/hi` while leaving the
+            // zero-cost `(clobber (reg:DI dh))` right after `src_reg`'s def.
+            bool overlap_src_def_precedes_loads = false;
+            if (!fed_to_di_consumer && runs_sched2 && (dh == src_reg || dl == src_reg)) {
+              for (size_t prev_k = cand; prev_k > 0; --prev_k) {
+                const auto& pk = insns[prev_k - 1];
+                if (pk.is_call || pk.is_jump_or_ret) {
+                  break;
+                }
+                if (pk.write_regs.Test(src_reg)) {
+                  if (pk.parsed.pattern.IsSet() && pk.parsed.pattern.SetDest().IsHardReg() &&
+                      pk.parsed.pattern.SetDest().RegNo() == src_reg &&
+                      pk.parsed.pattern.SetDest().mode != RtlMachineMode::kDi) {
+                    overlap_src_def_precedes_loads = true;
+                  }
+                  break;
+                }
+                if (pk.read_regs.Test(dh) || pk.read_regs.Test(dl) || pk.write_regs.Test(dh) ||
+                    pk.write_regs.Test(dl)) {
+                  break;
+                }
+                const RtlExpr& pkpat = pk.parsed.pattern;
+                const bool is_save_or_load =
+                    IsNoConflictPrologueSaveStore(pkpat) ||
+                    (pkpat.IsSet() && pkpat.SetDest().IsHardReg() && pkpat.SetSrc().IsMem() &&
+                     !pkpat.SetSrc().flags.volatil);
+                if (!is_save_or_load) {
+                  break;
+                }
+              }
+            }
+            if (fed_to_di_consumer || overlap_src_def_precedes_loads) {
               insert_pos = cand;
               continue;
             }
           }
           break;
+        }
+        // Per `optabs.c:2485-2525` (`emit_no_conflict_block`) and
+        // `sched.c:1920-2020, 2362-2407`: `sched1` may hoist the zero-cost
+        // `(clobber (reg:DI dh))` of a callee-saved `DImode` pair across a
+        // `CALL_INSN` (which does not clobber callee-saved GPRs), and `sched2`
+        // may then schedule that `clobber` into a 1-cycle unfilled `xfer`
+        // (`const_double -> FP arith`) stall slot accompanied by an independent
+        // 1-cycle register move/ALU op (either `[gpr_move, const_double, fp_op]`
+        // or `[const_double, gpr_move, fp_op]`).
+        if (runs_sched2 && insert_pos == lo_pos && dh >= 16 && dh <= 22 && (dh % 2) == 0) {
+          bool crossed_call = false;
+          for (size_t rev = lo_pos; rev > 0; --rev) {
+            const size_t u = rev - 1;
+            if (insns[u].is_jump_or_ret || insns[u].read_regs.Test(dh) ||
+                insns[u].read_regs.Test(dl) || insns[u].write_regs.Test(dh) ||
+                insns[u].write_regs.Test(dl)) {
+              break;
+            }
+            if (insns[u].is_call) {
+              if (crossed_call) {
+                break;
+              }
+              crossed_call = true;
+              continue;
+            }
+            if (!crossed_call || u == 0 || u + 1 >= lo_pos) {
+              continue;
+            }
+            auto is_fp_const_load = [](const RtlExpr& p) {
+              return p.IsSet() && p.SetDest().IsHardReg() && p.SetDest().RegNo() >= 32 &&
+                     p.SetDest().RegNo() < 64 && p.SetSrc().op == RtlOp::kConstDouble;
+            };
+            auto is_fp_arith_using = [&](size_t idx, int fp_reg) {
+              const RtlExpr& p = insns[idx].parsed.pattern;
+              return p.IsSet() && p.SetDest().IsHardReg() && p.SetDest().RegNo() >= 32 &&
+                     p.SetDest().RegNo() < 64 &&
+                     (p.SetSrc().op == RtlOp::kPlus || p.SetSrc().op == RtlOp::kMinus ||
+                      p.SetSrc().op == RtlOp::kMult || p.SetSrc().op == RtlOp::kDiv) &&
+                     insns[idx].read_regs.Test(fp_reg);
+            };
+            auto is_gpr_reg_move = [&](size_t idx) {
+              const RtlExpr& p = insns[idx].parsed.pattern;
+              return !insns[idx].is_call && !insns[idx].is_jump_or_ret && p.IsSet() &&
+                     p.SetDest().IsHardReg() && p.SetDest().RegNo() >= 1 &&
+                     p.SetDest().RegNo() < 32 && p.SetSrc().IsHardReg() &&
+                     p.SetSrc().RegNo() >= 1 && p.SetSrc().RegNo() < 32;
+            };
+            auto gpr_indep_of = [&](size_t gpr_idx, size_t a_idx, size_t b_idx) {
+              const int gd = insns[gpr_idx].parsed.pattern.SetDest().RegNo();
+              const int gs = insns[gpr_idx].parsed.pattern.SetSrc().RegNo();
+              return !insns[a_idx].read_regs.Test(gd) && !insns[a_idx].write_regs.Test(gd) &&
+                     !insns[a_idx].write_regs.Test(gs) && !insns[b_idx].read_regs.Test(gd) &&
+                     !insns[b_idx].write_regs.Test(gd) && !insns[b_idx].write_regs.Test(gs);
+            };
+            const RtlExpr& p_u = insns[u].parsed.pattern;
+            const RtlExpr& p_prev = insns[u - 1].parsed.pattern;
+            const bool order_move_then_xfer =
+                is_fp_const_load(p_u) && is_fp_arith_using(u + 1, p_u.SetDest().RegNo()) &&
+                is_gpr_reg_move(u - 1) && gpr_indep_of(u - 1, u, u + 1);
+            const bool order_xfer_then_move = is_fp_const_load(p_prev) &&
+                                              is_fp_arith_using(u + 1, p_prev.SetDest().RegNo()) &&
+                                              is_gpr_reg_move(u) && gpr_indep_of(u, u - 1, u + 1);
+            if (order_move_then_xfer || order_xfer_then_move) {
+              insert_pos = u + 1;
+              break;
+            }
+          }
         }
         matched_dh = dh;
         matched_hi_idx = j;
@@ -2772,6 +3087,7 @@ void RestoreNoConflictExtendClobbersInBlock(const RtlControlFlowGraph& cfg, size
     }
     if (matched_dh != -1) {
       bool inter_src_read = false;
+      bool dst_overlaps_src_with_prior_read = false;
       if (matched_dh >= 2 && matched_dh <= 24 && matched_di_consumer_idx.has_value()) {
         const size_t first_ext = std::min(i, matched_hi_idx);
         const size_t second_ext = std::max(i, matched_hi_idx);
@@ -2781,25 +3097,222 @@ void RestoreNoConflictExtendClobbersInBlock(const RtlControlFlowGraph& cfg, size
             break;
           }
         }
+        // `optabs.c:2485-2525` (`emit_no_conflict_block`) + `final.c:1928-1946, 2095-2107`
+        // (`alter_subreg`): when `local-alloc.c:1317-1352` ties a `DImode` no-conflict
+        // sign-extend destination onto its dying `SImode` input (`matched_dh == src_reg`
+        // or `matched_dh + 1 == src_reg`) and an earlier insn reads or defines `src_reg`
+        // as a non-call single-word register (e.g., an entry-parameter copy into a
+        // scratch GPR), restore the `alter_subreg`-collapsed `(subreg:SI (reg:DI matched_dh)
+        // 1/0)` destinations, `REG_NO_CONFLICT (reg:SI src_reg)` notes, and the erased
+        // `REG_DEAD (reg:SI src_reg)` note on the final word write so Stage 3..5 can lift
+        // both `src_reg` and `matched_dh` into separate `REG_NO_CONFLICT`-tied pseudos
+        // (`sched.c:2872-2906`).
+        if ((matched_dh == src_reg || matched_dh + 1 == src_reg) && matched_insert_pos > 0) {
+          for (size_t k = 0; k < matched_insert_pos; ++k) {
+            if (insns[k].read_regs.Test(src_reg)) {
+              dst_overlaps_src_with_prior_read = true;
+              break;
+            }
+          }
+          const bool is_overlap_sign_extend_hi_after_lo =
+              matched_hi_idx > i && insns[i].parsed.pattern.IsSet() &&
+              insns[i].parsed.pattern.SetSrc().IsHardReg() &&
+              insns[i].parsed.pattern.SetSrc().RegNo() == src_reg &&
+              insns[matched_hi_idx].parsed.pattern.IsSet() &&
+              insns[matched_hi_idx].parsed.pattern.SetSrc().op == RtlOp::kAshiftrt &&
+              insns[matched_hi_idx].parsed.pattern.SetSrc().children.size() == 2 &&
+              insns[matched_hi_idx].parsed.pattern.SetSrc().children[1].IsConstInt() &&
+              insns[matched_hi_idx].parsed.pattern.SetSrc().children[1].int_val == 31;
+          if (!dst_overlaps_src_with_prior_read && is_overlap_sign_extend_hi_after_lo) {
+            // Per `local-alloc.c:1317-1352, 1774, 1807-1838` (`combine_regs`),
+            // tying a dying `SImode` input pseudo `r1` (`src_reg`) onto a
+            // `DImode` `REG_NO_CONFLICT` destination `r0` (`matched_dh`) into
+            // one `DImode` qty requires `r0` to be a block-local pseudo
+            // (`r0 >= FIRST_PSEUDO_REGISTER && reg_qty[r0] >= 0`). When
+            // `matched_dh` stays live to a hard return `(use (reg/i:DI 2 v0))`
+            // or a successor block, `r0` remains a hard register or global
+            // pseudo, so `combine_regs` cannot merge `r1` into `r0` and a prior
+            // hard-reg copy into `src_reg` would give `r1` a higher-priority
+            // `qty_phys_copy_sugg` that overrides `matched_dh`.
+            bool di_live_past_block_or_return = false;
+            bool di_killed_in_block = false;
+            for (size_t m = matched_hi_idx + 1; m < insns.size(); ++m) {
+              const RtlExpr& p = insns[m].parsed.pattern;
+              if (p.op == RtlOp::kUse && !p.children.empty() && p.children[0].IsHardReg()) {
+                const int ur = p.children[0].RegNo();
+                if (ur == matched_dh || ur == matched_dh + 1) {
+                  di_live_past_block_or_return = true;
+                  break;
+                }
+              }
+              if (insns[m].is_call && matched_dh < 16) {
+                di_killed_in_block = true;
+                break;
+              }
+              if (!insns[m].read_regs.Test(matched_dh) &&
+                  !insns[m].read_regs.Test(matched_dh + 1) &&
+                  insns[m].write_regs.Test(matched_dh) &&
+                  insns[m].write_regs.Test(matched_dh + 1)) {
+                di_killed_in_block = true;
+                break;
+              }
+              if (!insns[m].write_regs.Test(matched_dh) &&
+                  !insns[m].write_regs.Test(matched_dh + 1)) {
+                for (const RtlRegNote& rn : insns[m].parsed.reg_notes) {
+                  if (rn.kind == RtlMachineMode::kRegDead && rn.datum.IsHardReg() &&
+                      rn.datum.mode == RtlMachineMode::kDi && rn.datum.RegNo() == matched_dh) {
+                    di_killed_in_block = true;
+                    break;
+                  }
+                }
+                if (di_killed_in_block) {
+                  break;
+                }
+              }
+            }
+            if (!di_live_past_block_or_return && !di_killed_in_block) {
+              if (blk->successors.empty()) {
+                if (matched_dh == 2) {
+                  di_live_past_block_or_return = true;
+                }
+              } else {
+                const std::vector<std::vector<int>> live_in = ComputePostReloadHardRegLiveIn(cfg);
+                for (size_t succ : blk->successors) {
+                  if (succ >= live_in.size()) {
+                    continue;
+                  }
+                  for (int r : live_in[succ]) {
+                    if (r == matched_dh || r == matched_dh + 1) {
+                      di_live_past_block_or_return = true;
+                      break;
+                    }
+                  }
+                  if (di_live_past_block_or_return) {
+                    break;
+                  }
+                }
+              }
+            }
+            if (!di_live_past_block_or_return) {
+              for (size_t k = matched_insert_pos; k > 0; --k) {
+                const auto& prev = insns[k - 1];
+                if (!prev.write_regs.Test(src_reg)) {
+                  continue;
+                }
+                if (!prev.is_call && prev.parsed.pattern.IsSet() &&
+                    prev.parsed.pattern.SetDest().IsHardReg() &&
+                    prev.parsed.pattern.SetDest().RegNo() == src_reg &&
+                    prev.parsed.pattern.SetDest().mode != RtlMachineMode::kDi) {
+                  dst_overlaps_src_with_prior_read = true;
+                }
+                break;
+              }
+            }
+          }
+        }
       }
-      if ((matched_dh == 64 || inter_src_read) &&
+      // Per `optabs.c:2485-2525` (`emit_no_conflict_block`), `final.c:1928-1946`
+      // (`alter_subreg`), and `sched.c:1650-1792` (`sched_analyze_1`), when
+      // `dh/dl` is disjoint from `src_reg`, a post-`lo` zero-extend high-word
+      // clear `(set (subreg:SI (reg:DI dh) 0) (const_int 0))` carries a
+      // `REG_DEP_OUTPUT` on `(set (subreg:SI (reg:DI dh) 1) src)` that prevents
+      // `sched2` from hoisting the `hi = 0` clear ahead of `lo`'s in-block
+      // producer of `src_reg`. (When `matched_dh == src_reg`, `hi` already has
+      // a hard-reg `REG_DEP_ANTI` on `lo` reading `src_reg`, and wrapping
+      // without `REG_NO_CONFLICT` would prevent `local-alloc.c:combine_regs`
+      // from tying `dh` onto `src_reg`.)
+      bool src_defined_before_lo = false;
+      for (size_t k = 0; k < i; ++k) {
+        if (insns[k].write_regs.Test(src_reg)) {
+          src_defined_before_lo = true;
+          break;
+        }
+      }
+      const bool is_zero_extend_hi_after_lo =
+          runs_sched2 && src_defined_before_lo && matched_dh != src_reg &&
+          matched_dh + 1 != src_reg && matched_hi_idx > i &&
+          insns[matched_hi_idx].parsed.pattern.IsSet() &&
+          insns[matched_hi_idx].parsed.pattern.SetSrc().IsConstInt() &&
+          insns[matched_hi_idx].parsed.pattern.SetSrc().int_val == 0;
+      // `optabs.c:2485-2510` (`emit_no_conflict_block`), `final.c:1941-1953,
+      // 2105-2133` (`alter_subreg`), and `local-alloc.c:700, 1004-1019`
+      // (`optimize_reg_copy_1`): when a disjoint `extendsidi2` (`lo = src;
+      // hi = ashiftrt(src, 31)`) is left as bare `(reg:SI dh+1)/(reg:SI dh)`,
+      // `optimize_reg_copy_1` mistakes `lo = src` for a plain `REG` copy and
+      // rewrites `hi`'s source from `src` to `dh+1`. Restoring the original
+      // `(subreg:SI (reg:DI dh) 1/0)` destinations matches GCC's pre-`final`
+      // `extendsidi2` representation.
+      const bool is_sign_extend_hi_after_lo =
+          src_defined_before_lo && matched_dh != src_reg && matched_dh + 1 != src_reg &&
+          matched_hi_idx > i && insns[i].parsed.pattern.IsSet() &&
+          insns[i].parsed.pattern.SetSrc().IsHardReg() &&
+          insns[i].parsed.pattern.SetSrc().RegNo() == src_reg &&
+          insns[matched_hi_idx].parsed.pattern.IsSet() &&
+          insns[matched_hi_idx].parsed.pattern.SetSrc().op == RtlOp::kAshiftrt &&
+          insns[matched_hi_idx].parsed.pattern.SetSrc().children.size() == 2 &&
+          insns[matched_hi_idx].parsed.pattern.SetSrc().children[1].IsConstInt() &&
+          insns[matched_hi_idx].parsed.pattern.SetSrc().children[1].int_val == 31;
+      const bool wrap_di_subregs = inter_src_read || dst_overlaps_src_with_prior_read ||
+                                   is_zero_extend_hi_after_lo || is_sign_extend_hi_after_lo;
+      auto append_note_if_missing = [&](size_t idx, RtlMachineMode kind, int regno) {
+        RtlPatternAndNotes& pn = insns[idx].parsed;
+        const bool exists =
+            std::any_of(pn.reg_notes.begin(), pn.reg_notes.end(), [&](const RtlRegNote& n) {
+              return n.kind == kind && n.datum.IsReg() && n.datum.RegNo() == regno;
+            });
+        if (!exists) {
+          pn.reg_notes.push_back(RtlRegNote{.kind = kind,
+                                            .list_op = RtlOp::kExprList,
+                                            .datum = RtlExpr::MakeReg(RtlMachineMode::kSi, regno)});
+        }
+      };
+      if ((matched_dh == 64 || wrap_di_subregs) &&
           insns[i].parsed.pattern.children[0].op == RtlOp::kReg) {
         insns[i].parsed.pattern.children[0] = RtlExpr::MakeSubreg(
             RtlMachineMode::kSi, RtlExpr::MakeReg(RtlMachineMode::kDi, matched_dh), 1);
+        if (dst_overlaps_src_with_prior_read) {
+          append_note_if_missing(i, RtlMachineMode::kRegNoConflict, src_reg);
+        }
         std::string updated = insns[i].parsed.ToGccPrintRtlString();
         if (blk->rtl_insns.size() == blk->instructions.size()) {
           blk->rtl_insns[i].canonical_pattern = updated;
         }
         blk->instructions[i] = std::move(updated);
       }
-      if (inter_src_read && insns[matched_hi_idx].parsed.pattern.children[0].op == RtlOp::kReg) {
+      if (wrap_di_subregs && insns[matched_hi_idx].parsed.pattern.children[0].op == RtlOp::kReg) {
         insns[matched_hi_idx].parsed.pattern.children[0] = RtlExpr::MakeSubreg(
             RtlMachineMode::kSi, RtlExpr::MakeReg(RtlMachineMode::kDi, matched_dh), 0);
+        if (dst_overlaps_src_with_prior_read) {
+          append_note_if_missing(matched_hi_idx, RtlMachineMode::kRegNoConflict, src_reg);
+        }
         std::string updated = insns[matched_hi_idx].parsed.ToGccPrintRtlString();
         if (blk->rtl_insns.size() == blk->instructions.size()) {
           blk->rtl_insns[matched_hi_idx].canonical_pattern = updated;
         }
         blk->instructions[matched_hi_idx] = std::move(updated);
+      }
+      if (dst_overlaps_src_with_prior_read) {
+        const size_t last_ext = std::max(i, matched_hi_idx);
+        // `sched.c:2779-3018` (`attach_deaths_insn`): `sched1` prepends
+        // `REG_DEAD` onto `REG_NOTES`, placing `REG_DEAD` ahead of `REG_NO_CONFLICT`.
+        RtlPatternAndNotes& last_pn = insns[last_ext].parsed;
+        const bool has_dead = std::any_of(last_pn.reg_notes.begin(), last_pn.reg_notes.end(),
+                                          [&](const RtlRegNote& n) {
+                                            return n.kind == RtlMachineMode::kRegDead &&
+                                                   n.datum.IsReg() && n.datum.RegNo() == src_reg;
+                                          });
+        if (!has_dead) {
+          last_pn.reg_notes.insert(
+              last_pn.reg_notes.begin(),
+              RtlRegNote{.kind = RtlMachineMode::kRegDead,
+                         .list_op = RtlOp::kExprList,
+                         .datum = RtlExpr::MakeReg(RtlMachineMode::kSi, src_reg)});
+        }
+        std::string updated = last_pn.ToGccPrintRtlString();
+        if (blk->rtl_insns.size() == blk->instructions.size()) {
+          blk->rtl_insns[last_ext].canonical_pattern = updated;
+        }
+        blk->instructions[last_ext] = std::move(updated);
       }
       if (matched_di_consumer_idx.has_value()) {
         RtlPatternAndNotes& cons_pn = insns[*matched_di_consumer_idx].parsed;
@@ -2911,6 +3424,329 @@ void RestoreNoConflictExtendClobbersInBlock(const RtlControlFlowGraph& cfg, size
   }
 }
 
+// Per `optabs.c:expand_binop` (`muldi3`), `final.c:1928-1946` (`alter_subreg`),
+// and `sched.c:sched_analyze_2` default child recursion (`sched.c:2002-2005`)
+// recursing into `case REG:` (`sched.c:1854-1874`): 32-bit MIPS expands `DImode`
+// multiplication into `umulsidi3_internal(a_lo, b_lo)` plus two cross-product
+// `mulsi3_internal(a_lo, b_hi)` and `mulsi3_internal(b_lo, a_hi)` whose
+// operands are `(subreg:SI (reg:DI A) 0/1)` and `(subreg:SI (reg:DI B) 0/1)`.
+// `sched_analyze_2` marks ALL words of the inner `DImode` register in
+// `reg_last_uses` for each `SUBREG` read, creating `REG_DEP_ANTI` edges from
+// subsequent clobbers of the high word (`a_hi`/`b_hi`) to the low-word cross
+// multiply. Restore those `alter_subreg`-collapsed `SUBREG` operands.
+void RestoreMuldi3SubregOperandsInBlock(bool gp64, bool fp64, bool runs_sched2,
+                                        RtlBasicBlock* blk) {
+  if (gp64 || blk->instructions.size() < 3) {
+    return;
+  }
+  const size_t n = blk->instructions.size();
+  std::vector<NoConflictBlockInsn> insns;
+  insns.reserve(n);
+  for (size_t i = 0; i < n; ++i) {
+    auto parsed = ParsePatternAndNotes(blk->instructions[i]);
+    if (!parsed.ok()) {
+      return;
+    }
+    std::optional<RtlInsn> orig;
+    if (blk->rtl_insns.size() == n) {
+      orig = blk->rtl_insns[i];
+    }
+    insns.push_back(BuildNoConflictBlockInsn(std::move(*parsed), gp64, fp64, orig));
+  }
+
+  auto extract_si_hard_word = [](const RtlExpr& e) -> int {
+    if (e.IsHardReg() && e.mode == RtlMachineMode::kSi) {
+      return e.RegNo();
+    }
+    if (e.op == RtlOp::kSubreg && e.mode == RtlMachineMode::kSi && e.children.size() == 1 &&
+        e.children[0].IsHardReg() && e.children[0].mode == RtlMachineMode::kDi &&
+        (e.int_val == 0 || e.int_val == 1)) {
+      return e.children[0].RegNo() + static_cast<int>(e.int_val);
+    }
+    return -1;
+  };
+
+  auto match_umulsidi3 = [&](const RtlExpr& pat, int* r0, int* r1) -> bool {
+    if (pat.op != RtlOp::kParallel || pat.children.empty() || !pat.children[0].IsSet()) {
+      return false;
+    }
+    const RtlExpr& s = pat.children[0];
+    if (!s.SetDest().IsHardReg() || s.SetDest().mode != RtlMachineMode::kDi ||
+        s.SetDest().RegNo() != 64 || s.SetSrc().op != RtlOp::kMult ||
+        s.SetSrc().mode != RtlMachineMode::kDi || s.SetSrc().children.size() != 2) {
+      return false;
+    }
+    const RtlExpr& c0 = s.SetSrc().children[0];
+    const RtlExpr& c1 = s.SetSrc().children[1];
+    if (c0.op != RtlOp::kZeroExtend || c0.children.size() != 1 || c1.op != RtlOp::kZeroExtend ||
+        c1.children.size() != 1) {
+      return false;
+    }
+    const int w0 = extract_si_hard_word(c0.children[0]);
+    const int w1 = extract_si_hard_word(c1.children[0]);
+    if (w0 < 0 || w1 < 0) {
+      return false;
+    }
+    *r0 = w0;
+    *r1 = w1;
+    return true;
+  };
+
+  auto match_mulsi3 = [&](const RtlExpr& pat, int* r0, int* r1) -> bool {
+    if (pat.op != RtlOp::kParallel || pat.children.empty() || !pat.children[0].IsSet()) {
+      return false;
+    }
+    const RtlExpr& s = pat.children[0];
+    if (!s.SetDest().IsHardReg() || s.SetDest().mode != RtlMachineMode::kSi ||
+        (s.SetDest().RegNo() != 65 && (s.SetDest().RegNo() < 2 || s.SetDest().RegNo() > 25)) ||
+        s.SetSrc().op != RtlOp::kMult || s.SetSrc().mode != RtlMachineMode::kSi ||
+        s.SetSrc().children.size() != 2) {
+      return false;
+    }
+    const int w0 = extract_si_hard_word(s.SetSrc().children[0]);
+    const int w1 = extract_si_hard_word(s.SetSrc().children[1]);
+    if (w0 < 0 || w1 < 0) {
+      return false;
+    }
+    *r0 = w0;
+    *r1 = w1;
+    return true;
+  };
+
+  auto is_valid_even_gpr_pair_lo = [](int lo) -> bool {
+    return lo >= 3 && lo <= 23 && (lo % 2) == 1;
+  };
+
+  bool any_changed = false;
+  for (size_t i = 0; i < n; ++i) {
+    int a_lo = -1;
+    int b_lo = -1;
+    if (!match_umulsidi3(insns[i].parsed.pattern, &a_lo, &b_lo)) {
+      continue;
+    }
+    if (!is_valid_even_gpr_pair_lo(a_lo) || !is_valid_even_gpr_pair_lo(b_lo) || a_lo == b_lo) {
+      continue;
+    }
+    const int a_hi = a_lo - 1;
+    const int b_hi = b_lo - 1;
+    std::optional<size_t> cross_ab;
+    std::optional<size_t> cross_ba;
+    for (size_t k = i + 1; k < n; ++k) {
+      if (insns[k].is_call || insns[k].is_jump_or_ret) {
+        break;
+      }
+      int m0 = -1;
+      int m1 = -1;
+      if (match_mulsi3(insns[k].parsed.pattern, &m0, &m1)) {
+        if (!cross_ab.has_value() && ((m0 == a_lo && m1 == b_hi) || (m0 == b_hi && m1 == a_lo))) {
+          cross_ab = k;
+        } else if (!cross_ba.has_value() &&
+                   ((m0 == b_lo && m1 == a_hi) || (m0 == a_hi && m1 == b_lo))) {
+          cross_ba = k;
+        }
+        if (cross_ab.has_value() && cross_ba.has_value()) {
+          break;
+        }
+      }
+      if (insns[k].write_regs.Test(a_hi) || insns[k].write_regs.Test(a_lo) ||
+          insns[k].write_regs.Test(b_hi) || insns[k].write_regs.Test(b_lo)) {
+        break;
+      }
+    }
+    if (!cross_ab.has_value() || !cross_ba.has_value()) {
+      continue;
+    }
+    // Only wrap a `DImode` multiplicand pair `(r_hi, r_lo)` when `r_hi` is
+    // written/clobbered inside the `last_mul -> mflo` latency window (before
+    // the `mflo` consumer reads `lo` reg 65), which is where `sched_analyze_2`
+    // default child recursion (`sched.c:2002-2005`) into `case REG:`
+    // (`sched.c:1854-1874`) needs the cross-word `REG_DEP_ANTI` edge from the
+    // low-word cross-multiply to that interleaved clobber.
+    const size_t last_mul = std::max(*cross_ab, *cross_ba);
+    bool wrap_a = false;
+    bool wrap_b = false;
+    // Also wrap a `DImode` multiplicand pair `(r_hi, r_lo)` when `last_mul`
+    // (`mulsi3_r4000`, `config/mips/mips.md:867-878`) writes `r_hi` directly
+    // while reading `r_lo` (the final subword use of `r_hi:r_lo`), so Stage 4
+    // lifts `r_hi:r_lo` as a single `DImode` pseudo rather than leaving a bare
+    // dying hard-reg `r_lo` that poisons `local-alloc.c:1270` (`qty_phys_sugg`).
+    if ((insns[last_mul].write_regs.Test(a_hi) && !insns[last_mul].write_regs.Test(a_lo)) ||
+        (insns[last_mul].write_regs.Test(b_hi) && !insns[last_mul].write_regs.Test(b_lo))) {
+      wrap_a = true;
+      wrap_b = true;
+    }
+    if (runs_sched2) {
+      for (size_t k = last_mul + 1; k < n; ++k) {
+        if (insns[k].is_call || insns[k].is_jump_or_ret || insns[k].read_regs.Test(65)) {
+          break;
+        }
+        if (insns[k].write_regs.Test(a_hi) && !insns[k].write_regs.Test(a_lo)) {
+          wrap_a = true;
+        }
+        if (insns[k].write_regs.Test(b_hi) && !insns[k].write_regs.Test(b_lo)) {
+          wrap_b = true;
+        }
+      }
+    }
+    if (!wrap_a && !wrap_b) {
+      continue;
+    }
+    auto wrap_operand = [&](RtlExpr* expr) {
+      if (!expr->IsHardReg() || expr->mode != RtlMachineMode::kSi) {
+        return;
+      }
+      const int r = expr->RegNo();
+      if (wrap_a && r == a_hi) {
+        *expr = RtlExpr::MakeSubreg(RtlMachineMode::kSi,
+                                    RtlExpr::MakeReg(RtlMachineMode::kDi, a_hi), 0);
+      } else if (wrap_a && r == a_lo) {
+        *expr = RtlExpr::MakeSubreg(RtlMachineMode::kSi,
+                                    RtlExpr::MakeReg(RtlMachineMode::kDi, a_hi), 1);
+      } else if (wrap_b && r == b_hi) {
+        *expr = RtlExpr::MakeSubreg(RtlMachineMode::kSi,
+                                    RtlExpr::MakeReg(RtlMachineMode::kDi, b_hi), 0);
+      } else if (wrap_b && r == b_lo) {
+        *expr = RtlExpr::MakeSubreg(RtlMachineMode::kSi,
+                                    RtlExpr::MakeReg(RtlMachineMode::kDi, b_hi), 1);
+      }
+    };
+    auto update_insn = [&](size_t idx) {
+      std::string updated = insns[idx].parsed.ToGccPrintRtlString();
+      if (updated == blk->instructions[idx]) {
+        return;
+      }
+      if (blk->rtl_insns.size() == blk->instructions.size()) {
+        blk->rtl_insns[idx].canonical_pattern = updated;
+      }
+      blk->instructions[idx] = std::move(updated);
+      any_changed = true;
+    };
+
+    RtlExpr& mult0 = insns[i].parsed.pattern.children[0].children[1];
+    wrap_operand(&mult0.children[0].children[0]);
+    wrap_operand(&mult0.children[1].children[0]);
+    update_insn(i);
+
+    bool stripped_first_a = false;
+    bool stripped_first_b = false;
+    const size_t first_mul = (*cross_ab == last_mul) ? *cross_ba : *cross_ab;
+    for (size_t idx : {first_mul, last_mul}) {
+      RtlExpr& multk = insns[idx].parsed.pattern.children[0].children[1];
+      wrap_operand(&multk.children[0]);
+      wrap_operand(&multk.children[1]);
+      if (idx != last_mul) {
+        // `flow.c:2537-2550`: when both cross-multiplies read `(subreg:SI
+        // (reg:DI r_hi) 0/1)` of a `DImode` multiplicand, the earlier
+        // cross-multiply does not kill `r_hi:r_lo` because `last_mul` still
+        // reads the other word; drop the premature single-word `REG_DEAD`
+        // emitted prior to subreg restoration.
+        auto& notes = insns[idx].parsed.reg_notes;
+        notes.erase(std::remove_if(notes.begin(), notes.end(),
+                                   [&](const RtlRegNote& rn) {
+                                     if (rn.kind != RtlMachineMode::kRegDead ||
+                                         !rn.datum.IsHardReg() ||
+                                         rn.datum.mode != RtlMachineMode::kSi) {
+                                       return false;
+                                     }
+                                     const int nr = rn.datum.RegNo();
+                                     if (wrap_a && (nr == a_hi || nr == a_lo)) {
+                                       stripped_first_a = true;
+                                       return true;
+                                     }
+                                     if (wrap_b && (nr == b_hi || nr == b_lo)) {
+                                       stripped_first_b = true;
+                                       return true;
+                                     }
+                                     return false;
+                                   }),
+                    notes.end());
+        // `flow.c:1921` (`mark_set_regs`): when `a_lo`/`b_lo` was previously
+        // treated as dying at `first_mul` (making it appear free for a
+        // non-pinned GPR dest), restore `PARALLEL` scratch `REG_UNUSED` notes
+        // to canonical forward `flow` order (`64 hi`, `65 lo`, `66 accum`).
+        const RtlExpr& first_dst = insns[idx].parsed.pattern.children[0].SetDest();
+        if ((stripped_first_a || stripped_first_b) && first_dst.IsHardReg() &&
+            !first_dst.flags.Any() && first_dst.RegNo() >= 3 && first_dst.RegNo() <= 25) {
+          std::vector<int> clobber_order;
+          for (size_t ci = 1; ci < insns[idx].parsed.pattern.children.size(); ++ci) {
+            const RtlExpr& ch = insns[idx].parsed.pattern.children[ci];
+            if (ch.op == RtlOp::kClobber && ch.children.size() == 1 && ch.children[0].IsHardReg()) {
+              clobber_order.push_back(ch.children[0].RegNo());
+            }
+          }
+          if (clobber_order.size() >= 2) {
+            std::vector<size_t> note_slots;
+            std::vector<RtlRegNote> ordered_notes;
+            for (size_t ni = 0; ni < notes.size(); ++ni) {
+              if (notes[ni].kind == RtlMachineMode::kRegUnused && notes[ni].datum.IsHardReg() &&
+                  std::find(clobber_order.begin(), clobber_order.end(), notes[ni].datum.RegNo()) !=
+                      clobber_order.end()) {
+                note_slots.push_back(ni);
+              }
+            }
+            if (note_slots.size() == clobber_order.size()) {
+              for (int cr : clobber_order) {
+                for (size_t ni : note_slots) {
+                  if (notes[ni].datum.RegNo() == cr) {
+                    ordered_notes.push_back(notes[ni]);
+                    break;
+                  }
+                }
+              }
+              if (ordered_notes.size() == note_slots.size()) {
+                for (size_t si = 0; si < note_slots.size(); ++si) {
+                  notes[note_slots[si]] = std::move(ordered_notes[si]);
+                }
+              }
+            }
+          }
+        }
+      } else {
+        // `reload1.c:alter_reg` + `sched.c:2855-2920`: once `first_mul` and
+        // `last_mul` both read `(subreg:SI (reg:DI r_hi) 0/1)`, the whole
+        // `DImode` pair dies at `last_mul` via `(REG_DEAD (reg:DI r_hi))`
+        // rather than a single-word `(REG_DEAD (reg:SI r_lo/r_hi))`. When
+        // `runs_sched2` and `first_mul` did not carry a stripped `REG_DEAD`,
+        // ensure no intervening instruction between `first_mul` and `last_mul`
+        // already killed `r_hi` before upgrading `last_mul`'s note to `DImode`.
+        auto has_intervening_reg_dead = [&](int target_reg) {
+          for (size_t k = first_mul + 1; k < last_mul; ++k) {
+            for (const RtlRegNote& krn : insns[k].parsed.reg_notes) {
+              if (krn.kind == RtlMachineMode::kRegDead && krn.datum.IsHardReg() &&
+                  krn.datum.RegNo() == target_reg) {
+                return true;
+              }
+            }
+          }
+          return false;
+        };
+        for (RtlRegNote& rn : insns[idx].parsed.reg_notes) {
+          if (rn.kind != RtlMachineMode::kRegDead || !rn.datum.IsHardReg() ||
+              rn.datum.mode != RtlMachineMode::kSi) {
+            continue;
+          }
+          const int nr = rn.datum.RegNo();
+          if (wrap_a && (nr == a_lo || nr == a_hi) &&
+              (stripped_first_a ||
+               (insns[last_mul].write_regs.Test(a_hi) && !insns[last_mul].write_regs.Test(a_lo) &&
+                (!runs_sched2 || !has_intervening_reg_dead(a_hi))))) {
+            rn.datum = RtlExpr::MakeReg(RtlMachineMode::kDi, a_hi);
+          } else if (wrap_b && (nr == b_lo || nr == b_hi) &&
+                     (stripped_first_b || (insns[last_mul].write_regs.Test(b_hi) &&
+                                           !insns[last_mul].write_regs.Test(b_lo) &&
+                                           (!runs_sched2 || !has_intervening_reg_dead(b_hi))))) {
+            rn.datum = RtlExpr::MakeReg(RtlMachineMode::kDi, b_hi);
+          }
+        }
+      }
+      update_insn(idx);
+    }
+  }
+  if (any_changed && blk->rtl_insns.size() != blk->instructions.size()) {
+    blk->SyncRtlInsnsFromInstructions();
+  }
+}
+
 }  // namespace
 
 void RestoreNoConflictExtendClobbers(RtlControlFlowGraph* cfg, bool gp64, bool fp64,
@@ -2920,6 +3756,7 @@ void RestoreNoConflictExtendClobbers(RtlControlFlowGraph* cfg, bool gp64, bool f
   }
   for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
     RestoreNoConflictExtendClobbersInBlock(*cfg, b, gp64, fp64, runs_sched2, &cfg->rpo_blocks[b]);
+    RestoreMuldi3SubregOperandsInBlock(gp64, fp64, runs_sched2, &cfg->rpo_blocks[b]);
   }
 }
 

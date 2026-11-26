@@ -395,9 +395,11 @@ TEST(RtlLivenessTest, PreReloadVsPostReloadHardSubregAndAsmOperandsVectorOrder) 
   profile.c_flags = {"-O2", "-mips2"};
 
   // 1. `(subreg:SI (reg:DI 4 a0) 1)` read:
-  // - Pre-reload (`reload_completed == false`), `flow.c:2395-2468` unwraps `SUBREG` to `(reg:DI 4)`
-  //   and marks BOTH `$4` and `$5` live at block entry (plus exit-fixed `$29` and `$30`).
-  // - Post-reload (`reload_completed == true`), only `$5` is read and live at block entry.
+  // Both pre-reload (`reload_completed == false`) and post-reload (`reload_completed == true`),
+  // `flow.c:2387-2406` (`mark_used_regs`, `case SUBREG:` -> `x = SUBREG_REG (x)`) and
+  // `sched.c:2937-2942` (`attach_deaths`, `case SUBREG:` -> `attach_deaths (XEXP (x, 0), ...)`)
+  // unwrap `SUBREG` directly to `(reg:DI 4)` and mark BOTH `$4` and `$5` live at block entry
+  // (while `$30` is exit-fixed only pre-reload when `frame_pointer_needed == false`).
   RtlControlFlowGraph subreg_use_cfg;
   subreg_use_cfg.pass = RtlPassKind::kFlow;
   RtlBasicBlock b0;
@@ -422,7 +424,7 @@ TEST(RtlLivenessTest, PreReloadVsPostReloadHardSubregAndAsmOperandsVectorOrder) 
   ReconstructRtlLiveness(&post_subreg, profile,
                          {.reload_completed = true, .update_reg_notes = true});
   ASSERT_TRUE(post_subreg.sideband.basic_block_live_at_start.contains(0));
-  EXPECT_FALSE(post_subreg.sideband.basic_block_live_at_start[0].contains(4));
+  EXPECT_TRUE(post_subreg.sideband.basic_block_live_at_start[0].contains(4));
   EXPECT_TRUE(post_subreg.sideband.basic_block_live_at_start[0].contains(5));
   EXPECT_FALSE(post_subreg.sideband.basic_block_live_at_start[0].contains(30));
 
@@ -535,6 +537,182 @@ TEST(RtlLivenessTest, PreservePhantomPseudosOptionControlsZeroOccurrenceCombineT
   EXPECT_EQ(o0_phantom_cfg.sideband.reg_live_length[75], 2);
   EXPECT_FALSE(o0_phantom_cfg.sideband.reg_n_sets.contains(75));
   EXPECT_GE(o0_phantom_cfg.sideband.max_regno, 76);
+}
+
+TEST(RtlLivenessTest, CanonicalizeLivenessNoteOrderDistinguishesSchedAndFlowOrders) {
+  // For a store `(set (mem:SI (reg:SI 72)) (reg:SI 73))`:
+  // - `sched.c:2978-2985` (`attach_deaths_insn`) visits `SET_SRC` (`73`) first, then `SET_DEST`
+  //   (`(mem (reg 72))` -> `72`), prepending each `REG_DEAD` note so `72` ends up before `73`.
+  // - `flow.c:2491-2497` (`mark_used_regs`) visits `MEM` destination address (`72`) first, then
+  //   `SET_SRC` (`73`), prepending each `REG_DEAD` note so `73` ends up before `72`.
+  auto store_or = ParsePatternAndNotes(
+      "(set (mem:SI (reg:SI 72)) (reg:SI 73)) "
+      "(expr_list:REG_DEAD (reg:SI 73) (expr_list:REG_DEAD (reg:SI 72) (nil)))");
+  ASSERT_TRUE(store_or.ok());
+  RtlPatternAndNotes store = *store_or;
+
+  EXPECT_TRUE(CanonicalizeInsnLivenessNoteOrder(&store, /*sched_note_order=*/true));
+  ASSERT_EQ(store.reg_notes.size(), 2u);
+  EXPECT_EQ(store.reg_notes[0].datum.RegNo(), 72);
+  EXPECT_EQ(store.reg_notes[1].datum.RegNo(), 73);
+  // Idempotent when already in `sched` order.
+  EXPECT_FALSE(CanonicalizeInsnLivenessNoteOrder(&store, /*sched_note_order=*/true));
+
+  // Converting back to `flow.c` order places `73` ahead of `72`.
+  EXPECT_TRUE(CanonicalizeInsnLivenessNoteOrder(&store, /*sched_note_order=*/false));
+  ASSERT_EQ(store.reg_notes.size(), 2u);
+  EXPECT_EQ(store.reg_notes[0].datum.RegNo(), 73);
+  EXPECT_EQ(store.reg_notes[1].datum.RegNo(), 72);
+
+  // `PARALLEL` traversal (`sched.c:2990` walks elements in reverse while `flow.c:2668` walks `'E'`
+  // vectors forward) AND preservation of `REG_UNUSED` order (`sched.c:3573`) + trailing
+  // `REG_EQUAL`.
+  auto par_or = ParsePatternAndNotes(
+      "(parallel[ (set (reg:SI 74) (plus:SI (reg:SI 72) (const_int 1))) "
+      "(set (reg:SI 75) (reg:SI 73)) ] ) "
+      "(expr_list:REG_DEAD (reg:SI 73) (expr_list:REG_DEAD (reg:SI 72) "
+      "(expr_list:REG_UNUSED (reg:SI 75) (expr_list:REG_EQUAL (const_int 9) (nil)))))");
+  ASSERT_TRUE(par_or.ok());
+  RtlPatternAndNotes par = *par_or;
+
+  // `sched.c` visits elem 1 (`73`) then elem 0 (`72`), prepending so `72` is first, then `73`,
+  // while keeping `REG_UNUSED (75)` and trailing `REG_EQUAL (9)` in place.
+  EXPECT_TRUE(CanonicalizeInsnLivenessNoteOrder(&par, /*sched_note_order=*/true));
+  ASSERT_EQ(par.reg_notes.size(), 4u);
+  EXPECT_EQ(par.reg_notes[0].kind, RtlMachineMode::kRegDead);
+  EXPECT_EQ(par.reg_notes[0].datum.RegNo(), 72);
+  EXPECT_EQ(par.reg_notes[1].kind, RtlMachineMode::kRegDead);
+  EXPECT_EQ(par.reg_notes[1].datum.RegNo(), 73);
+  EXPECT_EQ(par.reg_notes[2].kind, RtlMachineMode::kRegUnused);
+  EXPECT_EQ(par.reg_notes[2].datum.RegNo(), 75);
+  EXPECT_EQ(par.reg_notes[3].kind, RtlMachineMode::kRegEqual);
+
+  // CFG-level helper updates all blocks and preserves explicit `call_fusage`.
+  RtlControlFlowGraph cfg;
+  cfg.pass = RtlPassKind::kSched;
+  cfg.rpo_blocks.resize(1);
+  cfg.rpo_blocks[0].id = 0;
+  cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (mem:SI (reg:SI 72)) (reg:SI 73)) "
+      "(expr_list:REG_DEAD (reg:SI 72) (expr_list:REG_DEAD (reg:SI 73) (nil)))");
+  CanonicalizeCfgLivenessNoteOrder(&cfg, /*sched_note_order=*/false);
+  auto re_parsed = ParsePatternAndNotes(cfg.rpo_blocks[0].instructions[0]);
+  ASSERT_TRUE(re_parsed.ok());
+  ASSERT_EQ(re_parsed->reg_notes.size(), 2u);
+  EXPECT_EQ(re_parsed->reg_notes[0].datum.RegNo(), 73);
+  EXPECT_EQ(re_parsed->reg_notes[1].datum.RegNo(), 72);
+}
+
+TEST(RtlLivenessTest, PostReloadSingleWordSubregPreservesInnerModeInRegDead) {
+  // Mirrors `flow.c:2387-2406` (`mark_used_regs`, `case SUBREG:`) &
+  // `sched.c:2937-2942` (`attach_deaths`, `case SUBREG:`): both a single-word
+  // narrowing `(subreg:QI (reg:SI 3 v1) 0)` and a multi-word slice
+  // `(subreg:SI (reg:DI 6 a2) 1)` unwrap `SUBREG` to `SUBREG_REG(x)` and attach
+  // `(REG_DEAD (reg:SI 3 v1))` and `(REG_DEAD (reg:DI 6 a2))` respectively
+  // when all words of the inner register die (and emit no premature `REG_DEAD`
+  // on word 0 when word 1 is still read downstream).
+  RtlControlFlowGraph cfg;
+  cfg.pass = RtlPassKind::kGreg;
+  cfg.rpo_blocks.resize(1);
+  cfg.rpo_blocks[0].id = 0;
+  cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 3 v1) (plus:SI (reg:SI 4 a0) (const_int 1)))");
+  cfg.rpo_blocks[0].AddPatternOnly("(set (mem:QI (reg:SI 29 sp)) (subreg:QI (reg:SI 3 v1) 0))");
+  cfg.rpo_blocks[0].AddPatternOnly(
+      "(set (mem:SI (plus:SI (reg:SI 29 sp) (const_int 4))) (subreg:SI (reg:DI 6 a2) 0))");
+  cfg.rpo_blocks[0].AddPatternOnly("(set (mem:SI (reg:SI 29 sp)) (subreg:SI (reg:DI 6 a2) 1))");
+  cfg.rpo_blocks[0].AddPatternOnly("(set (reg/i:SI 2 v0) (reg:SI 4 a0))");
+  cfg.rpo_blocks[0].AddPatternOnly("(use (reg/i:SI 2 v0))");
+
+  const CompilationProfile prof{.optimize_level = 2, .c_flags = {"-O2", "-mips2"}};
+  ReconstructRtlLiveness(&cfg, prof, {.reload_completed = true, .update_reg_notes = true});
+
+  auto sb_parsed = ParsePatternAndNotes(cfg.rpo_blocks[0].instructions[1]);
+  ASSERT_TRUE(sb_parsed.ok());
+  bool saw_si_v1_dead = false;
+  for (const RtlRegNote& n : sb_parsed->reg_notes) {
+    if (n.kind == RtlMachineMode::kRegDead && n.datum.IsHardReg() && n.datum.RegNo() == 3) {
+      EXPECT_EQ(n.datum.mode, RtlMachineMode::kSi) << cfg.rpo_blocks[0].instructions[1];
+      saw_si_v1_dead = true;
+    }
+  }
+  EXPECT_TRUE(saw_si_v1_dead) << cfg.rpo_blocks[0].instructions[1];
+
+  // Negative check: word-0 subreg read does NOT emit premature `(REG_DEAD (reg:SI 6 a2))`
+  // while word-1 subreg read still uses `(reg:DI 6 a2)` at the next insn.
+  auto sw0_parsed = ParsePatternAndNotes(cfg.rpo_blocks[0].instructions[2]);
+  ASSERT_TRUE(sw0_parsed.ok());
+  for (const RtlRegNote& n : sw0_parsed->reg_notes) {
+    EXPECT_NE(n.kind, RtlMachineMode::kRegDead) << cfg.rpo_blocks[0].instructions[2];
+  }
+
+  // Positive check: final word-1 subreg read emits full `(REG_DEAD (reg:DI 6 a2))`.
+  auto sw1_parsed = ParsePatternAndNotes(cfg.rpo_blocks[0].instructions[3]);
+  ASSERT_TRUE(sw1_parsed.ok());
+  bool saw_di_a2_dead = false;
+  for (const RtlRegNote& n : sw1_parsed->reg_notes) {
+    if (n.kind == RtlMachineMode::kRegDead && n.datum.IsHardReg() && n.datum.RegNo() == 6) {
+      EXPECT_EQ(n.datum.mode, RtlMachineMode::kDi) << cfg.rpo_blocks[0].instructions[3];
+      saw_di_a2_dead = true;
+    }
+  }
+  EXPECT_TRUE(saw_di_a2_dead) << cfg.rpo_blocks[0].instructions[3];
+}
+
+TEST(RtlLivenessTest, PreservePhantomPseudosRetainsNegativeLiveLengthAndSkipsZero) {
+  // Mirrors `global.c:388` (`reg_live_length[i] != -1`): phantom pseudos
+  // marked with `reg_live_length == -1` must keep `-1` across
+  // `ReconstructRtlLiveness(..., .preserve_phantom_pseudos = true)` so
+  // `global_alloc` skips them, whereas `reg_live_length == 0` is omitted.
+  RtlControlFlowGraph cfg;
+  cfg.pass = RtlPassKind::kLreg;
+  cfg.rpo_blocks.resize(1);
+  cfg.rpo_blocks[0].id = 0;
+  cfg.rpo_blocks[0].AddPatternOnly("(set (reg/i:SI 2 v0) (reg:SI 4 a0))");
+  cfg.rpo_blocks[0].AddPatternOnly("(use (reg/i:SI 2 v0))");
+  cfg.sideband.max_regno = 77;
+  cfg.sideband.reg_n_refs[75] = 2;
+  cfg.sideband.reg_n_deaths[75] = 0;
+  cfg.sideband.reg_live_length[75] = -1;
+  cfg.sideband.reg_n_refs[76] = 2;
+  cfg.sideband.reg_live_length[76] = 0;
+
+  const CompilationProfile prof{.optimize_level = 2, .c_flags = {"-O2", "-mips2"}};
+  ReconstructRtlLiveness(
+      &cfg, prof,
+      {.reload_completed = false, .update_reg_notes = false, .preserve_phantom_pseudos = true});
+  ASSERT_TRUE(cfg.sideband.reg_live_length.contains(75));
+  EXPECT_EQ(cfg.sideband.reg_live_length.at(75), -1);
+  EXPECT_FALSE(cfg.sideband.reg_live_length.contains(76));
+}
+
+TEST(RtlLivenessTest, PostReloadLibcallClobberSuppressesPartialRegUnused) {
+  // Mirrors `flow.c:2530` (`mark_set_1`): at `reload_completed`, a standalone
+  // `REG_LIBCALL` `(clobber (reg:DI 2 v0))` marker must NOT receive a partial
+  // `(REG_UNUSED (reg:SI 3 v1))` note when only word 2 is read later, whereas a
+  // normal non-libcall `(clobber (reg:DI 2 v0))` keeps standard `REG_UNUSED`.
+  const CompilationProfile prof{.optimize_level = 2, .c_flags = {"-O2", "-mips2"}};
+  auto run_case = [&](bool has_libcall_note) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kGreg;
+    cfg.rpo_blocks.resize(1);
+    cfg.rpo_blocks[0].id = 0;
+    cfg.rpo_blocks[0].instructions = {
+        has_libcall_note ? "(clobber (reg:DI 2 v0)) (insn_list:REG_LIBCALL (nil))"
+                         : "(clobber (reg:DI 2 v0))",
+        "(set (reg:SI 2 v0) (const_int 0))",
+        "(set (reg/i:SI 2 v0) (plus:SI (reg:SI 2 v0) (reg:SI 4 a0)))",
+        "(use (reg/i:SI 2 v0))",
+    };
+    cfg.rpo_blocks[0].SyncRtlInsnsFromInstructions();
+    ReconstructRtlLiveness(&cfg, prof, {.reload_completed = true, .update_reg_notes = true});
+    return cfg.rpo_blocks[0].instructions[0];
+  };
+
+  const std::string libcall_insn = run_case(/*has_libcall_note=*/true);
+  EXPECT_EQ(libcall_insn.find("REG_UNUSED"), std::string::npos) << libcall_insn;
+
+  const std::string plain_insn = run_case(/*has_libcall_note=*/false);
+  EXPECT_NE(plain_insn.find("REG_UNUSED"), std::string::npos) << plain_insn;
 }
 
 }  // namespace

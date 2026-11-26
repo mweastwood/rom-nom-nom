@@ -954,5 +954,149 @@ TEST(InvertFillEagerDelaySlotsUnitTest,
   EXPECT_TRUE(direct_res.matches) << direct_res.diff_detail;
 }
 
+TEST(InvertFillEagerDelaySlotsUnitTest,
+     RelocatesEagerStolenFallthroughSlotPastOppositeLiveInsnForSched1) {
+  // Mirrors `reorg.c:3258-3460` (`fill_slots_from_thread`, `ANNUL_IFTRUE == (nil)` in
+  // `mips.md:125-128`): `B0` branches to `B2` (where `$5` / `a1` is live) and falls through
+  // to `B1`. `reorg.c` skipped `(set a1 (plus a1 25))` because `a1` is live at `B2`, and
+  // stole `(set v0 -67174400)` into `B0`'s delay slot. Under `-O2` (`RunsSched1`), restoring
+  // `(set v0 -67174400)` at index 0 of `B1` is NOT `sched1`-achievable (single-set `v0` gets
+  // `birthing_insn_p` priority boost over multi-set `a1`), so `InvertFillEagerDelaySlots` must
+  // place it after `(set a1 (plus a1 25))`; under `-O1` (`!RunsSched1`), index 0 is preserved.
+  RtlControlFlowGraph cfg;
+  cfg.pass = RtlPassKind::kDbr;
+  cfg.rpo_blocks = {
+      MakeBlock(0, false,
+                {
+                    "(set (reg:SI 5 a1) (const_int 10))",
+                    "(set (reg:SI 2 v0) (mem:SI (reg:SI 4 a0)))",
+                    "(sequence [(jump_insn (set (pc) (if_then_else (eq:SI (reg:SI 2 v0) "
+                    "(const_int 0)) (label_ref L0) (pc)))) "
+                    "(insn (set (reg:SI 2 v0) (const_int -67174400)))])",
+                },
+                {2, 1}),
+      MakeBlock(1, false,
+                {
+                    "(set (reg:SI 5 a1) (plus:SI (reg:SI 5 a1) (const_int 25)))",
+                    "(set (reg:SI 2 v0) (ior:SI (reg:SI 2 v0) (const_int 65535))) "
+                    "(expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+                    "(set (reg:SI 2 v0) (and:SI (reg:SI 3 v1) (reg:SI 2 v0))) "
+                    "(expr_list:REG_DEAD (reg:SI 3 v1) (expr_list:REG_DEAD (reg:SI 2 v0) (nil)))",
+                    "(set (mem:SI (reg:SI 6 a2)) (reg:SI 2 v0)) "
+                    "(expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+                },
+                {2}),
+      MakeBlock(2, true,
+                {
+                    "(set (reg/i:SI 2 v0) (reg:SI 5 a1)) (expr_list:REG_DEAD (reg:SI 5 a1) (nil))",
+                    "(use (reg/i:SI 2 v0))",
+                    "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+                },
+                {}),
+  };
+
+  const CompilationProfile o2_prof{.optimize_level = 2,
+                                   .c_flags = {"-O2", "-mips2", "-mcpu=r4000"}};
+  const RtlControlFlowGraph lifted_o2 = InvertFillEagerDelaySlots(cfg, o2_prof);
+  ASSERT_EQ(lifted_o2.rpo_blocks.size(), 3u);
+  ASSERT_GE(lifted_o2.rpo_blocks[1].instructions.size(), 2u);
+  EXPECT_EQ(lifted_o2.rpo_blocks[1].instructions[0],
+            "(set (reg:SI 5 a1) (plus:SI (reg:SI 5 a1) (const_int 25)))");
+  EXPECT_EQ(lifted_o2.rpo_blocks[1].instructions[1], "(set (reg:SI 2 v0) (const_int -67174400))");
+
+  GccContext ctx;
+  FunctionHooks hooks(&ctx);
+  hooks.ApplyCompilationProfile(o2_prof);
+  ProductionFillEagerDelaySlotsProvider provider;
+  RightInverseVerifier verifier(&ctx, &hooks, &provider);
+  const RightInverseResult res = verifier.VerifyFillEagerDelaySlotsRightInverse(cfg);
+  EXPECT_TRUE(res.matches) << res.diff_detail << "\nlifted:\n"
+                           << lifted_o2.FormatSummary() << "\nactual:\n"
+                           << res.actual_summary;
+
+  // Negative check: under `-O1` (`!RunsSched1`), relocation does not fire.
+  const CompilationProfile o1_prof{.optimize_level = 1,
+                                   .c_flags = {"-O1", "-mips2", "-mcpu=r4000"}};
+  const RtlControlFlowGraph lifted_o1 = InvertFillEagerDelaySlots(cfg, o1_prof);
+  ASSERT_EQ(lifted_o1.rpo_blocks.size(), 3u);
+  EXPECT_EQ(lifted_o1.rpo_blocks[1].instructions[0], "(set (reg:SI 2 v0) (const_int -67174400))");
+}
+
+TEST(InvertFillEagerDelaySlotsTest, RestoreCombineDeadUseForUnfilledEagerBranchClearsStaleRegDead) {
+  // Mirrors `combine.c:10831-10846` + `reorg.c:2415-2430, 2613-2654, 3375-3377`:
+  // an unfilled conditional branch `B1 -> (target=B3, fall=B2)` whose fallthrough
+  // starts with `(set (reg:SI 3 v1) (const_int 1))` can only remain unfilled if
+  // `(use (reg:SI 3 v1)) (REG_DEAD v1)` precedes `li $v1, 1` and a def-free path
+  // from `B3` back to `B2` propagates `$v1` live at `B3` entry; any stale
+  // `(REG_DEAD (reg:SI 3 v1))` on `B2`'s `slt` must also be stripped so
+  // `mark_target_live_regs` does not kill `$v1` at `B3`'s `CODE_LABEL`.
+  auto make_loop_cfg = [&](bool target_kills_v1) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kDbr;
+    std::vector<std::string> b3_insns;
+    if (target_kills_v1) {
+      b3_insns.push_back("(set (reg:SI 3 v1) (const_int 9))");
+    }
+    b3_insns.push_back("(set (reg:SI 7 a3) (plus:SI (reg:SI 7 a3) (const_int 1)))");
+    b3_insns.push_back(
+        "(set (pc) (if_then_else (ne:SI (reg:SI 7 a3) (const_int 0)) (label_ref L0) (pc)))");
+    cfg.rpo_blocks = {
+        MakeBlock(0, true,
+                  {
+                      "(set (reg:SI 4 a0) (plus:SI (reg:SI 4 a0) (const_int 1)))",
+                      "(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) "
+                      "(label_ref L1) (pc)))",
+                  },
+                  {2, 1}),
+        MakeBlock(1, false,
+                  {
+                      "(set (reg:SI 3 v1) (const_int 1))",
+                      "(set (reg:SI 2 v0) (lt:SI (reg:SI 3 v1) (reg:SI 6 a2))) "
+                      "(expr_list:REG_DEAD (reg:SI 3 v1) (nil))",
+                      "(set (pc) (if_then_else (ne:SI (reg:SI 2 v0) (const_int 0)) "
+                      "(label_ref L0) (pc))) (expr_list:REG_DEAD (reg:SI 2 v0) (nil))",
+                  },
+                  {0, 2}),
+        MakeBlock(2, true, std::move(b3_insns), {0, 3}),
+        MakeBlock(
+            3, false,
+            {
+                "(set (reg/i:SI 2 v0) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))",
+                "(use (reg/i:SI 2 v0))",
+                "(parallel[ (return) (use (reg:SI 31 ra)) ] )",
+            },
+            {}),
+    };
+    return cfg;
+  };
+
+  const CompilationProfile mips1_o2{.optimize_level = 2,
+                                    .c_flags = {"-O2", "-mips1", "-mcpu=r3000"}};
+
+  // Positive: def-free path `B2 -> B0 -> B1` allows `(use (reg:SI 3 v1))` to
+  // propagate `$v1` live at `B2` entry and strips stale `REG_DEAD v1` from `slt`.
+  const RtlControlFlowGraph pos_cfg = make_loop_cfg(/*target_kills_v1=*/false);
+  const RtlControlFlowGraph lifted_pos = InvertFillEagerDelaySlots(pos_cfg, mips1_o2);
+  ASSERT_EQ(lifted_pos.rpo_blocks.size(), 4u);
+  ASSERT_GE(lifted_pos.rpo_blocks[1].instructions.size(), 4u) << lifted_pos.FormatSummary();
+  EXPECT_EQ(lifted_pos.rpo_blocks[1].instructions[0],
+            "(use (reg:SI 3 v1)) (expr_list:REG_DEAD (reg:SI 3 v1) (nil))");
+  EXPECT_EQ(lifted_pos.rpo_blocks[1].instructions[2].find("REG_DEAD (reg:SI 3 v1)"),
+            std::string::npos)
+      << lifted_pos.FormatSummary();
+  ASSERT_TRUE(lifted_pos.sideband.basic_block_live_at_start.contains(2));
+  EXPECT_TRUE(lifted_pos.sideband.basic_block_live_at_start.at(2).contains(3));
+
+  // Negative: when target block `B2` kills `$v1`, no def-free path reaches `B1`,
+  // so no `(use (reg:SI 3 v1))` is inserted and `slt` retains `(REG_DEAD v1)`.
+  const RtlControlFlowGraph neg_cfg = make_loop_cfg(/*target_kills_v1=*/true);
+  const RtlControlFlowGraph lifted_neg = InvertFillEagerDelaySlots(neg_cfg, mips1_o2);
+  ASSERT_EQ(lifted_neg.rpo_blocks.size(), 4u);
+  EXPECT_EQ(lifted_neg.rpo_blocks[1].instructions[0], "(set (reg:SI 3 v1) (const_int 1))");
+  EXPECT_NE(lifted_neg.rpo_blocks[1].instructions[1].find("REG_DEAD (reg:SI 3 v1)"),
+            std::string::npos)
+      << lifted_neg.FormatSummary();
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::lifter

@@ -9810,6 +9810,909 @@ redispatch:
 }
 )",
       },
+
+      // Step 37 held-out generalization corpus (30 functions x 7 profiles = 210 cases).
+      {
+    .test_name = "SchedFpDivMulAddInterleave",
+    .function_name = "SchedFpDivMulAddInterleave",
+    .original_c = R"(
+extern f32 fabsf(f32 x);
+
+f32 SchedFpDivMulAddInterleave(const f32* fa, const f32* fb, const s32* ia, s32 idx) {
+    s32 i0 = idx & 7;
+    s32 i1 = (idx + 3) & 7;
+    s32 i2 = (idx + 5) & 7;
+    f32 x0 = fa[i0];
+    f32 x1 = fa[i1];
+    f32 y0 = fb[i0];
+    f32 y1 = fb[i1];
+    f32 d0 = fabsf(y0) + 0.5f;
+    f32 d1 = fabsf(y1) + 0.75f;
+    f32 q0 = x0 / d0;
+    f32 q1 = x1 / d1;
+    f32 p0 = x0 * y1;
+    f32 p1 = x1 * y0;
+    f32 p2 = (x0 + x1) * (y0 - y1);
+    s32 k0 = ia[i0];
+    s32 k1 = ia[i1];
+    s32 k2 = ia[i2];
+    s32 mix = ((k0 ^ k1) + (k2 << 2)) & 255;
+    f32 scale = (f32)mix * 0.015625f;
+    return (q0 + q1) * scale + (p0 - p1) + p2 * 0.25f;
+}
+)",
+},
+      {
+    .test_name = "SchedDoubleDivSqrtPipeline",
+    .function_name = "SchedDoubleDivSqrtPipeline",
+    .original_c = R"(
+extern f64 sqrt(f64 x);
+extern f64 fabs(f64 x);
+
+f64 SchedDoubleDivSqrtPipeline(const f64* da, const f32* fb, const s32* bias, s32 k) {
+    s32 j0 = k & 3;
+    s32 j1 = (k + 1) & 3;
+    s32 j2 = (k + 2) & 3;
+    f64 a0 = da[j0];
+    f64 a1 = da[j1];
+    f64 a2 = da[j2];
+    f64 b0 = (f64)fb[j0];
+    f64 b1 = (f64)fb[j1];
+    f64 rad = a0 * a0 + b0 * b0 + 1.0;
+    f64 root = sqrt(rad);
+    f64 denom = fabs(a1) + 0.5;
+    f64 quot = (a2 + b1) / denom;
+    f64 prod = (a0 - a1) * (b0 + b1);
+    f64 adj = (f64)(bias[j0] + bias[j1] - bias[j2]);
+    return (root + quot) * 0.5 + prod - adj * 0.125;
+}
+)",
+},
+      {
+    .test_name = "SchedIntDivMulLoadHazard",
+    .function_name = "SchedIntDivMulLoadHazard",
+    .original_c = R"(
+s32 SchedIntDivMulLoadHazard(const s32* words, const s16* halves, const u8* bytes, s32 seed) {
+    s32 idx = seed & 7;
+    s32 w0 = words[idx];
+    s32 w1 = words[(idx + 1) & 7];
+    s32 w2 = words[(idx + 2) & 7];
+    s32 h0 = (s32)halves[idx];
+    s32 h1 = (s32)halves[(idx + 3) & 7];
+    u32 b0 = (u32)bytes[idx];
+    u32 b1 = (u32)bytes[(idx + 5) & 7];
+    s32 sdiv_d = (h0 & 127) + 3;
+    u32 udiv_d = (b0 & 63u) + 5u;
+    s32 q_signed = w0 / sdiv_d;
+    s32 r_signed = w1 % sdiv_d;
+    u32 q_unsigned = ((u32)w2) / udiv_d;
+    u32 r_unsigned = ((u32)w0 ^ b1) % udiv_d;
+    s32 p0 = w0 * h1;
+    s32 p1 = w1 * (s32)(b0 + 7u);
+    s32 p2 = (w2 + h0) * (s32)(b1 + 11u);
+    return (q_signed + r_signed) ^ (s32)(q_unsigned - r_unsigned) + p0 - p1 + p2;
+}
+)",
+},
+      {
+    .test_name = "SchedMixedFloatIntConvertChain",
+    .function_name = "SchedMixedFloatIntConvertChain",
+    .original_c = R"(
+s32 SchedMixedFloatIntConvertChain(const s32* in_i, const f32* in_f, s32 n, s32 mask) {
+    s32 k0 = n & 3;
+    s32 k1 = (n + 1) & 3;
+    s32 k2 = (n + 2) & 3;
+    s32 a0 = in_i[k0];
+    s32 a1 = in_i[k1];
+    s32 a2 = in_i[k2];
+    f32 f0 = in_f[k0];
+    f32 f1 = in_f[k1];
+    f32 c0 = (f32)(a0 & 1023) * 0.25f + f0;
+    f32 c1 = (f32)(a1 & 1023) * 0.125f - f1;
+    f64 d0 = (f64)c0 * 1.5 + (f64)a2 * 0.0625;
+    f64 d1 = d0 / ((f64)(c1 * c1) + 1.0);
+    s32 back0 = (s32)(d1 * 16.0);
+    s32 back1 = (s32)(c0 * c1 + 2.0f);
+    u32 bits = (((u32)a0 >> 3) ^ ((u32)a1 << 5) ^ ((u32)a2 & 0xfffu)) & (u32)mask;
+    return back0 + back1 + (s32)bits;
+}
+)",
+},
+      {
+    .test_name = "SchedSqrtFloatQuadNorm",
+    .function_name = "SchedSqrtFloatQuadNorm",
+    .original_c = R"(
+extern f32 sqrtf(f32 x);
+extern f32 fabsf(f32 x);
+
+struct QuadVec {
+    f32 x;
+    f32 y;
+    f32 z;
+    f32 w;
+};
+
+f32 SchedSqrtFloatQuadNorm(const struct QuadVec* in_v, struct QuadVec* out_v, f32 gain) {
+    f32 vx = in_v->x;
+    f32 vy = in_v->y;
+    f32 vz = in_v->z;
+    f32 vw = in_v->w;
+    f32 len_sq = vx * vx + vy * vy + vz * vz + vw * vw + 0.25f;
+    f32 len = sqrtf(len_sq);
+    f32 inv = gain / (len + 0.0625f);
+    f32 ox = vx * inv;
+    f32 oy = vy * inv;
+    f32 oz = vz * inv;
+    f32 ow = vw * inv;
+    out_v->x = ox;
+    out_v->y = oy;
+    out_v->z = oz;
+    out_v->w = ow;
+    return fabsf(ox) + fabsf(oy) + fabsf(oz) + fabsf(ow);
+}
+)",
+},
+      {
+    .test_name = "AliasStackVsPointerVsGlobal",
+    .function_name = "AliasStackVsPointerVsGlobal",
+    .original_c = R"(
+static s32 s_alias_acc_a = 17;
+static s32 s_alias_acc_b = -9;
+static const s32 kAliasWeights[6] = {3, 5, 7, 11, 13, 17};
+
+s32 AliasStackVsPointerVsGlobal(const s32* in_buf, s32* out_buf, s32 sel) {
+    s32 scratch[6];
+    s32 i0 = sel & 3;
+    s32 i1 = (sel + 1) & 3;
+    s32 g0 = s_alias_acc_a;
+    s32 g1 = s_alias_acc_b;
+    scratch[0] = in_buf[0] + kAliasWeights[0];
+    scratch[1] = in_buf[1] + kAliasWeights[1];
+    scratch[2] = in_buf[2] + kAliasWeights[2];
+    scratch[3] = in_buf[3] + kAliasWeights[3];
+    out_buf[i0] = scratch[0] * kAliasWeights[4] + g0;
+    s_alias_acc_a = g0 + scratch[1];
+    out_buf[i1] = scratch[2] * kAliasWeights[5] + g1;
+    s_alias_acc_b = g1 - scratch[3];
+    scratch[4] = out_buf[0] + s_alias_acc_a;
+    scratch[5] = out_buf[1] + s_alias_acc_b;
+    return scratch[0] + scratch[2] + scratch[4] - scratch[5];
+}
+)",
+},
+      {
+    .test_name = "AliasVolatileVsNonVolatileMix",
+    .function_name = "AliasVolatileVsNonVolatileMix",
+    .original_c = R"(
+u32 AliasVolatileVsNonVolatileMix(volatile u32* hw_ctrl, volatile u32* hw_data,
+                                  const f32* coeff, f32* state, u32 cmd) {
+    u32 r0;
+    u32 r1;
+    u32 r2;
+    f32 s0 = state[0];
+    f32 s1 = state[1];
+    f32 c0 = coeff[0];
+    f32 c1 = coeff[1];
+    f32 next0;
+    f32 next1;
+    r0 = *hw_ctrl;
+    next0 = (s0 * c0 + s1 * c1) / (c0 * c0 + 1.0f);
+    *hw_data = cmd ^ r0;
+    r1 = *hw_ctrl;
+    next1 = (s1 * c0 - s0 * c1) * 0.5f;
+    *hw_ctrl = (r0 | r1) & 0xffffu;
+    state[0] = next0;
+    r2 = *hw_data;
+    state[1] = next1;
+    return (r0 ^ r1) + r2 + (u32)((s32)(next0 + next1));
+}
+)",
+},
+      {
+    .test_name = "AliasStructVaryingVsFixedScalar",
+    .function_name = "AliasStructVaryingVsFixedScalar",
+    .original_c = R"(
+struct NodeRecord {
+    s32 weight;
+    s32 offset;
+    u16 tag;
+    u16 flags;
+};
+
+static s32 s_fixed_bias = 31;
+static s32 s_fixed_scale = 5;
+
+s32 AliasStructVaryingVsFixedScalar(struct NodeRecord* rec, u8* byte_sink, s32 idx) {
+    s32 i0 = idx & 7;
+    s32 i1 = (idx + 1) & 7;
+    s32 w0 = rec[i0].weight;
+    s32 b = s_fixed_bias;
+    rec[i0].offset = w0 + b;
+    s_fixed_bias = b + 3;
+    byte_sink[i0] = (u8)(w0 & 255);
+    rec[i1].weight = rec[i0].offset * s_fixed_scale;
+    s_fixed_scale = (s_fixed_scale ^ 3) + 1;
+    byte_sink[i1] = (u8)(rec[i1].tag & 255u);
+    return rec[i1].weight + rec[i0].offset + s_fixed_bias + (s32)byte_sink[i0];
+}
+)",
+},
+      {
+    .test_name = "AliasPendingListFlushOver32",
+    .function_name = "AliasPendingListFlushOver32",
+    .original_c = R"(
+static s32 s_flush_tap0 = 11;
+static s32 s_flush_tap1 = 23;
+
+s32 AliasPendingListFlushOver32(const s32* src, s32* dst, s32 k) {
+    s32 tmp[10];
+    s32 a0 = src[0];
+    s32 a1 = src[1];
+    s32 a2 = src[2];
+    s32 a3 = src[3];
+    s32 a4 = src[4];
+    s32 a5 = src[5];
+    s32 a6 = src[6];
+    s32 a7 = src[7];
+    s32 a8 = src[8];
+    s32 a9 = src[9];
+    tmp[0] = a0 + k;
+    tmp[1] = a1 - k;
+    tmp[2] = a2 ^ k;
+    tmp[3] = a3 + a0;
+    tmp[4] = a4 + a1;
+    tmp[5] = a5 + a2;
+    tmp[6] = a6 + a3;
+    tmp[7] = a7 + a4;
+    tmp[8] = a8 + a5;
+    tmp[9] = a9 + a6;
+    dst[0] = tmp[0] + s_flush_tap0;
+    dst[1] = tmp[1] + s_flush_tap1;
+    dst[2] = tmp[2] ^ tmp[0];
+    dst[3] = tmp[3] ^ tmp[1];
+    dst[4] = tmp[4] + tmp[2];
+    dst[5] = tmp[5] + tmp[3];
+    dst[6] = tmp[6] - tmp[4];
+    dst[7] = tmp[7] - tmp[5];
+    s_flush_tap0 = dst[0] + tmp[8];
+    s_flush_tap1 = dst[1] + tmp[9];
+    dst[8] = tmp[8] + dst[2] + src[10];
+    dst[9] = tmp[9] + dst[3] + src[11];
+    return dst[0] + dst[4] + dst[6] + dst[8] + dst[9] + s_flush_tap0 + s_flush_tap1;
+}
+)",
+},
+      {
+    .test_name = "AliasConstReadonlyAndOffsetDisjoint",
+    .function_name = "AliasConstReadonlyAndOffsetDisjoint",
+    .original_c = R"(
+static const f32 kFirTaps[8] = {
+    0.125f, 0.25f, 0.375f, 0.5f, 0.375f, 0.25f, 0.125f, 0.0625f
+};
+
+f32 AliasConstReadonlyAndOffsetDisjoint(const f32* src, f32* dst, s16* tag_words, s32 phase) {
+    f32 s0 = src[0];
+    f32 s1 = src[1];
+    f32 s2 = src[2];
+    f32 s3 = src[3];
+    f32 y0 = s0 * kFirTaps[0] + s1 * kFirTaps[1];
+    f32 y1 = s1 * kFirTaps[2] + s2 * kFirTaps[3];
+    f32 y2 = s2 * kFirTaps[4] + s3 * kFirTaps[5];
+    f32 y3 = s3 * kFirTaps[6] + s0 * kFirTaps[7];
+    dst[0] = y0;
+    dst[1] = y1;
+    dst[2] = y2;
+    dst[3] = y3;
+    tag_words[0] = (s16)(phase + 1);
+    tag_words[1] = (s16)(phase - 1);
+    dst[4] = (y0 + y2) / (y1 * y1 + 1.0f);
+    dst[5] = (y1 - y3) * kFirTaps[phase & 7];
+    return dst[0] + dst[3] + dst[4] + dst[5] + (f32)(tag_words[0] + tag_words[1]);
+}
+)",
+},
+      {
+    .test_name = "CallCrossMixedGprFprChain",
+    .function_name = "CallCrossMixedGprFprChain",
+    .original_c = R"(
+extern f32 ComputeGain(s32 id, f32 level, f64 dt, s32 mode, f32 damp, s32 tag);
+extern f64 BlendSample(f64 base, f32 gain, s32 flags, s32 slot);
+extern s32 CommitFrame(s32 id, f64 energy, f32 peak, s32 mode, s32 extra);
+
+s32 CallCrossMixedGprFprChain(s32 id, const f32* samples, f64 dt, s32 mode) {
+    f32 s0 = samples[0];
+    f32 s1 = samples[1];
+    f64 base_e = (f64)s0 * (f64)s1 + dt;
+    f32 g = ComputeGain(id, s0 + s1, dt, mode, s1 * 0.5f, id ^ mode);
+    f64 blended = BlendSample(base_e, g * 1.25f, mode + 1, id & 15);
+    f32 peak = g + s0 * 0.25f - s1 * 0.125f;
+    s32 status = CommitFrame(id, blended + dt, peak, mode, (s32)blended);
+    return status + (s32)(peak * 8.0f) + id;
+}
+)",
+},
+      {
+    .test_name = "CallCrossRegEquivConstants",
+    .function_name = "CallCrossRegEquivConstants",
+    .original_c = R"(
+extern u32 MixTokenA(u32 x, f32 w);
+extern u32 MixTokenB(u32 y, f64 z);
+
+u32 CallCrossRegEquivConstants(u32 seed, f32 alpha, f64 beta) {
+    u32 pre_only = (seed ^ 0x12345678u) + 0x76543210u;
+    f32 pre_w = alpha * 1.25f + 0.375f;
+    u32 r0 = MixTokenA(pre_only, pre_w);
+    u32 mid_only = (r0 + 0x12345678u) ^ (seed << 3);
+    f64 mid_z = beta * 3.141592653589793 + (f64)alpha * 1.25;
+    u32 r1 = MixTokenB(mid_only, mid_z);
+    u32 post = (r1 ^ 0x76543210u) + (r0 ^ 0x12345678u);
+    return post + (u32)((s32)(alpha * 1.25f + (f32)(beta * 3.141592653589793)));
+}
+)",
+},
+      {
+    .test_name = "CallCrossImmediateReturnCascade",
+    .function_name = "CallCrossImmediateReturnCascade",
+    .original_c = R"(
+extern f64 FetchMetricD(s32 ch, f64 prev);
+extern s32 SelectBucket(f64 ratio, s32 limit);
+extern f32 EvalKernel7(s32 a0, s32 a1, s32 a2, s32 a3, s32 a4, s32 a5, s32 a6);
+extern f32 FinalizeScore(f32 val, f64 ref_d);
+
+f32 CallCrossImmediateReturnCascade(const s32* tbl, s32 ch, f64 denom_in, f32 bias) {
+    f64 m0 = FetchMetricD(ch, denom_in);
+    f64 ratio = m0 / (denom_in * denom_in + 1.0);
+    s32 b = SelectBucket(ratio, 15) & 7;
+    s32 t0 = tbl[b];
+    s32 t1 = tbl[(b + 1) & 7];
+    f32 k = EvalKernel7(ch, b, t0, t1, t0 ^ t1, t0 + b, ch - t1);
+    return FinalizeScore(k + bias, m0 + ratio);
+}
+)",
+},
+      {
+    .test_name = "CallCrossIndirectAndDirectMix",
+    .function_name = "CallCrossIndirectAndDirectMix",
+    .original_c = R"(
+struct StageHooks {
+    s32 (*transform)(s32 ctx, s32 val, f32 scale);
+    s32 bias;
+};
+
+extern s32 PrepareStage(s32 ctx, s32 raw);
+extern s64 RecordStage(s32 ctx, s64 acc, f32 weight);
+
+s64 CallCrossIndirectAndDirectMix(const struct StageHooks* hooks, s32 ctx, s32 raw,
+                                  f32 scale, s64 init_acc) {
+    s32 pre = (raw * 3) ^ ctx;
+    s32 s1 = PrepareStage(ctx, pre);
+    f32 adj_scale = scale * 0.5f + 1.0f;
+    s32 s2 = hooks->transform(ctx, s1 + hooks->bias, adj_scale);
+    s64 combined = init_acc + (s64)s1 + ((s64)s2 << 4);
+    s64 res = RecordStage(ctx, combined, adj_scale + scale);
+    return res ^ (s64)s2;
+}
+)",
+},
+      {
+    .test_name = "CallCrossLoopInvariantHoist",
+    .function_name = "CallCrossLoopInvariantHoist",
+    .original_c = R"(
+extern f32 FilterPre(f32 x, s32 tag);
+extern s32 QuantizePost(f32 y, f32 gain, s32 bias);
+
+s32 CallCrossLoopInvariantHoist(const f32* in_arr, s32* out_arr, s32 count,
+                                f32 gain, s32 bias) {
+    s32 i;
+    s32 total = 0;
+    f32 inv_gain = gain * 0.75f + 0.125f;
+    s32 salt = (bias ^ 0x13572468) + 19;
+    for (i = 0; i < count; i++) {
+        f32 raw = in_arr[i] * inv_gain;
+        s32 local_tag = (i + salt) & 255;
+        f32 f_val = FilterPre(raw, local_tag);
+        f32 shaped = f_val * inv_gain + raw * 0.25f;
+        s32 q = QuantizePost(shaped, gain, bias);
+        out_arr[i] = q;
+        total += q;
+    }
+    return total + salt;
+}
+)",
+},
+      {
+    .test_name = "PressureWideGprLiveWeb",
+    .function_name = "PressureWideGprLiveWeb",
+    .original_c = R"(
+s32 PressureWideGprLiveWeb(const s32* v, s32 k) {
+    s32 r0 = v[0] + k;
+    s32 r1 = v[1] - k;
+    s32 r2 = v[2] ^ k;
+    s32 r3 = v[3] * 3 + k;
+    s32 r4 = v[4] * 5 - k;
+    s32 r5 = v[5] * 7 + (k << 1);
+    s32 r6 = v[6] * 9 - (k >> 1);
+    s32 r7 = v[7] + (k ^ 0x55);
+    s32 r8 = v[8] - (k ^ 0xaa);
+    s32 r9 = v[9] * (k | 1);
+    s32 r10 = v[10] + r0 * 3;
+    s32 r11 = v[11] - r1 * 5;
+    s32 r12 = v[12] ^ (r2 + r3);
+    s32 r13 = v[13] + (r4 ^ r5);
+    s32 a = (r0 + r7) ^ (r1 - r8) ^ (r2 + r9);
+    s32 b = (r3 - r10) + (r4 ^ r11) + (r5 - r12);
+    s32 c = (r6 + r13) ^ (r10 + r11) ^ (r12 - r13);
+    return a + b + c + (r0 ^ r6 ^ r9);
+}
+)",
+},
+      {
+    .test_name = "PressureWideFprDoubleWeb",
+    .function_name = "PressureWideFprDoubleWeb",
+    .original_c = R"(
+f64 PressureWideFprDoubleWeb(const f64* x, const f64* y) {
+    f64 d0 = x[0] * y[0] + 0.5;
+    f64 d1 = x[1] * y[1] - 0.25;
+    f64 d2 = x[2] + y[2] * 1.5;
+    f64 d3 = x[3] - y[3] * 0.75;
+    f64 d4 = (x[4] + 1.0) / (y[4] * y[4] + 1.0);
+    f64 d5 = (x[5] - 1.0) / (y[5] * y[5] + 2.0);
+    f64 d6 = x[6] * 1.25 + y[6];
+    f64 d7 = x[7] * 0.75 - y[7];
+    f64 d8 = (d0 + d2) * (d1 - d3);
+    f64 d9 = (d4 - d6) * (d5 + d7);
+    f64 s0 = d0 * d5 + d1 * d4;
+    f64 s1 = d2 * d7 - d3 * d6;
+    return s0 + s1 + d8 - d9 + (d0 - d7) * 0.125 + (d3 + d4) * 0.25;
+}
+)",
+},
+      {
+    .test_name = "PressureCallerSaveExhaustion",
+    .function_name = "PressureCallerSaveExhaustion",
+    .original_c = R"(
+extern s32 StepAccumulator(s32 acc, s32 iter);
+
+s32 PressureCallerSaveExhaustion(const s32* init, s32 iters) {
+    s32 v0 = init[0];
+    s32 v1 = init[1];
+    s32 v2 = init[2];
+    s32 v3 = init[3];
+    s32 v4 = init[4];
+    s32 v5 = init[5];
+    s32 v6 = init[6];
+    s32 v7 = init[7];
+    s32 v8 = init[8];
+    s32 v9 = init[9];
+    s32 v10 = init[10];
+    s32 v11 = init[11];
+    s32 i;
+    s32 acc = 0;
+    for (i = 0; i < iters; i++) {
+        s32 pre = (v0 + v1) ^ (v2 + v3) ^ (v4 + v5);
+        s32 mid = (v6 - v7) + (v8 - v9) + (v10 ^ v11);
+        acc = StepAccumulator(acc + pre + mid, i);
+        v0 += (acc & 7);
+        v1 -= (acc & 3);
+        v2 ^= v0;
+        v3 += v1;
+        v4 -= v2;
+        v5 ^= v3;
+        v6 += v4;
+        v7 -= v5;
+        v8 ^= v6;
+        v9 += v7;
+        v10 -= v8;
+        v11 ^= v9;
+    }
+    return acc + v0 + v1 + v2 + v3 + v4 + v5 + v6 + v7 + v8 + v9 + v10 + v11;
+}
+)",
+},
+      {
+    .test_name = "PressureCallerSaveFloatExhaustion",
+    .function_name = "PressureCallerSaveFloatExhaustion",
+    .original_c = R"(
+extern f32 RefineFloat(f32 x, s32 step);
+extern f64 RefineDouble(f64 y, f32 z);
+
+f64 PressureCallerSaveFloatExhaustion(const f32* fa, const f64* da, s32 n) {
+    f32 f0 = fa[0];
+    f32 f1 = fa[1];
+    f32 f2 = fa[2];
+    f32 f3 = fa[3];
+    f32 f4 = fa[4];
+    f32 f5 = fa[5];
+    f32 f6 = fa[6];
+    f32 f7 = fa[7];
+    f32 f8 = fa[8];
+    f64 d0 = da[0];
+    f64 d1 = da[1];
+    f64 d2 = da[2];
+    f64 d3 = da[3];
+    s32 i;
+    for (i = 0; i < n; i++) {
+        f32 t = RefineFloat((f0 + f1 + f2) / (f3 * f3 + 1.0f), i);
+        f64 u = RefineDouble(d0 * d1 - d2 + d3, t + f4 - f5);
+        f0 = f0 * 0.5f + t;
+        f1 = f1 + f6 * 0.25f;
+        f2 = f2 - f7 * 0.25f;
+        f3 = f3 + f8 * 0.125f;
+        f4 = f4 + t * 0.5f;
+        f5 = f5 - t * 0.25f;
+        f6 = f6 + f0 * 0.125f;
+        f7 = f7 - f1 * 0.125f;
+        f8 = f8 + f2 * 0.125f;
+        d0 = d0 + u * 0.25;
+        d1 = d1 - u * 0.125;
+        d2 = d2 + (f64)f3 * 0.5;
+        d3 = d3 - (f64)f4 * 0.5;
+    }
+    return d0 + d1 + d2 + d3 + (f64)(f0 + f1 + f2 + f3 + f4 + f5 + f6 + f7 + f8);
+}
+)",
+},
+      {
+    .test_name = "PressureMixedGprFprReloadSpill",
+    .function_name = "PressureMixedGprFprReloadSpill",
+    .original_c = R"(
+extern f32 AdjustMix(s32 code, f32 x, f32 y);
+
+f32 PressureMixedGprFprReloadSpill(const s32* ia, const s32* ib, const f32* fa,
+                                   f32* out, s32 n, s32 flag) {
+    s32 i0 = n & 3;
+    s32 i1 = (n + 1) & 3;
+    s32 i2 = (n + 2) & 3;
+    s32 i3 = (n + 3) & 3;
+    s32 a0 = ia[i0];
+    s32 a1 = ia[i1];
+    s32 b0 = ib[i2];
+    s32 b1 = ib[i3];
+    f32 x0 = fa[i0];
+    f32 x1 = fa[i1];
+    f32 x2 = fa[i2];
+    f32 x3 = fa[i3];
+    f32 x4 = x0 + x1;
+    f32 x5 = x2 - x3;
+    f32 x6 = x0 * x2;
+    f32 x7 = x1 * x3;
+    f32 x8 = (x4 - x5) * 0.5f;
+    f32 x9 = (x6 + x7) * 0.25f;
+    f32 adj;
+    if (flag != 0) {
+        x8 = x8 + x0 * 0.5f;
+        a0 = a0 + b1;
+    } else {
+        x9 = x9 - x3 * 0.5f;
+        b0 = b0 - a1;
+    }
+    adj = AdjustMix(a0 ^ b0, x4 + x6, x5 - x7);
+    out[i0] = x0 + x8 + adj;
+    out[i1] = x1 + x9 - adj;
+    out[i2] = x2 + x4 + (f32)(a0 + a1);
+    out[i3] = x3 + x5 + (f32)(b0 + b1);
+    return out[i0] + out[i1] + out[i2] + out[i3] + x6 + x7;
+}
+)",
+},
+      {
+    .test_name = "SplitLargeIntConstInterleave",
+    .function_name = "SplitLargeIntConstInterleave",
+    .original_c = R"(
+u32 SplitLargeIntConstInterleave(const u32* in_w, u32* out_w, u32 seed) {
+    u32 w0 = in_w[0];
+    u32 w1 = in_w[1];
+    u32 w2 = in_w[2];
+    u32 w3 = in_w[3];
+    u32 t0 = (w0 ^ 0x13579bdfu) + 0x2468ace1u;
+    u32 t1 = (w1 + 0x9e3779b9u) * 0x85ebca6bu;
+    u32 t2 = ((w2 ^ seed) * 0xc2b2ae35u) + 0x5a7c3e19u;
+    u32 t3 = (w3 ^ 0x2468ace1u) + (t0 >> 7);
+    out_w[0] = t0 ^ (t1 >> 13);
+    out_w[1] = t1 + (t2 << 5);
+    out_w[2] = t2 ^ (t3 >> 11);
+    out_w[3] = (t3 + 0x9e3779b9u) ^ 0x13579bdfu;
+    return out_w[0] ^ out_w[1] ^ out_w[2] ^ out_w[3];
+}
+)",
+},
+      {
+    .test_name = "DiModeShiftAddSubInterleave",
+    .function_name = "DiModeShiftAddSubInterleave",
+    .original_c = R"(
+u64 DiModeShiftAddSubInterleave(const u64* ua, const s64* sa, u64* out, s32 k) {
+    u64 x0 = ua[0];
+    u64 x1 = ua[1];
+    s64 y0 = sa[0];
+    s64 y1 = sa[1];
+    u64 s_small = (x0 << 7) ^ (x1 >> 13);
+    u64 s_large = (x0 << 37) | (x1 >> 41);
+    s64 diff = (y0 - y1) + (s64)k;
+    s64 ash = (diff >> 9) ^ (y0 >> 35);
+    u64 comb = (s_small + s_large) ^ (~(u64)ash);
+    u64 masked = (comb & x0) | ((comb ^ x1) - x0);
+    out[0] = comb;
+    out[1] = masked;
+    return comb + masked;
+}
+)",
+},
+      {
+    .test_name = "DiModeVarShiftAndCompare",
+    .function_name = "DiModeVarShiftAndCompare",
+    .original_c = R"(
+s64 DiModeVarShiftAndCompare(s64 a, u64 b, s32 sh_l, s32 sh_r, const u32* mask_tbl) {
+    s32 sl = sh_l & 63;
+    s32 sr = sh_r & 63;
+    u64 lv = ((u64)a) << sl;
+    u64 rv = b >> sr;
+    s64 ar = a >> sr;
+    u64 acc = (lv ^ rv) + (u64)mask_tbl[sl & 3];
+    if (ar < (s64)b) {
+        acc += ((u64)(mask_tbl[0] ^ 0x3c6ef372u)) << 16;
+    } else if (lv >= rv) {
+        acc -= (u64)(mask_tbl[1] + 0x9e3779b9u);
+    }
+    if (acc == b) {
+        return ar + 1;
+    }
+    return (s64)(acc ^ (u64)ar);
+}
+)",
+},
+      {
+    .test_name = "DiModeMulDivModWithCalls",
+    .function_name = "DiModeMulDivModWithCalls",
+    .original_c = R"(
+extern s64 FoldWideTick(s32 tag, s64 val, u64 extra);
+
+s64 DiModeMulDivModWithCalls(s32 tag, s64 a, s64 b, u64 u) {
+    s64 sdiv_d = (b & 0xfffLL) + 7LL;
+    u64 umod_d = (u & 0xfffULL) + 11ULL;
+    s64 prod = a * (b + 3LL);
+    s64 quot = prod / sdiv_d;
+    u64 rem = (u ^ (u64)a) % umod_d;
+    s64 folded = FoldWideTick(tag, quot + (s64)rem, (u64)prod ^ rem);
+    return folded + quot - (s64)rem;
+}
+)",
+},
+      {
+    .test_name = "DiModeLargeConstAndWideningMul",
+    .function_name = "DiModeLargeConstAndWideningMul",
+    .original_c = R"(
+u64 DiModeLargeConstAndWideningMul(const s32* sa, const u32* ua, u64* out, s32 n) {
+    u64 acc = 0x123456789abcdef1ULL;
+    s32 i;
+    for (i = 0; i < n; i++) {
+        s64 sp = (s64)sa[i] * (s64)(sa[i] ^ 0x13579bdf);
+        u64 up = (u64)ua[i] * (u64)(ua[i] + 0x2468ace1u);
+        u64 step = ((u64)sp + up) ^ 0xfedcba9876543217ULL;
+        acc = (acc ^ step) + (up >> 17);
+        out[i] = acc;
+    }
+    return acc;
+}
+)",
+},
+      {
+    .test_name = "CfgSwitchWithFpAndLargeConst",
+    .function_name = "CfgSwitchWithFpAndLargeConst",
+    .original_c = R"(
+extern f32 CommitSwitchSample(s32 op, f32 val, u32 tag);
+
+f32 CfgSwitchWithFpAndLargeConst(s32 op, const f32* buf, u32 key) {
+    f32 x = buf[0];
+    f32 y = buf[1];
+    f32 res = 0.0f;
+    u32 tag = key ^ 0x13579bdfu;
+    switch (op) {
+        case 0:
+            res = (x + y) / (y * y + 1.0f);
+            tag += 0x2468ace1u;
+            break;
+        case 1:
+            res = x * y * 1.5f;
+        case 2:
+            res = res + (x - y) * 0.25f;
+            tag ^= 0x9e3779b9u;
+            break;
+        case 3:
+            return (x * x - y) / (x * x + 2.0f);
+        case 4:
+            res = (f32)((s32)(key & 255u) * 3) + x;
+            tag += 0x85ebca6bu;
+            break;
+        case 5:
+            res = (y * 2.5f - x) / (x * x + 1.5f);
+            break;
+        case 6:
+            res = x * 0.75f + y * 0.125f;
+            tag ^= 0xc2b2ae35u;
+            break;
+        case 7:
+            res = (x + 1.0f) * (y - 1.0f);
+            break;
+        default:
+            res = x - y;
+            break;
+    }
+    return CommitSwitchSample(op, res, tag);
+}
+)",
+},
+      {
+    .test_name = "CfgNestedLoopEarlyExitSched",
+    .function_name = "CfgNestedLoopEarlyExitSched",
+    .original_c = R"(
+f32 CfgNestedLoopEarlyExitSched(const f32* grid, s32 rows, s32 cols, f32 limit) {
+    s32 r;
+    s32 c;
+    f32 total = 0.0f;
+    for (r = 0; r < rows; r++) {
+        f32 row_acc = 0.0f;
+        s32 row_base = r * cols;
+        for (c = 0; c < cols; c++) {
+            f32 v = grid[row_base + c];
+            f32 step;
+            if (v < -1000.0f) {
+                return -1.0f;
+            }
+            step = (v * 1.25f + 0.5f) / (v * v + 1.0f);
+            row_acc += step;
+            if (row_acc > limit) {
+                break;
+            }
+        }
+        total += row_acc * 0.5f;
+    }
+    return total;
+}
+)",
+},
+      {
+    .test_name = "CfgDiamondChainSharedEpilogue",
+    .function_name = "CfgDiamondChainSharedEpilogue",
+    .original_c = R"(
+struct DiamondOut {
+    s32 code;
+    f32 metric;
+};
+
+s32 CfgDiamondChainSharedEpilogue(s32 s_val, u32 u_val, f32 x, f32 thresh,
+                                  struct DiamondOut* out) {
+    s32 acc;
+    f32 m;
+    if (s_val < 0) {
+        acc = (-s_val) + 17;
+        m = x * 0.5f + 1.0f;
+    } else {
+        acc = (s_val ^ 0x13579bdf) + 17;
+        m = x * 0.5f + 1.0f;
+    }
+    if (u_val > 0x00020000u) {
+        acc = (acc << 2) ^ (s32)(u_val >> 5);
+    } else {
+        acc = (acc >> 1) + (s32)(u_val & 0xfffu);
+    }
+    if (m < thresh) {
+        m = (m + thresh) / (thresh * thresh + 1.0f);
+        acc += 31;
+    } else {
+        m = (m - thresh) * 0.75f;
+        acc -= 19;
+    }
+    out->code = acc ^ 0x2468ace1;
+    out->metric = m;
+    return out->code;
+}
+)",
+},
+      {
+    .test_name = "CfgStructUnionBitfieldPack",
+    .function_name = "CfgStructUnionBitfieldPack",
+    .original_c = R"(
+union PacketWord {
+    u32 raw_word;
+    u8 bytes[4];
+    struct {
+        u32 kind : 4;
+        s32 delta : 12;
+        u32 flags : 6;
+        u32 payload : 10;
+    } bits;
+};
+
+u32 CfgStructUnionBitfieldPack(const u32* stream, u32* out_stream, s32 count) {
+    u32 checksum = 0x5a7c3e19u;
+    s32 i;
+    for (i = 0; i < count; i++) {
+        union PacketWord pw;
+        s32 d;
+        pw.raw_word = stream[i];
+        d = pw.bits.delta;
+        if (pw.bits.kind == 3u) {
+            pw.bits.delta = (d >> 1) + 5;
+            pw.bits.flags = (pw.bits.flags ^ 0x15u) & 0x3fu;
+        } else if (d < 0) {
+            pw.bits.payload = (pw.bits.payload + (u32)(-d)) & 0x3ffu;
+            pw.bits.kind = (pw.bits.kind + 1u) & 0xfu;
+        } else {
+            pw.bits.payload = (pw.bits.payload ^ (u32)pw.bytes[0]) & 0x3ffu;
+        }
+        out_stream[i] = pw.raw_word;
+        checksum = (checksum ^ pw.raw_word) + ((u32)pw.bytes[3] << 4);
+    }
+    return checksum;
+}
+)",
+},
+      {
+    .test_name = "CfgVariadicSwitchDispatch",
+    .function_name = "CfgVariadicSwitchDispatch",
+    .original_c = R"(
+extern s32 LogVariadicItem(s32 idx, s32 val, f64 running);
+
+s32 CfgVariadicSwitchDispatch(s32 mode_count, const u8* ops, ...) {
+    char* ap = (char*)__builtin_next_arg(ops);
+    f64 f_acc = 0.0;
+    s32 i_acc = 0;
+    s32 i;
+    for (i = 0; i < mode_count; i++) {
+        u8 op = ops[i];
+        switch (op) {
+            case 0: {
+                s32 iv;
+                ap = (char*)(((s32)ap + 3) & -4);
+                iv = *(s32*)(void*)ap;
+                ap += 4;
+                i_acc += iv;
+                break;
+            }
+            case 1: {
+                u32 uv;
+                ap = (char*)(((s32)ap + 3) & -4);
+                uv = *(u32*)(void*)ap;
+                ap += 4;
+                i_acc ^= (s32)(uv & 0xffffu);
+                break;
+            }
+            case 2: {
+                f64 dv;
+                ap = (char*)(((s32)ap + 7) & -8);
+                dv = *(f64*)(void*)ap;
+                ap += 8;
+                f_acc += dv * 1.25;
+                break;
+            }
+            case 3: {
+                s64 qv;
+                ap = (char*)(((s32)ap + 7) & -8);
+                qv = *(s64*)(void*)ap;
+                ap += 8;
+                i_acc += (s32)(qv ^ (qv >> 32));
+                break;
+            }
+            case 4: {
+                s32 arg;
+                ap = (char*)(((s32)ap + 3) & -4);
+                arg = *(s32*)(void*)ap;
+                ap += 4;
+                i_acc += LogVariadicItem(i, arg, f_acc);
+                break;
+            }
+            case 5:
+                f_acc = f_acc * 0.5 + (f64)i_acc * 0.125;
+                break;
+            default:
+                i_acc += (s32)op;
+                break;
+        }
+    }
+    return i_acc + (s32)f_acc;
+}
+)",
+},
   };
   return *k_cases;
 }

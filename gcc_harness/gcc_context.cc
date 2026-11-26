@@ -61,6 +61,7 @@ void expand_function_end(char* filename, int line, int end_bindings);
 void instantiate_virtual_regs(void* fndecl, rtx_def* insns);
 void restore_reg_data(rtx_def* first);
 void reg_scan(rtx_def* f, int nregs, int repeat);
+void regclass_init();
 int compute_frame_size(int size);
 void set_last_insn(rtx_def* insn);
 void start_sequence();
@@ -251,6 +252,7 @@ rom_nom_nom::gcc_harness::Rtx __real_immed_double_const(int i0, int i1, int mode
 rom_nom_nom::gcc_harness::Rtx __real_immed_real_const(void* exp);
 rom_nom_nom::gcc_harness::Rtx __real_immed_real_const_1(double d, int mode);
 rom_nom_nom::gcc_harness::Rtx __real_force_const_mem(int mode, rom_nom_nom::gcc_harness::Rtx x);
+int __real_reload(rom_nom_nom::gcc_harness::Rtx first, int global, void* dumpfile);
 
 }  // extern "C"
 // NOLINTEND(readability-identifier-naming)
@@ -260,6 +262,7 @@ namespace {
 
 std::vector<Stage0ConstantPoolEntry>* g_cc1_pool_capture_target = nullptr;
 bool g_in_pool_snapshot = false;
+bool g_skip_reload_in_global_alloc = false;
 
 }  // namespace
 }  // namespace rom_nom_nom::gcc_harness
@@ -322,6 +325,13 @@ rom_nom_nom::gcc_harness::Rtx __wrap_force_const_mem(int mode, rom_nom_nom::gcc_
     }
   }
   return def;
+}
+
+int __wrap_reload(rom_nom_nom::gcc_harness::Rtx first, int global, void* dumpfile) {
+  if (rom_nom_nom::gcc_harness::g_skip_reload_in_global_alloc) {
+    return 0;
+  }
+  return __real_reload(first, global, dumpfile);
 }
 
 }  // extern "C"
@@ -898,8 +908,15 @@ void GccContext::BeginFunction(std::string_view func_name) {
   *reinterpret_cast<Rtx*>(static_cast<char*>(fn_decl) + 128) = fn_mem;
 
   current_function_decl = fn_decl;
+  // Reset `regclass.c`'s static `prefclass` pointer (`regclass.c:620-623`)
+  // after `temporary_allocation()` frees `rtl_obstack`, mirroring
+  // `toplev.c:2957`. Without this, `prefclass` dangles across functions and
+  // `record_reg_classes` (`regclass.c:1299`) reads stale/freed obstack memory
+  // on `pass == 0` under `-O1` (`flag_expensive_optimizations == 0`).
+  regclass_init();
   reg_renumber = nullptr;
   reg_n_refs = nullptr;
+  reg_n_sets = nullptr;
   reg_n_deaths = nullptr;
   reg_live_length = nullptr;
   reg_n_calls_crossed = nullptr;
@@ -1079,8 +1096,15 @@ void* GccContext::BeginFunctionFromAst(const FunctionDeclaration& func_decl,
   decl_map_[current_func_name_] = fn_decl;
 
   current_function_decl = fn_decl;
+  // Reset `regclass.c`'s static `prefclass` pointer (`regclass.c:620-623`)
+  // after `temporary_allocation()` frees `rtl_obstack`, mirroring
+  // `toplev.c:2957`. Without this, `prefclass` dangles across functions and
+  // `record_reg_classes` (`regclass.c:1299`) reads stale/freed obstack memory
+  // on `pass == 0` under `-O1` (`flag_expensive_optimizations == 0`).
+  regclass_init();
   reg_renumber = nullptr;
   reg_n_refs = nullptr;
+  reg_n_sets = nullptr;
   reg_n_deaths = nullptr;
   reg_live_length = nullptr;
   reg_n_calls_crossed = nullptr;
@@ -2688,12 +2712,13 @@ void PopulateMaterializedSidebandState(const RtlControlFlowGraph& cfg, Rtx first
     reg_renumber = nullptr;
   }
 
-  if (reg_n_sets == nullptr) {
-    reg_n_sets = AllocSidebandArray<short>(alloc_regs);
-  }
+  // Always allocate a fresh `reg_n_sets` buffer sized for `alloc_regs` rather
+  // than reusing a pointer that may belong to a smaller function or a reset
+  // `rtl_obstack` (`flow.c:life_analysis` allocates `reg_n_sets` via `oballoc`).
+  reg_n_sets = AllocSidebandArray<short>(alloc_regs);
   if (!cfg.sideband.reg_n_sets.empty() && reg_n_sets != nullptr) {
     for (const auto& [regno, val] : cfg.sideband.reg_n_sets) {
-      if (regno >= 0 && regno < max_regno) {
+      if (regno >= 0 && regno < alloc_regs) {
         reg_n_sets[regno] = static_cast<short>(val);
       }
     }
@@ -3944,7 +3969,10 @@ RtlControlFlowGraph GccContext::DematerializeToCfg(Rtx first_insn, RtlPassKind p
   }
   if (reg_live_length != nullptr) {
     for (int r = 0; r < nregs; ++r) {
-      if (reg_live_length[r] > 0) {
+      // Preserve negative sentinel `-1` (`global.c:388` skips
+      // `reg_live_length[i] == -1`, e.g. phantom `alter_reg` slots with
+      // `reg_n_refs > 0` and `reg_n_deaths == 0`).
+      if (reg_live_length[r] != 0) {
         cfg.sideband.reg_live_length[r] = reg_live_length[r];
       }
     }
@@ -4131,6 +4159,15 @@ std::vector<Stage0ConstantPoolEntry> GccContext::SnapshotActiveConstantPool() {
 
 void GccContext::SetCc1ConstantPoolCaptureTarget(std::vector<Stage0ConstantPoolEntry>* target) {
   g_cc1_pool_capture_target = target;
+}
+
+GccContext::ScopedSkipReloadInGlobalAlloc::ScopedSkipReloadInGlobalAlloc()
+    : prev_(g_skip_reload_in_global_alloc) {
+  g_skip_reload_in_global_alloc = true;
+}
+
+GccContext::ScopedSkipReloadInGlobalAlloc::~ScopedSkipReloadInGlobalAlloc() {
+  g_skip_reload_in_global_alloc = prev_;
 }
 
 Rtx GccContext::RegisterConstantPoolEntry(int label_num, const Stage0ConstantPoolEntry& cp,
