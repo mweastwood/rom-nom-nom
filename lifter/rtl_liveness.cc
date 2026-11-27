@@ -463,7 +463,7 @@ void MarkUsedRegs(const FlowEnv& env, const RtlExpr& expr, const RegBitSet& need
         if (regno < 0 || regno >= env.nregs) {
           return;
         }
-        if (!(env.reload_completed && regno == kMipsArgPointerRegno)) {
+        if (!env.reload_completed || regno != kMipsArgPointerRegno) {
           live->Set(regno);
         }
         if (regno < kMipsFirstPseudoRegister) {
@@ -1168,6 +1168,9 @@ void ReconstructRtlLiveness(RtlControlFlowGraph* cfg, const CompilationProfile& 
           .live_length = (l_it != cfg->sideband.reg_live_length.end()) ? l_it->second : 0,
       });
     }
+    std::sort(
+        saved_phantoms.begin(), saved_phantoms.end(),
+        [](const SavedPhantomPseudo& a, const SavedPhantomPseudo& b) { return a.regno < b.regno; });
   }
 
   cfg->sideband.basic_block_live_at_start.clear();

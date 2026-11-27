@@ -9,76 +9,14 @@
 #include "absl/container/flat_hash_set.h"
 #include "core/rtl_cfg.h"
 #include "core/rtl_expr.h"
+#include "lifter/mips_idiom_utils.h"
 
 namespace rom_nom_nom::lifter {
-
-// 128-bit hard-register bitset covering MIPS GPRs (`$0..$31`), FPRs (`$f0..$f31` =
-// `32..63`), and HI/LO/HILO/FCC (`64..67`).
-struct MipsHardRegSet {
-  uint64_t lo = 0;
-  uint64_t hi = 0;
-
-  bool Test(int r) const {
-    if (r < 0 || r >= 128) {
-      return false;
-    }
-    return r < 64 ? ((lo & (uint64_t{1} << r)) != 0) : ((hi & (uint64_t{1} << (r - 64))) != 0);
-  }
-  void Set(int r) {
-    if (r >= 0 && r < 64) {
-      lo |= (uint64_t{1} << r);
-    } else if (r >= 64 && r < 128) {
-      hi |= (uint64_t{1} << (r - 64));
-    }
-  }
-  void Clear(int r) {
-    if (r >= 0 && r < 64) {
-      lo &= ~(uint64_t{1} << r);
-    } else if (r >= 64 && r < 128) {
-      hi &= ~(uint64_t{1} << (r - 64));
-    }
-  }
-  void Or(const MipsHardRegSet& o) {
-    lo |= o.lo;
-    hi |= o.hi;
-  }
-  void AndNot(const MipsHardRegSet& o) {
-    lo &= ~o.lo;
-    hi &= ~o.hi;
-  }
-};
-
-bool IsSavedGprOrRaRegno(int r);
-bool IsValidGp32DiPair(int reg_hi);
-bool IsPlainSiGpr(const RtlExpr& expr, int* out_reg = nullptr);
-int DetectStackFrameSize(const RtlControlFlowGraph& cfg);
-int ModeAccessByteSize(RtlMachineMode mode);
-
-bool ExtractBasePlusConstAddr(const RtlExpr& addr, int* out_base, int64_t* out_off);
-bool ExtractMovstrsiAddrsAndBytes(const RtlExpr& pat, int* out_dst_reg, int64_t* out_dst_off,
-                                  int* out_src_reg, int64_t* out_src_off, int* out_bytes);
-
-void CollectHardRegDefsAndUses(const RtlExpr& pat, bool gp64, bool fp64, MipsHardRegSet* defs,
-                               MipsHardRegSet* uses);
 
 void CollectCompareDiamondDiPairs(const std::vector<std::vector<RtlPatternAndNotes>>& blocks,
                                   absl::flat_hash_set<int>* out_di_even_regs);
 void CollectExistingDiEvenRegs(const std::vector<std::vector<RtlPatternAndNotes>>& blocks,
                                absl::flat_hash_set<int>* out_di_even_regs, bool* out_has_any_di);
-
-// Recombines `movstrsi_internal2` (`split_kind = 1`) + `movstrsi_internal3`
-// (`split_kind = 2`, or unpacked delay-slot `swr`/`sb`) pairs back into unsplit
-// `movstrsi_internal` (`split_kind = 0`, `mips.md:3609`), and coalesces
-// adjacent multi-batch `movstrsi_internal` chunks (`<= 2 * MAX_MOVE_BYTES`,
-// `mips.c:2361`).
-bool TryRecombineAdjacentSplitMovstrsiInBlock(std::vector<RtlPatternAndNotes>* insns,
-                                              bool mark_newly_folded_sentinel, bool gp64 = false);
-
-// Coalesces adjacent `movstrsi_internal` (`split_kind = 0`) batches emitted by
-// `output_block_move` (`mips.c:2361`, `bytes_a == MAX_MOVE_BYTES`,
-// `bytes_a + bytes_b <= 2 * MAX_MOVE_BYTES`) back into a single instruction.
-bool TryCoalesceMultiBatchMovstrsiInBlock(std::vector<RtlPatternAndNotes>* insns, bool gp64,
-                                          bool mark_newly_folded_sentinel);
 
 // Folds `mips.md` `!TARGET_64BIT` multi-instruction `DImode` arithmetic, shift,
 // and widening multiply templates (`mulsidi3_internal`, `umulsidi3_internal`,
@@ -133,13 +71,11 @@ bool TryFoldMovstrsiBlockMovesInBlock(
     std::vector<RtlPatternAndNotes>* insns,
     std::optional<RtlPatternAndNotes>* epilogue_delay_pn = nullptr);
 
-// Restores `!TARGET_64BIT` `emit_no_conflict_block` (`optabs.c:2485-2525`)
-// standalone `(clobber (reg:DI dh)) (insn_list:REG_LIBCALL (nil))` markers
-// (and `(subreg:SI (reg:DI 64) 1)` on `mtlo`) ahead of 32-to-64-bit integer
-// extensions whose `DImode` result is consumed in the same block. Idempotent
-// when the `CLOBBER` marker is already present.
-void RestoreNoConflictExtendClobbers(RtlControlFlowGraph* cfg, bool gp64, bool fp64,
-                                     bool runs_sched2 = false);
+// Stage-0 `.12.dbr` wrapper around `RestoreNoConflictExtendClobbersWithTailCheck`
+// that additionally checks whether a trailing `(sequence ...)` or
+// `epilogue_delay_pattern` consumes the `DImode` pair once unpacked and folded.
+void RestoreStage0DbrNoConflictExtendClobbers(RtlControlFlowGraph* cfg, bool gp64, bool fp64,
+                                              bool runs_sched2 = false);
 
 }  // namespace rom_nom_nom::lifter
 

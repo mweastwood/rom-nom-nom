@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/btree_set.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
@@ -707,7 +708,7 @@ void SearchDeletedEquivExprInNode(RtlExpr* node, RtlOp parent_op, size_t child_i
         !inside_mem_addr ||
         (parent_op == RtlOp::kMem && (node->op == RtlOp::kSymbolRef || node->op == RtlOp::kConst));
     const bool ptr_compatible = !IsSymbolicPointerConstant(*node) || is_ptr;
-    const bool non_ptr_float_ok = !(is_ptr && node->op == RtlOp::kConstDouble);
+    const bool non_ptr_float_ok = !is_ptr || node->op != RtlOp::kConstDouble;
     if (!is_branch_label && valid_in_mem_addr && ptr_compatible && non_ptr_float_ok) {
       int score = 70;
       if (IsSymbolicPointerConstant(*node)) {
@@ -823,7 +824,7 @@ void RestoreDeletedEquivInitInsns(RtlControlFlowGraph* out,
     }
 
     const size_t num_blocks = out->rpo_blocks.size();
-    absl::flat_hash_set<size_t> live_blocks;
+    absl::btree_set<size_t> live_blocks;
     for (const auto& [bb_idx, live_set] : out->sideband.basic_block_live_at_start) {
       if (bb_idx >= 0 && static_cast<size_t>(bb_idx) < num_blocks && live_set.contains(regno)) {
         live_blocks.insert(static_cast<size_t>(bb_idx));

@@ -177,11 +177,31 @@ cc_library(
     srcs = ["mips_multi_insn_idioms.cc"],
     hdrs = ["mips_multi_insn_idioms.h"],
     deps = [
+        ":mips_idiom_utils",
         ":reconstruct_hard_reg_liveness",
+        ":rtl_cfg_utils",
         "//core:compiler_flags",
         "//core:rtl_cfg",
         "//core:rtl_expr",
         "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "mips_multi_insn_idioms_test",
+    size = "small",
+    srcs = ["mips_multi_insn_idioms_test.cc"],
+    testonly = True,
+    deps = [
+        ":mips_idiom_utils",
+        ":mips_multi_insn_idioms",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
     ],
 )
 
@@ -218,6 +238,41 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "sched_post_reload_projection",
+    srcs = ["sched_post_reload_projection.cc"],
+    hdrs = ["sched_post_reload_projection.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":sched_model",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/container:btree",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_library(
+    name = "sched_stage0_attribution",
+    srcs = ["sched_stage0_attribution.cc"],
+    hdrs = ["sched_stage0_attribution.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":rtl_liveness",
+        ":sched_model",
+        ":sched_post_reload_projection",
+        "//core:compiler_flags",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/container:btree",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
 cc_test(
     name = "sched_model_test",
     size = "medium",
@@ -237,6 +292,85 @@ cc_test(
         "@abseil-cpp//absl/container:btree",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "sched_post_reload_projection_test",
+    size = "small",
+    srcs = ["sched_post_reload_projection_test.cc"],
+    deps = [
+        ":rtl_liveness",
+        ":sched_model",
+        ":sched_post_reload_projection",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/container:btree",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "sched_stage0_attribution_test",
+    size = "small",
+    srcs = ["sched_stage0_attribution_test.cc"],
+    linkstatic = True,
+    deps = [
+        ":rtl_liveness",
+        ":sched_model",
+        ":sched_post_reload_projection",
+        ":sched_stage0_attribution",
+        "//core:round_trip_test_cases",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "//gcc_harness:function_hooks",
+        "//gcc_harness:gcc_context",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "fuzz_test_utils",
+    srcs = ["fuzz_test_utils.cc"],
+    hdrs = ["fuzz_test_utils.h"],
+    testonly = True,
+    visibility = ["//visibility:public"],
+    deps = [
+        ":rtl_liveness",
+        ":sched_model",
+        ":sched_post_reload_projection",
+        "//core:round_trip_test_cases",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/container:btree",
+        "@abseil-cpp//absl/functional:function_ref",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "fuzz_test_utils_test",
+    size = "small",
+    srcs = ["fuzz_test_utils_test.cc"],
+    testonly = True,
+    deps = [
+        ":fuzz_test_utils",
+        "//core:round_trip_test_cases",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/container:btree",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
         "@googletest//:gtest",
         "@googletest//:gtest_main",
     ],
@@ -250,10 +384,11 @@ cc_test(
     shard_count = 32,
     testonly = True,
     deps = [
+        ":fuzz_test_utils",
         ":invert_schedule_block",
         ":pass06_sched1_pre_alloc",
-        ":rtl_liveness",
         ":sched_model",
+        ":sched_post_reload_projection",
         "//core:compiler_flags",
         "//core:round_trip_test_cases",
         "//core:rtl_cfg",
@@ -336,6 +471,8 @@ cc_library(
     hdrs = ["reconstruct_o0_final_scan.h"],
     deps = [
         ":reconstruct_hard_reg_liveness",
+        ":rtl_cfg_utils",
+        ":stupid_alloc_model",
         "//core:compiler_flags",
         "//core:rtl_cfg",
         "//core:rtl_expr",
@@ -346,17 +483,34 @@ cc_library(
     ],
 )
 
+cc_test(
+    name = "reconstruct_o0_final_scan_test",
+    size = "small",
+    srcs = ["reconstruct_o0_final_scan_test.cc"],
+    testonly = True,
+    deps = [
+        ":reconstruct_o0_final_scan",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/strings",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
 cc_library(
     name = "invert_final_scan_insn",
     srcs = ["invert_final_scan_insn.cc"],
     hdrs = ["invert_final_scan_insn.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":mips_idiom_utils",
         ":mips_multi_insn_idioms",
         ":reconstruct_hard_reg_liveness",
         ":reconstruct_o0_final_scan",
         ":rtl_liveness",
         ":sched_model",
+        ":sched_stage0_attribution",
         "//core:compiler_flags",
         "//core:rtl_cfg",
         "//core:rtl_expr",
@@ -378,6 +532,7 @@ cc_test(
     shard_count = 32,
     deps = [
         ":invert_final_scan_insn",
+        ":mips_idiom_utils",
         ":mips_multi_insn_idioms",
         "//core:round_trip_test_cases",
         "//core:rtl_cfg",
@@ -464,12 +619,150 @@ cc_test(
 )
 
 cc_library(
+    name = "rtl_cfg_utils",
+    srcs = ["rtl_cfg_utils.cc"],
+    hdrs = ["rtl_cfg_utils.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/container:btree",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "rtl_cfg_utils_test",
+    size = "small",
+    srcs = ["rtl_cfg_utils_test.cc"],
+    deps = [
+        ":rtl_cfg_utils",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "reorg_model",
+    srcs = ["reorg_model.cc"],
+    hdrs = ["reorg_model.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":rtl_cfg_utils",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/status:statusor",
+    ],
+)
+
+cc_test(
+    name = "reorg_model_test",
+    size = "small",
+    srcs = ["reorg_model_test.cc"],
+    deps = [
+        ":reorg_model",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "stack_frame_slot_classifier",
+    srcs = ["stack_frame_slot_classifier.cc"],
+    hdrs = ["stack_frame_slot_classifier.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":rtl_cfg_utils",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/container:btree",
+    ],
+)
+
+cc_test(
+    name = "stack_frame_slot_classifier_test",
+    size = "small",
+    srcs = ["stack_frame_slot_classifier_test.cc"],
+    deps = [
+        ":stack_frame_slot_classifier",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/container:btree",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "stupid_alloc_model",
+    srcs = ["stupid_alloc_model.cc"],
+    hdrs = ["stupid_alloc_model.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":mips_reg_alloc_common",
+        ":rtl_cfg_utils",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/container:btree",
+    ],
+)
+
+cc_test(
+    name = "stupid_alloc_model_test",
+    size = "small",
+    srcs = ["stupid_alloc_model_test.cc"],
+    deps = [
+        ":stupid_alloc_model",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/container:btree",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "mips_idiom_utils",
+    srcs = ["mips_idiom_utils.cc"],
+    hdrs = ["mips_idiom_utils.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":rtl_cfg_utils",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/container:btree",
+        "@abseil-cpp//absl/functional:function_ref",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+cc_test(
+    name = "mips_idiom_utils_test",
+    size = "small",
+    srcs = ["mips_idiom_utils_test.cc"],
+    deps = [
+        ":mips_idiom_utils",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/strings",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "invert_make_return_insns",
     srcs = ["invert_make_return_insns.cc"],
     hdrs = ["invert_make_return_insns.h"],
     visibility = ["//visibility:public"],
     deps = [
         ":reconstruct_hard_reg_liveness",
+        ":reorg_model",
+        ":rtl_cfg_utils",
         "//core:compiler_flags",
         "//core:rtl_cfg",
         "//core:rtl_expr",
@@ -510,10 +803,11 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":reconstruct_hard_reg_liveness",
+        ":reorg_model",
+        ":rtl_cfg_utils",
         "//core:compiler_flags",
         "//core:rtl_cfg",
         "//core:rtl_expr",
-        "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
     ],
@@ -549,7 +843,10 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":reconstruct_hard_reg_liveness",
+        ":reorg_model",
+        ":rtl_cfg_utils",
         ":sched_model",
+        ":sched_post_reload_projection",
         "//core:compiler_flags",
         "//core:rtl_cfg",
         "//core:rtl_expr",
@@ -588,16 +885,20 @@ cc_library(
     hdrs = ["invert_fill_simple_delay_slots.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":mips_idiom_utils",
         ":mips_multi_insn_idioms",
         ":post_reload_noop_moves",
         ":reconstruct_hard_reg_liveness",
+        ":reorg_model",
+        ":rtl_cfg_utils",
         ":rtl_liveness",
         ":sched_model",
+        ":sched_post_reload_projection",
+        ":sched_stage0_attribution",
         "//core:compiler_flags",
         "//core:rtl_cfg",
         "//core:rtl_expr",
         "@abseil-cpp//absl/container:btree",
-        "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
@@ -680,6 +981,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":reconstruct_hard_reg_liveness",
+        ":rtl_cfg_utils",
         "//core:compiler_flags",
         "//core:rtl_cfg",
         "//core:rtl_expr",
@@ -712,6 +1014,7 @@ cc_library(
     deps = [
         ":post_reload_noop_moves",
         ":reconstruct_hard_reg_liveness",
+        ":rtl_cfg_utils",
         "//core:compiler_flags",
         "//core:rtl_cfg",
         "//core:rtl_expr",
@@ -796,11 +1099,12 @@ cc_library(
     hdrs = ["invert_schedule_block.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":mips_multi_insn_idioms",
+        ":mips_idiom_utils",
         ":post_reload_noop_moves",
         ":reconstruct_hard_reg_liveness",
         ":rtl_liveness",
         ":sched_model",
+        ":sched_post_reload_projection",
         "//core:compiler_flags",
         "//core:rtl_cfg",
         "//core:rtl_expr",
@@ -898,6 +1202,7 @@ cc_library(
         ":reconstruct_hard_reg_liveness",
         ":rtl_liveness",
         ":sched_model",
+        ":stack_frame_slot_classifier",
         "//core:compiler_flags",
         "//core:rtl_cfg",
         "//core:rtl_expr",
@@ -945,9 +1250,11 @@ cc_library(
     deps = [
         ":reconstruct_hard_reg_liveness",
         ":rtl_liveness",
+        ":stack_frame_slot_classifier",
         "//core:compiler_flags",
         "//core:rtl_cfg",
         "//core:rtl_expr",
+        "@abseil-cpp//absl/container:btree",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/status",
@@ -990,21 +1297,123 @@ cc_test(
 )
 
 cc_library(
+    name = "mips_reg_alloc_common",
+    srcs = ["mips_reg_alloc_common.cc"],
+    hdrs = ["mips_reg_alloc_common.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//core:compiler_flags",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/container:btree",
+        "@abseil-cpp//absl/functional:function_ref",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "mips_reg_alloc_common_test",
+    size = "small",
+    srcs = ["mips_reg_alloc_common_test.cc"],
+    deps = [
+        ":mips_reg_alloc_common",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/status:statusor",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "local_alloc_model",
+    srcs = ["local_alloc_model.cc"],
+    hdrs = ["local_alloc_model.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":mips_reg_alloc_common",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/container:btree",
+    ],
+)
+
+cc_test(
+    name = "local_alloc_model_test",
+    size = "small",
+    srcs = ["local_alloc_model_test.cc"],
+    linkstatic = True,
+    deps = [
+        ":local_alloc_model",
+        ":mips_reg_alloc_common",
+        ":rtl_liveness",
+        "//core:round_trip_test_cases",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "//gcc_harness:function_hooks",
+        "//gcc_harness:gcc_context",
+        "//gcc_harness:shared_corpus_trace_loader",
+        "@abseil-cpp//absl/container:btree",
+        "@abseil-cpp//absl/status:statusor",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
+    name = "global_alloc_model",
+    srcs = ["global_alloc_model.cc"],
+    hdrs = ["global_alloc_model.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":mips_reg_alloc_common",
+        "//core:rtl_cfg",
+        "//core:rtl_expr",
+        "@abseil-cpp//absl/container:btree",
+        "@abseil-cpp//absl/functional:function_ref",
+        "@abseil-cpp//absl/status:statusor",
+    ],
+)
+
+cc_test(
+    name = "global_alloc_model_test",
+    size = "small",
+    srcs = ["global_alloc_model_test.cc"],
+    linkstatic = True,
+    deps = [
+        ":global_alloc_model",
+        ":mips_reg_alloc_common",
+        ":rtl_liveness",
+        "//core:round_trip_test_cases",
+        "//core:rtl_cfg",
+        "//gcc_harness:function_hooks",
+        "//gcc_harness:gcc_context",
+        "//gcc_harness:shared_corpus_trace_loader",
+        "@abseil-cpp//absl/container:btree",
+        "@abseil-cpp//absl/status:statusor",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_library(
     name = "invert_global_alloc",
     srcs = ["invert_global_alloc.cc"],
     hdrs = ["invert_global_alloc.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":global_alloc_model",
+        ":local_alloc_model",
+        ":mips_reg_alloc_common",
         ":rtl_liveness",
         "//core:compiler_flags",
         "//core:rtl_cfg",
         "//core:rtl_expr",
+        "@abseil-cpp//absl/container:btree",
         "@abseil-cpp//absl/container:flat_hash_map",
-        "@abseil-cpp//absl/container:flat_hash_set",
-        "@abseil-cpp//absl/functional:function_ref",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
-        "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
     ],
 )
@@ -1147,6 +1556,7 @@ cc_library(
         "//core:compiler_flags",
         "//core:rtl_cfg",
         "//core:rtl_expr",
+        "@abseil-cpp//absl/container:btree",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/status",

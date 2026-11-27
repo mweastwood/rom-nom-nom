@@ -564,5 +564,289 @@ TEST(PostReloadNoopMovesTest, RestoresO1ZeroExtendDiNoConflictRetvalNoopMove) {
   }
 }
 
+TEST(PostReloadNoopMovesTest, CaseBSequentialLoopPreheaderArgCopyPositiveAndNegative) {
+  const CompilationProfile o2_prof{.optimize_level = 2, .c_flags = {"-O2", "-mips2", "-Wa,-g"}};
+
+  auto make_case_b_cfg = [](bool add_multicycle_load_in_preheader, bool arg_live_after_loop) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kSched2;
+    cfg.sideband.is_leaf_function = true;
+    cfg.sideband.basic_block_live_at_start = {
+        {0, {4, 5, 29, 31}},    {1, {4, 5, 8, 29, 31}}, {2, {4, 5, 8, 29, 31}},
+        {3, {4, 5, 8, 29, 31}}, {4, {2, 29, 31}},
+    };
+    if (arg_live_after_loop) {
+      cfg.sideband.basic_block_live_at_start[4].insert(4);
+    }
+    cfg.rpo_blocks.resize(5);
+
+    // B0: initializes `$8 t0` (higher caller reg witness), falls into earlier loop `B1`.
+    cfg.rpo_blocks[0].id = 0;
+    cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 8 t0) (const_int 0))");
+    cfg.rpo_blocks[0].successors = {1};
+
+    // B1 (earlier loop): `$4 a0` is live-in & unmodified, `$2 v0` (`pref_hr`) is completely
+    // unused/free, while higher caller reg `$8 t0` is live-in & written.
+    cfg.rpo_blocks[1].id = 1;
+    cfg.rpo_blocks[1].has_label = true;
+    cfg.rpo_blocks[1].predecessors = {0, 1};
+    cfg.rpo_blocks[1].successors = {1, 2};
+    cfg.rpo_blocks[1].AddPatternOnly("(set (reg:SI 8 t0) (plus:SI (reg:SI 8 t0) (const_int 1)))");
+    cfg.rpo_blocks[1].AddPatternOnly(
+        "(set (pc) (if_then_else (lt:SI (reg:SI 8 t0) (reg:SI 5 a1)) (label_ref L0) (pc)))");
+
+    // B2 (unique non-loop preheader of writer loop `B3`).
+    cfg.rpo_blocks[2].id = 2;
+    cfg.rpo_blocks[2].predecessors = {1};
+    cfg.rpo_blocks[2].successors = {3};
+    if (add_multicycle_load_in_preheader) {
+      cfg.rpo_blocks[2].AddPatternOnly("(set (reg:SI 3 v1) (mem:SI (reg:SI 5 a1)))");
+    } else {
+      cfg.rpo_blocks[2].AddPatternOnly("(set (reg:SI 3 v1) (const_int 0))");
+    }
+
+    // B3 (writer loop): modifies `$4 a0` and sets `pref_hr = $2 v0` from `$4 a0`.
+    cfg.rpo_blocks[3].id = 3;
+    cfg.rpo_blocks[3].has_label = true;
+    cfg.rpo_blocks[3].predecessors = {2, 3};
+    cfg.rpo_blocks[3].successors = {3, 4};
+    cfg.rpo_blocks[3].AddPatternOnly("(set (reg:SI 2 v0) (plus:SI (reg:SI 4 a0) (const_int 4)))");
+    cfg.rpo_blocks[3].AddPatternOnly("(set (reg:SI 4 a0) (plus:SI (reg:SI 4 a0) (const_int 1)))");
+    cfg.rpo_blocks[3].AddPatternOnly(
+        "(set (pc) (if_then_else (lt:SI (reg:SI 4 a0) (reg:SI 8 t0)) (label_ref L1) (pc)))");
+
+    // B4 (exit).
+    cfg.rpo_blocks[4].id = 4;
+    cfg.rpo_blocks[4].predecessors = {3};
+    cfg.rpo_blocks[4].AddPatternOnly("(set (reg/i:SI 2 v0) (reg:SI 2 v0))");
+    cfg.rpo_blocks[4].AddPatternOnly("(use (reg/i:SI 2 v0))");
+    return cfg;
+  };
+
+  // Positive: restores `(set (reg:SI 4 a0) (reg:SI 4 a0))` in BOTH `B0` and preheader `B2`.
+  {
+    RtlControlFlowGraph cfg =
+        make_case_b_cfg(/*add_multicycle_load_in_preheader=*/false, /*arg_live_after_loop=*/false);
+    RestoreSched2DeletedNoopMoves(&cfg, o2_prof);
+    ASSERT_EQ(cfg.rpo_blocks[0].instructions.size(), 2u) << cfg.FormatSummary();
+    EXPECT_EQ(cfg.rpo_blocks[0].instructions[0],
+              "(set (reg:SI 4 a0) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+    ASSERT_EQ(cfg.rpo_blocks[2].instructions.size(), 2u) << cfg.FormatSummary();
+    EXPECT_EQ(cfg.rpo_blocks[2].instructions[0],
+              "(set (reg:SI 4 a0) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+  }
+
+  // Negative 1: multi-cycle load in `B2` ahead of `$4 a0` suppresses Case B under `sched2`.
+  {
+    RtlControlFlowGraph cfg =
+        make_case_b_cfg(/*add_multicycle_load_in_preheader=*/true, /*arg_live_after_loop=*/false);
+    RestoreSched2DeletedNoopMoves(&cfg, o2_prof);
+    EXPECT_EQ(cfg.rpo_blocks[2].instructions.size(), 1u) << cfg.FormatSummary();
+  }
+
+  // Negative 2: when `$4 a0` remains live-out to `B4` after the writer loop, Case B does not fire.
+  {
+    RtlControlFlowGraph cfg =
+        make_case_b_cfg(/*add_multicycle_load_in_preheader=*/false, /*arg_live_after_loop=*/true);
+    RestoreSched2DeletedNoopMoves(&cfg, o2_prof);
+    EXPECT_EQ(cfg.rpo_blocks[2].instructions.size(), 1u) << cfg.FormatSummary();
+  }
+}
+
+TEST(PostReloadNoopMovesTest, CaseCMultiBlockLocalAllocArgSuggPositiveAndNegative) {
+  const CompilationProfile o2_prof{.optimize_level = 2, .c_flags = {"-O2", "-mips2", "-Wa,-g"}};
+
+  auto make_case_c_cfg = [](bool insert_call_before_dst_death) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kSched2;
+    cfg.sideband.is_leaf_function = !insert_call_before_dst_death;
+    cfg.sideband.basic_block_live_at_start = {{0, {4, 5, 29, 31}}, {1, {4, 29, 31}}, {2, {29, 31}}};
+    cfg.rpo_blocks.resize(3);
+
+    cfg.rpo_blocks[0].id = 0;
+    cfg.rpo_blocks[0].successors = {2, 1};
+    cfg.rpo_blocks[0].AddPatternOnly(
+        "(set (pc) (if_then_else (eq:SI (reg:SI 5 a1) (const_int 0)) (label_ref L1) (pc))) "
+        "(expr_list:REG_DEAD (reg:SI 5 a1) (nil))");
+
+    // B1: `$4 a0` dies on `(set $8 t0 (plus $4 a0 7))`, then `$8 t0` dies locally at `j`.
+    cfg.rpo_blocks[1].id = 1;
+    cfg.rpo_blocks[1].predecessors = {0};
+    cfg.rpo_blocks[1].successors = {2};
+    cfg.rpo_blocks[1].AddPatternOnly(
+        "(set (reg:SI 8 t0) (plus:SI (reg:SI 4 a0) (const_int 7))) "
+        "(expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+    if (insert_call_before_dst_death) {
+      cfg.rpo_blocks[1].AddPatternOnly(
+          "(parallel[ (call (mem:SI (symbol_ref:SI (\"callee\"))) (const_int 0)) "
+          "(clobber (reg:SI 31 ra)) ] )");
+    }
+    cfg.rpo_blocks[1].AddPatternOnly(
+        "(set (mem:SI (symbol_ref:SI (\"g_out\"))) (reg:SI 8 t0)) "
+        "(expr_list:REG_DEAD (reg:SI 8 t0) (nil))");
+
+    cfg.rpo_blocks[2].id = 2;
+    cfg.rpo_blocks[2].has_label = true;
+    cfg.rpo_blocks[2].predecessors = {0, 1};
+    cfg.rpo_blocks[2].AddPatternOnly("(set (reg/i:SI 2 v0) (const_int 0))");
+    cfg.rpo_blocks[2].AddPatternOnly("(use (reg/i:SI 2 v0))");
+    return cfg;
+  };
+
+  // Positive: Case C restores `(set (reg:SI 4 a0) (reg:SI 4 a0))` at `B0`.
+  {
+    RtlControlFlowGraph cfg = make_case_c_cfg(/*insert_call_before_dst_death=*/false);
+    RestoreSched2DeletedNoopMoves(&cfg, o2_prof);
+    ASSERT_EQ(cfg.rpo_blocks[0].instructions.size(), 2u) << cfg.FormatSummary();
+    EXPECT_EQ(cfg.rpo_blocks[0].instructions[0],
+              "(set (reg:SI 4 a0) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+  }
+
+  // Negative: intervening call between `i` and `dst_hr` death blocks Case C.
+  {
+    RtlControlFlowGraph cfg = make_case_c_cfg(/*insert_call_before_dst_death=*/true);
+    RestoreSched2DeletedNoopMoves(&cfg, o2_prof);
+    EXPECT_EQ(cfg.rpo_blocks[0].instructions.size(), 1u) << cfg.FormatSummary();
+  }
+}
+
+TEST(PostReloadNoopMovesTest, CaseDSingleBlockEntryCopySuggPositiveAndNegative) {
+  const CompilationProfile o2_prof{.optimize_level = 2, .c_flags = {"-O2", "-mips2", "-Wa,-g"}};
+
+  auto make_case_d_cfg = [](bool use_higher_early_reg) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kSched2;
+    cfg.sideband.is_leaf_function = true;
+    cfg.sideband.basic_block_live_at_start = {{0, {4, 29, 31}}};
+    cfg.rpo_blocks.resize(1);
+    cfg.rpo_blocks[0].id = 0;
+    const std::string early = use_higher_early_reg ? "(reg:SI 8 t0)" : "(reg:SI 2 v0)";
+    const std::string early_i = use_higher_early_reg ? "(reg/i:SI 8 t0)" : "(reg/i:SI 2 v0)";
+    cfg.rpo_blocks[0].AddPatternOnly("(set " + early + " (plus:SI (reg:SI 4 a0) (const_int 1)))");
+    cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 4 a0) (plus:SI (reg:SI 4 a0) (const_int 4)))");
+    cfg.rpo_blocks[0].AddPatternOnly("(set " + early_i + " (plus:SI " + early +
+                                     " (reg:SI 4 a0))) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+    cfg.rpo_blocks[0].AddPatternOnly("(use (reg/i:SI 2 v0))");
+    return cfg;
+  };
+
+  // Positive: `early_hr = $2 v0` (`< $4 a0` in natural register order) + `$4 a0` RMW + final
+  // integrated combine triggers Case D entry self-move restoration.
+  {
+    RtlControlFlowGraph cfg = make_case_d_cfg(/*use_higher_early_reg=*/false);
+    RestoreSched2DeletedNoopMoves(&cfg, o2_prof);
+    ASSERT_EQ(cfg.rpo_blocks[0].instructions.size(), 5u) << cfg.FormatSummary();
+    EXPECT_EQ(cfg.rpo_blocks[0].instructions[0],
+              "(set (reg:SI 4 a0) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+  }
+
+  // Negative: when `early_hr = $8 t0` (`> $4 a0` in natural register order), Case D does not fire.
+  {
+    RtlControlFlowGraph cfg = make_case_d_cfg(/*use_higher_early_reg=*/true);
+    RestoreSched2DeletedNoopMoves(&cfg, o2_prof);
+    EXPECT_EQ(cfg.rpo_blocks[0].instructions.size(), 4u) << cfg.FormatSummary();
+  }
+}
+
+TEST(PostReloadNoopMovesTest, CaseFSingleBlockEntryFirstInsnMovstrsiPositiveAndNegative) {
+  const CompilationProfile o2_prof{.optimize_level = 2, .c_flags = {"-O2", "-mips2", "-Wa,-g"}};
+
+  auto make_case_f_cfg = [](bool read_arg_after_movstrsi) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kSched2;
+    cfg.sideband.is_leaf_function = true;
+    cfg.sideband.basic_block_live_at_start = {{0, {4, 5, 29, 31}}};
+    cfg.rpo_blocks.resize(1);
+    cfg.rpo_blocks[0].id = 0;
+    cfg.rpo_blocks[0].AddPatternOnly(
+        "(parallel[ (set (mem:BLK (reg:SI 4 a0)) (mem:BLK (reg:SI 5 a1))) "
+        "(clobber (reg:SI 8 t0)) (clobber (reg:SI 9 t1)) (clobber (reg:SI 10 t2)) "
+        "(clobber (reg:SI 11 t3)) (use (const_int 16)) (use (const_int 4)) (use (const_int 0)) ] ) "
+        "(expr_list:REG_DEAD (reg:SI 5 a1) (nil))");
+    if (read_arg_after_movstrsi) {
+      cfg.rpo_blocks[0].AddPatternOnly(
+          "(set (reg/i:SI 2 v0) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+    } else {
+      cfg.rpo_blocks[0].AddPatternOnly("(set (reg/i:SI 2 v0) (const_int 0))");
+    }
+    cfg.rpo_blocks[0].AddPatternOnly("(use (reg/i:SI 2 v0))");
+    return cfg;
+  };
+
+  // Positive: first-insn `movstrsi_internal` kills sibling live-in `$5 a1` while `$4 a0` survives
+  // to a later read -> Case F restores `(set (reg:SI 4 a0) (reg:SI 4 a0))`.
+  {
+    RtlControlFlowGraph cfg = make_case_f_cfg(/*read_arg_after_movstrsi=*/true);
+    RestoreSched2DeletedNoopMoves(&cfg, o2_prof);
+    ASSERT_EQ(cfg.rpo_blocks[0].instructions.size(), 4u) << cfg.FormatSummary();
+    EXPECT_EQ(cfg.rpo_blocks[0].instructions[0],
+              "(set (reg:SI 4 a0) (reg:SI 4 a0)) (expr_list:REG_DEAD (reg:SI 4 a0) (nil))");
+  }
+
+  // Negative: when `$4 a0` is never read again after `movstrsi_internal`, Case F does not fire.
+  {
+    RtlControlFlowGraph cfg = make_case_f_cfg(/*read_arg_after_movstrsi=*/false);
+    RestoreSched2DeletedNoopMoves(&cfg, o2_prof);
+    EXPECT_EQ(cfg.rpo_blocks[0].instructions.size(), 3u) << cfg.FormatSummary();
+  }
+}
+
+TEST(PostReloadNoopMovesTest, RestoresDeletedNoopSharedReturnMovePositiveAndNegative) {
+  const CompilationProfile o2_prof{.optimize_level = 2, .c_flags = {"-O2", "-mips2", "-Wa,-g"}};
+
+  auto make_shared_ret_cfg = [](bool pred_already_integrated) {
+    RtlControlFlowGraph cfg;
+    cfg.pass = RtlPassKind::kSched2;
+    cfg.sideband.is_leaf_function = true;
+    cfg.sideband.basic_block_live_at_start = {
+        {0, {4, 5, 29, 31}}, {1, {3, 4, 29, 31}}, {2, {3, 5, 29, 31}}, {3, {2, 29, 31}}};
+    cfg.rpo_blocks.resize(4);
+
+    // B0 defines multi-block witness `$3 v1` (disjoint from `$2 v0`) and branches to `B1`/`B2`.
+    cfg.rpo_blocks[0].id = 0;
+    cfg.rpo_blocks[0].successors = {2, 1};
+    cfg.rpo_blocks[0].AddPatternOnly("(set (reg:SI 3 v1) (const_int 10))");
+    cfg.rpo_blocks[0].AddPatternOnly(
+        "(set (pc) (if_then_else (eq:SI (reg:SI 4 a0) (const_int 0)) (label_ref L1) (pc)))");
+
+    // B1 and B2 are both single-successor predecessors of `B3` whose last active insn sets `$2 v0`.
+    const std::string ret_dst = pred_already_integrated ? "(reg/i:SI 2 v0)" : "(reg:SI 2 v0)";
+    cfg.rpo_blocks[1].id = 1;
+    cfg.rpo_blocks[1].predecessors = {0};
+    cfg.rpo_blocks[1].successors = {3};
+    cfg.rpo_blocks[1].AddPatternOnly("(set " + ret_dst + " (plus:SI (reg:SI 3 v1) (reg:SI 4 a0)))");
+    cfg.rpo_blocks[1].AddPatternOnly("(set (pc) (label_ref L2))");
+
+    cfg.rpo_blocks[2].id = 2;
+    cfg.rpo_blocks[2].has_label = true;
+    cfg.rpo_blocks[2].predecessors = {0};
+    cfg.rpo_blocks[2].successors = {3};
+    cfg.rpo_blocks[2].AddPatternOnly("(set " + ret_dst + " (plus:SI (reg:SI 3 v1) (reg:SI 5 a1)))");
+
+    // B3: shared exit block containing only `(use (reg/i:SI 2 v0))`.
+    cfg.rpo_blocks[3].id = 3;
+    cfg.rpo_blocks[3].has_label = true;
+    cfg.rpo_blocks[3].predecessors = {1, 2};
+    cfg.rpo_blocks[3].AddPatternOnly("(use (reg/i:SI 2 v0))");
+    return cfg;
+  };
+
+  // Positive: restores `(set (reg/i:SI 2 v0) (reg:SI 2 v0)) (REG_DEAD (reg:SI 2 v0))` in `B3`.
+  {
+    RtlControlFlowGraph cfg = make_shared_ret_cfg(/*pred_already_integrated=*/false);
+    RestoreSched2DeletedNoopMoves(&cfg, o2_prof);
+    ASSERT_EQ(cfg.rpo_blocks[3].instructions.size(), 2u) << cfg.FormatSummary();
+    EXPECT_EQ(cfg.rpo_blocks[3].instructions[0],
+              "(set (reg/i:SI 2 v0) (reg:SI 2 v0)) (expr_list:REG_DEAD (reg:SI 2 v0) (nil))");
+  }
+
+  // Negative: when predecessors already write `(reg/i:SI 2 v0)`, no shared return move is added.
+  {
+    RtlControlFlowGraph cfg = make_shared_ret_cfg(/*pred_already_integrated=*/true);
+    RestoreSched2DeletedNoopMoves(&cfg, o2_prof);
+    EXPECT_EQ(cfg.rpo_blocks[3].instructions.size(), 1u) << cfg.FormatSummary();
+  }
+}
+
 }  // namespace
 }  // namespace rom_nom_nom::lifter

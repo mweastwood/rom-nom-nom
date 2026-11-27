@@ -28,11 +28,13 @@
 #include "core/compiler_flags.h"
 #include "core/rtl_cfg.h"
 #include "core/rtl_expr.h"
+#include "lifter/mips_idiom_utils.h"
 #include "lifter/mips_multi_insn_idioms.h"
 #include "lifter/reconstruct_hard_reg_liveness.h"
 #include "lifter/reconstruct_o0_final_scan.h"
 #include "lifter/rtl_liveness.h"
 #include "lifter/sched_model.h"
+#include "lifter/sched_stage0_attribution.h"
 
 namespace rom_nom_nom::lifter {
 namespace {
@@ -5293,7 +5295,7 @@ void MarkSched2PriorityInvertedUnchangingLoads(RtlControlFlowGraph* cfg,
       for (int w : steps[i].write_regs) {
         touched_regs.insert(w);
         last_def[w] = i;
-        if (w != 29 && !(w == 30 && cfg->sideband.frame_pointer_needed)) {
+        if (w != 29 && (w != 30 || !cfg->sideband.frame_pointer_needed)) {
           stack_derived_regs.erase(w);
         }
       }
@@ -6727,7 +6729,7 @@ void MarkPrologueHoistedUnchangingPtrMems(RtlControlFlowGraph* cfg,
           }
           const bool dst_callee_saved =
               (load_dst < 32)
-                  ? (IsStage0CalleeSavedGpr(load_dst) && !(frame_pointer_needed && load_dst == 30))
+                  ? (IsStage0CalleeSavedGpr(load_dst) && (!frame_pointer_needed || load_dst != 30))
                   : (load_dst >= 52 && load_dst <= 63);
           const RtlExpr* load_rhs = &lpat.children[1];
           if ((load_rhs->op == RtlOp::kSignExtend || load_rhs->op == RtlOp::kZeroExtend) &&
@@ -6788,7 +6790,7 @@ void MarkPrologueHoistedUnchangingPtrMems(RtlControlFlowGraph* cfg,
           }
           const int dst_r = p.children[0].RegNo();
           const bool dst_cs = (dst_r < 32) ? (IsStage0CalleeSavedGpr(dst_r) &&
-                                              !(frame_pointer_needed && dst_r == 30))
+                                              (!frame_pointer_needed || dst_r != 30))
                                            : (dst_r >= 52 && dst_r <= 63);
           if (dst_cs) {
             return false;
@@ -6829,8 +6831,8 @@ void MarkPrologueHoistedUnchangingPtrMems(RtlControlFlowGraph* cfg,
               if (c.consumer_s <= m && !m_trapped_after_flush_store) {
                 continue;
               }
-              if (!(c.consumer_s > *max_body_sp_store_step || m <= *max_body_sp_store_step ||
-                    m_trapped_after_flush_store)) {
+              if (c.consumer_s <= *max_body_sp_store_step && m > *max_body_sp_store_step &&
+                  !m_trapped_after_flush_store) {
                 continue;
               }
               bool breg_used_other_after_consumer = false;
@@ -8045,7 +8047,7 @@ void UpgradeCallOutgoingArgBytes(RtlControlFlowGraph* cfg, const CompilationProf
           (*sp_ptr_off)[dreg] = -1;
           return;
         }
-        if (breg == 29 && dreg != 29 && !(cfg->sideband.frame_pointer_needed && dreg == 30) &&
+        if (breg == 29 && dreg != 29 && (!cfg->sideband.frame_pointer_needed || dreg != 30) &&
             off >= min_reg_parm_bytes && off < non_reg_size) {
           (*sp_ptr_off)[dreg] = static_cast<int>(off);
           return;
@@ -8235,7 +8237,7 @@ void UpgradeCallOutgoingArgBytes(RtlControlFlowGraph* cfg, const CompilationProf
     int64_t off = 0;
     if (pat.IsSet() && IsPlainSiGpr(pat.SetDest(), &dreg) &&
         ExtractBasePlusConstAddr(pat.SetSrc(), &breg, &off) && breg == 29 && dreg != 29 &&
-        !(cfg->sideband.frame_pointer_needed && dreg == 30) && off >= min_reg_parm_bytes &&
+        (!cfg->sideband.frame_pointer_needed || dreg != 30) && off >= min_reg_parm_bytes &&
         off < non_reg_size) {
       (*sp_ptr_off)[dreg] = static_cast<int>(off);
       return;
@@ -8934,8 +8936,8 @@ RtlControlFlowGraph InvertFinalScanInsnLinesToCfg(
       bool gp64 = false;
       bool fp64 = false;
       DetectMipsRegisterWidthFlags(cfg, profile, &gp64, &fp64);
-      RestoreNoConflictExtendClobbers(&cfg, gp64, fp64,
-                                      ParseCompilationProfileFlags(*profile).RunsSched2());
+      RestoreStage0DbrNoConflictExtendClobbers(&cfg, gp64, fp64,
+                                               ParseCompilationProfileFlags(*profile).RunsSched2());
       SynthesizePostReloadMemRegEquivNotes(&cfg, *profile);
     }
     ReconstructMissingCallFusage(&cfg, *profile);
