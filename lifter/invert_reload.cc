@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/btree_map.h"
+#include "absl/container/btree_set.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
@@ -22,6 +24,7 @@
 #include "core/rtl_expr.h"
 #include "lifter/reconstruct_hard_reg_liveness.h"
 #include "lifter/rtl_liveness.h"
+#include "lifter/stack_frame_slot_classifier.h"
 
 namespace rom_nom_nom::lifter {
 namespace {
@@ -30,13 +33,6 @@ constexpr int kStackPointerRegnum = 29;
 constexpr int kFramePointerRegnum = 30;
 constexpr int kReturnAddressRegnum = 31;
 constexpr int kFirstPseudoRegister = kMipsFirstPseudoRegister;
-
-// Non-fixed `CALL_USED_REGISTERS` eligible for `caller-save.c` on MIPS
-// (`mips.h:1186-1210`): `$2..$15` (`v0..t7`), `$24..$25` (`t8..t9`), and
-// `$32..$51` (`$f0..$f19`).
-bool IsMipsCallerSavableHardReg(int hr) {
-  return (hr >= 2 && hr <= 15) || (hr >= 24 && hr <= 25) || (hr >= 32 && hr <= 51);
-}
 
 bool IsControlFlowBoundaryPattern(const RtlExpr& pat) {
   if (IsCallPattern(pat) || pat.op == RtlOp::kCodeLabel || pat.op == RtlOp::kBarrier ||
@@ -742,7 +738,7 @@ struct CallerSaveBlockPlan {
   std::vector<std::pair<int, int>> pseudo_unions;  // (from_rest_pseudo, to_save_pseudo)
   std::vector<CallerSaveHardSaveLift> hard_save_lifts;
   std::vector<CallerSaveHardRestoreMove> hard_restore_moves;
-  absl::flat_hash_map<int, std::pair<int64_t, int>> hr_slot_bounds;  // hr -> (offset, byte_size)
+  absl::btree_map<int, std::pair<int64_t, int>> hr_slot_bounds;  // hr -> (offset, byte_size)
   bool conflict = false;
 };
 
@@ -750,7 +746,7 @@ CallerSaveBlockPlan PlanCallerSaveInBlock(size_t block_idx,
                                           const std::vector<RtlPatternAndNotes>& insns,
                                           const absl::flat_hash_set<int>& rtl_cross_call_hrs,
                                           bool restrict_allowed_hrs,
-                                          const absl::flat_hash_set<int>& allowed_hrs,
+                                          const absl::btree_set<int>& allowed_hrs,
                                           const absl::flat_hash_map<int, int>& reg_renumber,
                                           bool frame_pointer_needed, bool gp64, bool fp64,
                                           int64_t outgoing_args_size, int64_t max_frame_top) {
@@ -955,16 +951,15 @@ CallerSaveBlockPlan PlanCallerSaveInBlock(size_t block_idx,
     int word_bytes = 4;
   };
 
-  absl::flat_hash_map<int, SaveWordInfo> saved_in_slot;
-  absl::flat_hash_map<int, SaveWordInfo> needs_restore;
-  absl::flat_hash_map<size_t, uint32_t> restored_word_mask_per_save;
-  absl::flat_hash_map<size_t, int> expected_words_per_save;
-  absl::flat_hash_map<size_t, std::vector<size_t>> restore_indices_per_save;
-  absl::flat_hash_map<size_t, std::vector<std::pair<int, int>>> unions_per_save;
-  absl::flat_hash_map<size_t, CallerSaveHardSaveLift> hard_save_lift_per_save;
-  absl::flat_hash_map<size_t, std::vector<CallerSaveHardRestoreMove>> hard_restore_moves_per_save;
-  absl::flat_hash_map<size_t, std::vector<std::pair<int, std::pair<int64_t, int>>>>
-      save_word_bounds;
+  absl::btree_map<int, SaveWordInfo> saved_in_slot;
+  absl::btree_map<int, SaveWordInfo> needs_restore;
+  absl::btree_map<size_t, uint32_t> restored_word_mask_per_save;
+  absl::btree_map<size_t, int> expected_words_per_save;
+  absl::btree_map<size_t, std::vector<size_t>> restore_indices_per_save;
+  absl::btree_map<size_t, std::vector<std::pair<int, int>>> unions_per_save;
+  absl::btree_map<size_t, CallerSaveHardSaveLift> hard_save_lift_per_save;
+  absl::btree_map<size_t, std::vector<CallerSaveHardRestoreMove>> hard_restore_moves_per_save;
+  absl::btree_map<size_t, std::vector<std::pair<int, std::pair<int64_t, int>>>> save_word_bounds;
 
   std::vector<std::pair<size_t, std::vector<SaveWordInfo>>> pending_saves_before_call;
 
@@ -1168,15 +1163,7 @@ CallerSaveBlockPlan PlanCallerSaveInBlock(size_t block_idx,
     }
   }
 
-  std::vector<size_t> sorted_save_indices;
-  sorted_save_indices.reserve(restored_word_mask_per_save.size());
-  for (const auto& [save_idx, _] : restored_word_mask_per_save) {
-    sorted_save_indices.push_back(save_idx);
-  }
-  std::sort(sorted_save_indices.begin(), sorted_save_indices.end());
-
-  for (size_t save_idx : sorted_save_indices) {
-    const uint32_t mask = restored_word_mask_per_save.at(save_idx);
+  for (const auto& [save_idx, mask] : restored_word_mask_per_save) {
     const int expected_w = expected_words_per_save[save_idx];
     const uint32_t full_mask =
         (expected_w >= 32) ? ~uint32_t{0} : ((uint32_t{1} << expected_w) - 1);
@@ -1226,7 +1213,7 @@ bool ExprOverlapsByteInterval(const RtlExpr& root, bool frame_pointer_needed, in
           MatchStackSlotAddrOffset(expr.children[0], frame_pointer_needed, /*min_offset=*/0);
       if (off.has_value()) {
         const int sz = std::max(1, MipsModeByteSize(expr.mode));
-        if (*off<interval_hi&& * off + sz> interval_lo) {
+        if (*off < interval_hi && *off + sz > interval_lo) {
           overlaps = true;
           return;
         }
@@ -1257,7 +1244,7 @@ struct CallerSaveReversalOutcome {
   int64_t pre_caller_save_top = 0;
   int64_t cs_slot_lo = -1;
   int64_t cs_slot_hi = -1;
-  absl::flat_hash_set<int> unified_pseudos;
+  absl::btree_set<int> unified_pseudos;
 };
 
 CallerSaveReversalOutcome ReverseCallerSaveAcrossCfg(
@@ -1278,9 +1265,9 @@ CallerSaveReversalOutcome ReverseCallerSaveAcrossCfg(
   }
 
   std::vector<CallerSaveBlockPlan> block_plans(all_parsed_blocks->size());
-  absl::flat_hash_map<int, std::pair<int64_t, int>> global_hr_bounds;
+  absl::btree_map<int, std::pair<int64_t, int>> global_hr_bounds;
   bool any_candidate = false;
-  const absl::flat_hash_set<int> empty_allowed;
+  const absl::btree_set<int> empty_allowed;
 
   for (size_t b = 0; b < all_parsed_blocks->size(); ++b) {
     block_plans[b] = PlanCallerSaveInBlock(
@@ -1358,7 +1345,7 @@ CallerSaveReversalOutcome ReverseCallerSaveAcrossCfg(
   // touched by ANY non-dropped instruction or ANY `REG_NOTE` anywhere in the
   // CFG (`caller-save` never places `MEM` in `REG_NOTES`; only `alter_reg`
   // rewrites `REG_DEAD` / `REG_UNUSED` in-place to `MEM`).
-  absl::flat_hash_set<int> invalid_hrs;
+  absl::btree_set<int> invalid_hrs;
   for (const auto& [hr, bound] : global_hr_bounds) {
     const int64_t lo = bound.first;
     const int64_t hi = bound.first + bound.second;
@@ -1395,7 +1382,7 @@ CallerSaveReversalOutcome ReverseCallerSaveAcrossCfg(
     if (invalid_hrs.size() == global_hr_bounds.size()) {
       return outcome;
     }
-    absl::flat_hash_set<int> allowed_hrs;
+    absl::btree_set<int> allowed_hrs;
     for (const auto& [hr, _] : global_hr_bounds) {
       if (!invalid_hrs.contains(hr)) {
         allowed_hrs.insert(hr);
@@ -1417,21 +1404,21 @@ CallerSaveReversalOutcome ReverseCallerSaveAcrossCfg(
   }
 
   // Verify `setup_save_areas` (`caller-save.c:282-331`) monotonic hard-register
-  // to stack-offset ordering (`hr_a < hr_b => off_a < off_b`).
-  std::vector<std::pair<int, std::pair<int64_t, int>>> sorted_hr_bounds(global_hr_bounds.begin(),
-                                                                        global_hr_bounds.end());
-  std::sort(sorted_hr_bounds.begin(), sorted_hr_bounds.end(),
-            [](const auto& a, const auto& b) { return a.first < b.first; });
-  for (size_t k = 1; k < sorted_hr_bounds.size(); ++k) {
-    const int64_t prev_end =
-        sorted_hr_bounds[k - 1].second.first + sorted_hr_bounds[k - 1].second.second;
-    if (sorted_hr_bounds[k].second.first < prev_end) {
-      return outcome;
+  // to stack-offset ordering (`hr_a < hr_b => off_a + sz_a <= off_b`).
+  // `global_hr_bounds` is an `absl::btree_map`, so keys are already ascending.
+  {
+    auto prev_it = global_hr_bounds.begin();
+    for (auto it = std::next(prev_it); it != global_hr_bounds.end(); ++it) {
+      const int64_t prev_end = prev_it->second.first + prev_it->second.second;
+      if (it->second.first < prev_end) {
+        return outcome;
+      }
+      prev_it = it;
     }
   }
 
-  const int min_hr = sorted_hr_bounds.front().first;
-  const int64_t min_off = sorted_hr_bounds.front().second.first;
+  const int min_hr = global_hr_bounds.begin()->first;
+  const int64_t min_off = global_hr_bounds.begin()->second.first;
   int64_t earlier_bytes = 0;
   for (int cand_hr : rtl_cross_call_hrs) {
     if (cand_hr < min_hr && !global_hr_bounds.contains(cand_hr)) {
@@ -1445,7 +1432,8 @@ CallerSaveReversalOutcome ReverseCallerSaveAcrossCfg(
   if (rel_est_off < 0) {
     return outcome;
   }
-  const int64_t pre_cs_top = layout.starting_frame_offset + (rel_est_off & ~int64_t{7});
+  const int64_t pre_cs_top =
+      AlignDownToSpillBucket(min_off - earlier_bytes, layout.starting_frame_offset);
   if (pre_cs_top < min_off) {
     for (size_t b = 0; b < all_parsed_blocks->size(); ++b) {
       const auto& blk_insns = (*all_parsed_blocks)[b];
@@ -1468,7 +1456,7 @@ CallerSaveReversalOutcome ReverseCallerSaveAcrossCfg(
   }
 
   // Apply Union-Find across `(from_rest_pseudo -> to_save_pseudo)` pairs.
-  absl::flat_hash_map<int, int> parent;
+  absl::btree_map<int, int> parent;
   auto find_root = [&](int p) {
     int cur = p;
     while (parent.contains(cur) && parent[cur] != cur) {
@@ -1495,7 +1483,7 @@ CallerSaveReversalOutcome ReverseCallerSaveAcrossCfg(
     }
   }
 
-  absl::flat_hash_set<int> replaced_from_pseudos;
+  absl::btree_set<int> replaced_from_pseudos;
   for (const auto& [p, _] : parent) {
     const int root = find_root(p);
     if (root != p) {
@@ -1506,8 +1494,8 @@ CallerSaveReversalOutcome ReverseCallerSaveAcrossCfg(
 
   for (size_t b = 0; b < all_parsed_blocks->size(); ++b) {
     std::vector<RtlPatternAndNotes>& blk_insns = (*all_parsed_blocks)[b];
-    absl::flat_hash_map<size_t, std::vector<RtlPatternAndNotes>> insert_before;
-    absl::flat_hash_map<size_t, std::vector<RtlPatternAndNotes>> insert_after;
+    absl::btree_map<size_t, std::vector<RtlPatternAndNotes>> insert_before;
+    absl::btree_map<size_t, std::vector<RtlPatternAndNotes>> insert_after;
 
     auto rewrite_read_hr_to_pseudo = [&](RtlExpr* pat, int target_hr, RtlMachineMode target_mode,
                                          int target_pseudo) {
@@ -1899,7 +1887,7 @@ bool IsVaryingMemAddress(const RtlExpr& addr, bool frame_pointer_needed) {
         return;
       }
       const int r = n.RegNo();
-      if (r != kStackPointerRegnum && !(frame_pointer_needed && r == kFramePointerRegnum)) {
+      if (r != kStackPointerRegnum && (!frame_pointer_needed || r != kFramePointerRegnum)) {
         varies = true;
       }
     }
@@ -2212,8 +2200,8 @@ void FoldInheritedReloadInputMoves(const absl::flat_hash_map<int, int>& reg_renu
         break;
       }
       if (cand.pattern.ContainsReg(r_dst.RegNo())) {
-        if (!(cand.pattern.op == RtlOp::kSet && cand.pattern.children.size() == 2 &&
-              cand.pattern.children[1].op == RtlOp::kReg) &&
+        if ((cand.pattern.op != RtlOp::kSet || cand.pattern.children.size() != 2 ||
+             cand.pattern.children[1].op != RtlOp::kReg) &&
             insn_sets_exact_reg(cand.pattern, r_dst.RegNo(), r_dst.mode)) {
           target_j = j;
         }
@@ -5048,7 +5036,7 @@ void ReverseFprConstraintReloads(const std::vector<RtlBasicBlock>& rpo_blocks, i
                                    ? EffectiveHardReg(mv_dst.RegNo(), reg_renumber)
                                    : 64;
             if (opt_level == 0 && r_fpr >= kFirstPseudoRegister &&
-                !(mv_dst.IsPseudoReg() && dst_hr >= 2 && dst_hr < 32)) {
+                (!mv_dst.IsPseudoReg() || dst_hr < 2 || dst_hr >= 32)) {
               break;
             }
             // `dst_hr` in `[0, 32)` (GPR or GPR-allocated pseudo) or `-1`
@@ -7325,7 +7313,7 @@ void FoldO0Mulsidi3TopStackSpills(const MipsReloadFrameLayout& /*layout*/, int* 
       if (sec_r >= 0) {
         record_folded_reg(sec_r);
       }
-      if (!(u_set->SetDest().IsPseudoReg() && u_set->SetDest().RegNo() == load_r)) {
+      if (!u_set->SetDest().IsPseudoReg() || u_set->SetDest().RegNo() != load_r) {
         record_folded_reg(load_r);
       } else {
         const int hr = EffectiveHardReg(load_r, out->sideband.reg_renumber);

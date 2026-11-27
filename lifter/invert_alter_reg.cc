@@ -23,6 +23,7 @@
 #include "lifter/reconstruct_hard_reg_liveness.h"
 #include "lifter/rtl_liveness.h"
 #include "lifter/sched_model.h"
+#include "lifter/stack_frame_slot_classifier.h"
 
 namespace rom_nom_nom::lifter {
 namespace {
@@ -4265,10 +4266,6 @@ void CompactAndRefreshPreAlterSideband(int first_pseudo_regno, int input_max_reg
   out->sideband.max_regno = std::max(input_max_regno, max_seen + 1);
 }
 
-bool IsMipsCallerSavableReg(int hr) {
-  return (hr >= 1 && hr <= 15) || hr == 24 || hr == 25 || (hr >= 32 && hr <= 51);
-}
-
 bool CanDirectMoveMemAndHardReg(int hr, RtlMachineMode mode) {
   if (hr >= 1 && hr <= 31) {
     return true;
@@ -4281,52 +4278,16 @@ bool CanDirectMoveMemAndHardReg(int hr, RtlMachineMode mode) {
 }
 
 std::optional<int64_t> ExtractBaseRegOffset(const RtlExpr& addr, int base_regno) {
-  if (addr.op == RtlOp::kReg && !addr.IsArgPointerReg() && addr.RegNo() == base_regno) {
-    return 0;
-  }
-  if (addr.op == RtlOp::kPlus && addr.children.size() == 2 && addr.children[0].op == RtlOp::kReg &&
-      !addr.children[0].IsArgPointerReg() && addr.children[0].RegNo() == base_regno &&
-      addr.children[1].op == RtlOp::kConstInt) {
-    return addr.children[1].int_val;
-  }
-  return std::nullopt;
+  return ExtractStackBaseOffset(addr, base_regno);
 }
 
 bool ExprOverlapsElimInterval(const RtlExpr& root, int elim_reg, int64_t lo, int64_t hi) {
-  bool overlaps = false;
-  auto walk = [&](const auto& self, const RtlExpr& expr, bool in_mem_addr) -> void {
-    if (overlaps) {
-      return;
-    }
-    if (expr.op == RtlOp::kMem && expr.children.size() == 1) {
-      const std::optional<int64_t> off = ExtractBaseRegOffset(expr.children[0], elim_reg);
-      if (off.has_value()) {
-        const int sz = std::max(1, MipsModeByteSize(expr.mode));
-        if (*off<hi&& * off + sz> lo) {
-          overlaps = true;
-        }
-        return;
-      }
-      self(self, expr.children[0], true);
-      return;
-    }
-    if (!in_mem_addr) {
-      const std::optional<int64_t> off = ExtractBaseRegOffset(expr, elim_reg);
-      if (off.has_value() && *off >= lo && *off < hi) {
-        overlaps = true;
-        return;
-      }
-    }
-    for (const RtlExpr& ch : expr.children) {
-      self(self, ch, in_mem_addr);
-    }
-  };
-  walk(walk, root, false);
-  return overlaps;
+  return ExprOverlapsStackInterval(root, elim_reg, lo, hi);
 }
 
 // Identifies intra-block `caller-save` (`caller-save.c:insert_save_restore`)
-// save/restore instructions in `allocated_cfg` so `InvertAlterReg` leaves their
+// save/restore instructions in `allocated_cfg` via the deterministic
+// `stack_frame_slot_classifier` so `InvertAlterReg` leaves their
 // `regno_reg_rtx[hr]` operands as unflagged hard registers and preserves
 // reaching-definition tokens across `CALL_INSN`s without pinning `/v` webs.
 void PrecomputeCallerSavePairs(const RtlControlFlowGraph& allocated_cfg,
@@ -4334,316 +4295,18 @@ void PrecomputeCallerSavePairs(const RtlControlFlowGraph& allocated_cfg,
                                const std::vector<std::vector<RtlPatternAndNotes>>& parsed_blocks,
                                std::vector<std::vector<int>>* cs_save_span,
                                std::vector<std::vector<int>>* cs_restore_span) {
-  const size_t num_blocks = parsed_blocks.size();
-  cs_save_span->assign(num_blocks, {});
-  cs_restore_span->assign(num_blocks, {});
-  for (size_t b = 0; b < num_blocks; ++b) {
-    (*cs_save_span)[b].assign(parsed_blocks[b].size(), 0);
-    (*cs_restore_span)[b].assign(parsed_blocks[b].size(), 0);
-  }
-  const int frame_size_bytes = allocated_cfg.sideband.frame_size_bytes;
-  const int outgoing_args_size = allocated_cfg.sideband.outgoing_args_size;
-  if (compiler_flags.opt_level <= 0 || !compiler_flags.flag_caller_saves || frame_size_bytes <= 0 ||
-      outgoing_args_size < 0) {
-    return;
-  }
-  const int elim_reg = allocated_cfg.sideband.frame_pointer_needed ? kFramePointerRegno : 29;
-  const int64_t min_off = outgoing_args_size;
-  const int64_t max_off = min_off + frame_size_bytes;
-
-  struct SaveWord {
-    size_t save_idx = 0;
-    int total_words = 1;
-    int word_bit = 0;
-    int word_hr = -1;
-    int64_t offset = 0;
-    int word_bytes = 4;
+  const CallerSaveMatchOptions opts{
+      .frame_pointer_needed = allocated_cfg.sideband.frame_pointer_needed,
+      .frame_size_bytes = allocated_cfg.sideband.frame_size_bytes,
+      .outgoing_args_size = allocated_cfg.sideband.outgoing_args_size,
+      .gp64 = gp64,
+      .fp64 = fp64,
+      .opt_caller_saves_enabled =
+          (compiler_flags.opt_level > 0 && compiler_flags.flag_caller_saves),
   };
-  struct MatchedSave {
-    size_t save_idx = 0;
-    int save_span = 0;
-    std::vector<std::pair<size_t, int>> restores;
-    std::vector<std::pair<int, std::pair<int64_t, int>>> bounds;
-  };
-
-  auto plan_all = [&](bool restrict_hrs, const absl::flat_hash_set<int>& allowed_hrs,
-                      std::vector<std::vector<MatchedSave>>* out_blocks,
-                      absl::flat_hash_map<int, std::pair<int64_t, int>>* out_hr_bounds) -> bool {
-    out_blocks->assign(num_blocks, {});
-    out_hr_bounds->clear();
-    for (size_t b = 0; b < num_blocks; ++b) {
-      const auto& insns = parsed_blocks[b];
-      std::vector<size_t> call_indices;
-      for (size_t i = 0; i < insns.size(); ++i) {
-        if (insns[i].pattern.op == RtlOp::kSequence) {
-          call_indices.clear();
-          break;
-        }
-        if (ContainsCallOp(insns[i].pattern)) {
-          call_indices.push_back(i);
-        }
-      }
-      if (call_indices.empty()) {
-        continue;
-      }
-
-      absl::flat_hash_map<int, SaveWord> saved_in_slot;
-      absl::flat_hash_map<int, SaveWord> needs_restore;
-      absl::flat_hash_map<size_t, uint32_t> restored_mask;
-      absl::flat_hash_map<size_t, int> expected_words;
-      absl::flat_hash_map<size_t, int> save_spans;
-      absl::flat_hash_map<size_t, std::vector<std::pair<size_t, int>>> restores_per_save;
-      absl::flat_hash_map<size_t, std::vector<std::pair<int, std::pair<int64_t, int>>>>
-          bounds_per_save;
-      std::vector<std::pair<size_t, std::vector<SaveWord>>> pending_saves;
-
-      auto match_cs_mem = [&](const RtlExpr& mem, int mode_bytes) -> std::optional<int64_t> {
-        if (mem.op != RtlOp::kMem || mem.flags.volatil || mem.flags.in_struct ||
-            mem.children.size() != 1 || mode_bytes <= 0) {
-          return std::nullopt;
-        }
-        const std::optional<int64_t> off = ExtractBaseRegOffset(mem.children[0], elim_reg);
-        if (!off.has_value() || *off < min_off || *off + mode_bytes > max_off) {
-          return std::nullopt;
-        }
-        return off;
-      };
-
-      for (size_t i = 0; i < insns.size(); ++i) {
-        const RtlPatternAndNotes& pn = insns[i];
-        if (ContainsCallOp(pn.pattern)) {
-          for (const auto& [_, words] : pending_saves) {
-            for (const SaveWord& w : words) {
-              saved_in_slot[w.word_hr] = w;
-            }
-          }
-          pending_saves.clear();
-          needs_restore = saved_in_slot;
-          // Any register written by `CALL_INSN`'s own return `SET` is not restored from a save.
-          std::array<bool, kFirstPseudoRegister> call_written{};
-          CollectWrittenHardRegWordsInPattern(pn.pattern, gp64, fp64, &call_written);
-          for (int w = 0; w < kFirstPseudoRegister; ++w) {
-            if (call_written[w]) {
-              saved_in_slot.erase(w);
-              needs_restore.erase(w);
-            }
-          }
-          continue;
-        }
-
-        if (pn.reg_notes.empty() && pn.pattern.IsSet()) {
-          const RtlExpr& dst = pn.pattern.SetDest();
-          const RtlExpr& src = pn.pattern.SetSrc();
-          if (dst.IsHardReg() && !dst.IsArgPointerReg() && !dst.flags.Any() &&
-              dst.mode == src.mode) {
-            const int hr = dst.RegNo();
-            const int nregs = std::max(1, MipsHardRegNregs(hr, dst.mode, gp64, fp64));
-            const int mode_bytes = MipsModeByteSize(dst.mode);
-            const int word_bytes = std::max(1, mode_bytes / nregs);
-            const std::optional<int64_t> off = match_cs_mem(src, mode_bytes);
-            if (off.has_value() && needs_restore.contains(hr)) {
-              const size_t s_idx = needs_restore[hr].save_idx;
-              bool ok = true;
-              for (int k = 0; k < nregs; ++k) {
-                const auto it = needs_restore.find(hr + k);
-                if (it == needs_restore.end() || it->second.save_idx != s_idx ||
-                    it->second.offset != *off + int64_t{word_bytes} * k) {
-                  ok = false;
-                  break;
-                }
-              }
-              if (ok) {
-                expected_words[s_idx] = needs_restore[hr].total_words;
-                for (int k = 0; k < nregs; ++k) {
-                  restored_mask[s_idx] |= (uint32_t{1} << needs_restore[hr + k].word_bit);
-                  needs_restore.erase(hr + k);
-                }
-                restores_per_save[s_idx].emplace_back(i, nregs);
-                continue;
-              }
-            }
-          }
-          if (src.IsHardReg() && !src.IsArgPointerReg() && !src.flags.Any() &&
-              dst.mode == src.mode && i < call_indices.back()) {
-            const int hr = src.RegNo();
-            const int nregs = std::max(1, MipsHardRegNregs(hr, src.mode, gp64, fp64));
-            const int mode_bytes = MipsModeByteSize(src.mode);
-            const int word_bytes = std::max(1, mode_bytes / nregs);
-            const std::optional<int64_t> off = match_cs_mem(dst, mode_bytes);
-            if (off.has_value()) {
-              bool all_cand = true;
-              std::vector<SaveWord> words;
-              std::vector<std::pair<int, std::pair<int64_t, int>>> bounds;
-              for (int k = 0; k < nregs; ++k) {
-                if (!IsMipsCallerSavableReg(hr + k) ||
-                    (restrict_hrs && !allowed_hrs.contains(hr + k))) {
-                  all_cand = false;
-                  break;
-                }
-                const int64_t w_off = *off + int64_t{word_bytes} * k;
-                words.push_back(SaveWord{
-                    .save_idx = i,
-                    .total_words = nregs,
-                    .word_bit = k,
-                    .word_hr = hr + k,
-                    .offset = w_off,
-                    .word_bytes = word_bytes,
-                });
-                bounds.emplace_back(hr + k, std::make_pair(w_off, word_bytes));
-              }
-              if (all_cand) {
-                save_spans[i] = nregs;
-                bounds_per_save[i] = std::move(bounds);
-                pending_saves.emplace_back(i, std::move(words));
-                continue;
-              }
-            }
-          }
-        }
-
-        std::array<bool, kFirstPseudoRegister> written{};
-        CollectWrittenHardRegWordsInPattern(pn.pattern, gp64, fp64, &written);
-        for (int w = 0; w < kFirstPseudoRegister; ++w) {
-          if (written[w]) {
-            saved_in_slot.erase(w);
-            needs_restore.erase(w);
-            pending_saves.erase(
-                std::remove_if(pending_saves.begin(), pending_saves.end(),
-                               [&](const auto& entry) {
-                                 return std::any_of(
-                                     entry.second.begin(), entry.second.end(),
-                                     [&](const SaveWord& sw) { return sw.word_hr == w; });
-                               }),
-                pending_saves.end());
-          }
-        }
-      }
-
-      for (const auto& [s_idx, mask] : restored_mask) {
-        const int exp_w = expected_words[s_idx];
-        const uint32_t full = (exp_w >= 32) ? ~uint32_t{0} : ((uint32_t{1} << exp_w) - 1);
-        if (mask != full) {
-          continue;
-        }
-        for (const auto& [hr, bound] : bounds_per_save[s_idx]) {
-          auto [it, inserted] = out_hr_bounds->try_emplace(hr, bound);
-          if (!inserted && it->second != bound) {
-            return false;
-          }
-        }
-        (*out_blocks)[b].push_back(MatchedSave{
-            .save_idx = s_idx,
-            .save_span = save_spans[s_idx],
-            .restores = std::move(restores_per_save[s_idx]),
-            .bounds = std::move(bounds_per_save[s_idx]),
-        });
-      }
-    }
-    return true;
-  };
-
-  std::vector<std::vector<MatchedSave>> block_matches;
-  absl::flat_hash_map<int, std::pair<int64_t, int>> hr_bounds;
-  if (!plan_all(/*restrict_hrs=*/false, {}, &block_matches, &hr_bounds) || hr_bounds.empty()) {
-    return;
-  }
-
-  auto build_cs_insn_mask = [&](const std::vector<std::vector<MatchedSave>>& matches) {
-    std::vector<std::vector<bool>> is_cs(num_blocks);
-    for (size_t b = 0; b < num_blocks; ++b) {
-      is_cs[b].assign(parsed_blocks[b].size(), false);
-      for (const MatchedSave& ms : matches[b]) {
-        is_cs[b][ms.save_idx] = true;
-        for (const auto& [r_idx, _] : ms.restores) {
-          is_cs[b][r_idx] = true;
-        }
-      }
-    }
-    return is_cs;
-  };
-
-  std::vector<std::vector<bool>> is_cs = build_cs_insn_mask(block_matches);
-  absl::flat_hash_set<int> invalid_hrs;
-  for (const auto& [hr, bound] : hr_bounds) {
-    const int64_t lo = bound.first;
-    const int64_t hi = bound.first + bound.second;
-    for (size_t b = 0; b < num_blocks && !invalid_hrs.contains(hr); ++b) {
-      for (size_t i = 0; i < parsed_blocks[b].size(); ++i) {
-        for (const RtlRegNote& note : parsed_blocks[b][i].reg_notes) {
-          if (note.list_op == RtlOp::kExprList &&
-              ExprOverlapsElimInterval(note.datum, elim_reg, lo, hi)) {
-            invalid_hrs.insert(hr);
-            break;
-          }
-        }
-        if (invalid_hrs.contains(hr) || is_cs[b][i]) {
-          continue;
-        }
-        if (ExprOverlapsElimInterval(parsed_blocks[b][i].pattern, elim_reg, lo, hi)) {
-          invalid_hrs.insert(hr);
-          break;
-        }
-      }
-    }
-  }
-
-  if (!invalid_hrs.empty()) {
-    if (invalid_hrs.size() == hr_bounds.size()) {
-      return;
-    }
-    absl::flat_hash_set<int> allowed_hrs;
-    for (const auto& [hr, _] : hr_bounds) {
-      if (!invalid_hrs.contains(hr)) {
-        allowed_hrs.insert(hr);
-      }
-    }
-    if (!plan_all(/*restrict_hrs=*/true, allowed_hrs, &block_matches, &hr_bounds) ||
-        hr_bounds.empty()) {
-      return;
-    }
-    is_cs = build_cs_insn_mask(block_matches);
-  }
-
-  std::vector<std::pair<int, std::pair<int64_t, int>>> sorted_bounds(hr_bounds.begin(),
-                                                                     hr_bounds.end());
-  std::sort(sorted_bounds.begin(), sorted_bounds.end(),
-            [](const auto& a, const auto& b) { return a.first < b.first; });
-  for (size_t k = 1; k < sorted_bounds.size(); ++k) {
-    if (sorted_bounds[k].second.first <
-        sorted_bounds[k - 1].second.first + sorted_bounds[k - 1].second.second) {
-      return;
-    }
-  }
-  const int64_t min_cs_off = sorted_bounds.front().second.first;
-  const int64_t aligned_cs_base = min_off + ((min_cs_off - min_off) & ~int64_t{7});
-  if (aligned_cs_base < min_cs_off) {
-    for (size_t b = 0; b < num_blocks; ++b) {
-      for (size_t i = 0; i < parsed_blocks[b].size(); ++i) {
-        for (const RtlRegNote& note : parsed_blocks[b][i].reg_notes) {
-          if (note.list_op == RtlOp::kExprList &&
-              ExprOverlapsElimInterval(note.datum, elim_reg, aligned_cs_base, min_cs_off)) {
-            return;
-          }
-        }
-        if (is_cs[b][i]) {
-          continue;
-        }
-        if (ExprOverlapsElimInterval(parsed_blocks[b][i].pattern, elim_reg, aligned_cs_base,
-                                     min_cs_off)) {
-          return;
-        }
-      }
-    }
-  }
-
-  for (size_t b = 0; b < num_blocks; ++b) {
-    for (const MatchedSave& ms : block_matches[b]) {
-      (*cs_save_span)[b][ms.save_idx] = ms.save_span;
-      for (const auto& [r_idx, r_span] : ms.restores) {
-        (*cs_restore_span)[b][r_idx] = r_span;
-      }
-    }
-  }
+  CallerSaveCfgClassification cls = ClassifyCallerSavePairsAcrossCfg(parsed_blocks, opts);
+  *cs_save_span = std::move(cls.save_span);
+  *cs_restore_span = std::move(cls.restore_span);
 }
 
 // Demotes `reload`-introduced scratch registers back to physical hard registers
@@ -5638,7 +5301,7 @@ std::vector<std::vector<uint64_t>> DemoteReloadAndCallerSaveHardScratches(
           // `$a0..$a3` and also read by a pure FP arithmetic insn is a real `FP_REGS` pseudo.
           if (!invalid_use && matched_output_reloads == 1 &&
               matched_uses == sit->second.use_count &&
-              !(matched_uses > 1 && output_reload_to_hard_arg_gpr)) {
+              (matched_uses <= 1 || !output_reload_to_hard_arg_gpr)) {
             demote_to_hr[p_fpr] = fpr_hr;
           }
         }
@@ -6790,8 +6453,8 @@ void CoalesceSameBlockDisjointGlobalChainPseudos(
         }
       }
       if (!first_death_i.has_value() ||
-          !(redef_after_death_i.has_value() ||
-            (b == 0 && live_at_b0_start.contains(p_glob) && !glob_live_out))) {
+          (!redef_after_death_i.has_value() &&
+           (b != 0 || !live_at_b0_start.contains(p_glob) || glob_live_out))) {
         continue;
       }
 
@@ -7681,7 +7344,7 @@ void DetectLocalResolutionGroupConflicts(
     return mask;
   };
   auto is_valid_mode_reg = [&](int hr, RtlMachineMode mode, bool want_gpr, bool crosses_call) {
-    if (want_gpr ? !((hr >= 2 && hr <= 25) || hr == kFramePointerRegno) : !(hr >= 32 && hr <= 63)) {
+    if (want_gpr ? ((hr < 2 || hr > 25) && hr != kFramePointerRegno) : (hr < 32 || hr > 63)) {
       return false;
     }
     if (cfg.sideband.frame_pointer_needed && hr == kFramePointerRegno) {
@@ -9539,7 +9202,7 @@ bool RunSingleLocalResolutionIteration(
     return m;
   };
   auto is_valid_mode_reg = [&](int hr, RtlMachineMode mode, bool want_gpr, bool crosses_call) {
-    if (want_gpr ? !((hr >= 2 && hr <= 25) || hr == kFramePointerRegno) : !(hr >= 32 && hr <= 63)) {
+    if (want_gpr ? ((hr < 2 || hr > 25) && hr != kFramePointerRegno) : (hr < 32 || hr > 63)) {
       return false;
     }
     if (out->sideband.frame_pointer_needed && hr == kFramePointerRegno) {
@@ -10611,7 +10274,7 @@ void PinNonMemMoveCost6GprFloatWebs(
       }
       const int fpr = pat.SetDest().RegNo();
       const int gpr = pat.SetSrc().RegNo();
-      if (fpr < 32 || fpr >= 64 || !((gpr >= 8 && gpr <= 25) || gpr == kFramePointerRegno)) {
+      if (fpr < 32 || fpr >= 64 || ((gpr < 8 || gpr > 25) && gpr != kFramePointerRegno)) {
         continue;
       }
       bool feeds_fp_op = false;

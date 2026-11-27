@@ -12,119 +12,11 @@
 #include "core/rtl_cfg.h"
 #include "core/rtl_expr.h"
 #include "lifter/reconstruct_hard_reg_liveness.h"
+#include "lifter/reorg_model.h"
+#include "lifter/rtl_cfg_utils.h"
 
 namespace rom_nom_nom::lifter {
 namespace {
-
-// Validates that an `RtlExpr` subtree contains no unknown opcodes, no bare
-// `(return)` outside a MIPS `return_internal` `(parallel [(return) ...])`, and
-// that any `(sequence [...])` node is a bracketed sequence of at least 2 valid
-// inner insn wrappers.
-bool IsValidRtlExprSubtree(const RtlExpr& root) {
-  if (root.op == RtlOp::kReturn) {
-    return false;
-  }
-  bool valid = true;
-  root.Visit([&valid](const RtlExpr& node) {
-    if (!valid) {
-      return;
-    }
-    if (node.op == RtlOp::kUnknown) {
-      valid = false;
-      return;
-    }
-    for (const RtlExpr& child : node.children) {
-      if (child.op == RtlOp::kReturn && node.op != RtlOp::kParallel) {
-        valid = false;
-        return;
-      }
-    }
-    if (node.op == RtlOp::kSequence) {
-      if (!node.bracketed_children || node.children.size() < 2) {
-        valid = false;
-        return;
-      }
-      for (const RtlExpr& child : node.children) {
-        if ((child.op != RtlOp::kInsn && child.op != RtlOp::kJumpInsn &&
-             child.op != RtlOp::kCallInsn) ||
-            child.children.empty()) {
-          valid = false;
-          return;
-        }
-      }
-    }
-  });
-  return valid;
-}
-
-// Validates that `sexpr` parses cleanly as a structured `RtlPatternAndNotes`
-// AST with a recognized RTL operator and well-formed subtrees.
-bool IsValidRtlPatternSexpr(std::string_view sexpr) {
-  auto parsed = ParsePatternAndNotes(sexpr);
-  if (!parsed.ok()) {
-    return false;
-  }
-  if (!IsValidRtlExprSubtree(parsed->pattern)) {
-    return false;
-  }
-  for (const RtlRegNote& note : parsed->reg_notes) {
-    if (!IsValidRtlExprSubtree(note.datum)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-// Validates that `cfg` is a structurally well-formed `RtlControlFlowGraph`.
-bool IsValidCfg(const RtlControlFlowGraph& cfg) {
-  if (cfg.rpo_blocks.empty()) {
-    return false;
-  }
-  const size_t num_blocks = cfg.rpo_blocks.size();
-  bool has_any_instruction = false;
-  for (size_t b = 0; b < num_blocks; ++b) {
-    const auto& blk = cfg.rpo_blocks[b];
-    for (size_t succ : blk.successors) {
-      if (succ >= num_blocks) {
-        return false;
-      }
-    }
-    for (size_t target : blk.addr_vec_targets) {
-      if (target >= num_blocks) {
-        return false;
-      }
-    }
-    for (const std::string& pat : blk.instructions) {
-      if (!IsValidRtlPatternSexpr(pat)) {
-        return false;
-      }
-      has_any_instruction = true;
-    }
-  }
-  return has_any_instruction;
-}
-
-// Returns true if every instruction in `blk` is a `(use ...)` or `(clobber ...)`
-// pseudo-instruction that `reorg.c` skips backwards over when inspecting a
-// trailing `end_of_function_label`.
-bool BlockContainsOnlyUseOrClobberInsns(const RtlBasicBlock& blk) {
-  if (blk.instructions.empty()) {
-    return false;
-  }
-  for (const std::string& pat : blk.instructions) {
-    auto parsed = ParsePatternAndNotes(pat);
-    if (!parsed.ok() ||
-        (parsed->pattern.op != RtlOp::kUse && parsed->pattern.op != RtlOp::kClobber)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-bool IsReturnInternalParallelExpr(const RtlExpr& expr) {
-  return expr.op == RtlOp::kParallel && !expr.children.empty() &&
-         expr.children[0].op == RtlOp::kReturn;
-}
 
 bool IsSingleReturnInternalOrSequenceBlock(const RtlBasicBlock& blk) {
   if (blk.instructions.size() != 1) {
@@ -135,25 +27,12 @@ bool IsSingleReturnInternalOrSequenceBlock(const RtlBasicBlock& blk) {
     return false;
   }
   const RtlExpr& expr = parsed->pattern;
-  if (IsReturnInternalParallelExpr(expr)) {
+  if (IsReturnExpr(expr)) {
     return true;
   }
   return expr.op == RtlOp::kSequence && !expr.children.empty() &&
          expr.children[0].op == RtlOp::kJumpInsn && !expr.children[0].children.empty() &&
-         IsReturnInternalParallelExpr(expr.children[0].children[0]);
-}
-
-bool IsAnyJumpOrReturnTopExpr(const RtlExpr& expr) {
-  if (expr.op == RtlOp::kSequence && !expr.children.empty()) {
-    return expr.children[0].op == RtlOp::kJumpInsn;
-  }
-  if (expr.op == RtlOp::kParallel && !expr.children.empty()) {
-    const RtlExpr& first = expr.children[0];
-    if (first.op == RtlOp::kReturn || (first.IsSet() && first.SetDest().op == RtlOp::kPc)) {
-      return true;
-    }
-  }
-  return expr.IsSet() && expr.SetDest().op == RtlOp::kPc;
+         IsReturnExpr(expr.children[0].children[0]);
 }
 
 bool TrailingBlockHasExplicitLabelReference(const RtlControlFlowGraph& cfg) {
@@ -204,7 +83,7 @@ bool TrailingBlockHasExplicitLabelReference(const RtlControlFlowGraph& cfg) {
 
 RtlControlFlowGraph InvertMakeReturnInsns(const RtlControlFlowGraph& dbr_return_cfg_x,
                                           const CompilationProfile& profile) {
-  if (!IsValidCfg(dbr_return_cfg_x)) {
+  if (!IsValidCfg(dbr_return_cfg_x, CfgEmptyBlockPolicy::kAllowAnyEmptyBlock)) {
     return {};
   }
 
@@ -324,7 +203,8 @@ RtlControlFlowGraph InvertMakeReturnInsns(const RtlControlFlowGraph& dbr_return_
   const auto& tail_blk = out.rpo_blocks.back();
   if (!unpacked_return_eager_comp && tail_blk.has_label &&
       !TrailingBlockHasExplicitLabelReference(out) &&
-      (tail_blk.instructions.empty() || BlockContainsOnlyUseOrClobberInsns(tail_blk) ||
+      (tail_blk.instructions.empty() ||
+       BlockHasOnlyUseOrClobberInsns(tail_blk, /*skip_notes=*/false) ||
        IsSingleReturnInternalOrSequenceBlock(tail_blk))) {
     const size_t end_block_id = out.rpo_blocks.size();
     if (!tail_blk.instructions.empty() && tail_blk.successors.empty()) {

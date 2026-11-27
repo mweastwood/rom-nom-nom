@@ -18,6 +18,7 @@
 #include "gcc_harness/shared_corpus_trace_loader.h"
 #include "gcc_harness/subfunction_inverse_provider.h"
 #include "gtest/gtest.h"
+#include "lifter/mips_idiom_utils.h"
 #include "lifter/mips_multi_insn_idioms.h"
 
 namespace rom_nom_nom::lifter {

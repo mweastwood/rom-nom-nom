@@ -19,11 +19,12 @@
 #include "core/compiler_flags.h"
 #include "core/rtl_cfg.h"
 #include "core/rtl_expr.h"
-#include "lifter/mips_multi_insn_idioms.h"
+#include "lifter/mips_idiom_utils.h"
 #include "lifter/post_reload_noop_moves.h"
 #include "lifter/reconstruct_hard_reg_liveness.h"
 #include "lifter/rtl_liveness.h"
 #include "lifter/sched_model.h"
+#include "lifter/sched_post_reload_projection.h"
 
 namespace rom_nom_nom::lifter {
 namespace {
@@ -587,10 +588,10 @@ bool HasNoLaterDirectDependents(absl::Span<const ParsedBlockInsn> insns, size_t 
     const ParsedBlockInsn& later = insns[k];
     if (later.writes_mem || later.has_side_effects) {
       const RtlOp op = later.parsed.pattern.op;
+      const bool is_pc_set = op == RtlOp::kSet && !later.parsed.pattern.children.empty() &&
+                             later.parsed.pattern.children[0].op == RtlOp::kPc;
       if (op != RtlOp::kUse && op != RtlOp::kReturn &&
-          !IsReturnInternalExpr(later.parsed.pattern) &&
-          !(op == RtlOp::kSet && !later.parsed.pattern.children.empty() &&
-            later.parsed.pattern.children[0].op == RtlOp::kPc)) {
+          !IsReturnInternalExpr(later.parsed.pattern) && !is_pc_set) {
         return false;
       }
     }
@@ -1128,7 +1129,7 @@ bool UnscheduleDelayedHiLoReloads(std::vector<ParsedBlockInsn>* insns_ptr,
                         int64_t k_sz = 0;
                         if (extract_stack_mem_range(n, &k_base, &k_off, &k_sz)) {
                           if (k_base != st_base ||
-                              !((k_off + k_sz <= st_off) || (st_off + st_sz <= k_off))) {
+                              (k_off + k_sz > st_off && st_off + st_sz > k_off)) {
                             hoist_adj_store = false;
                           }
                         } else if (insns[k].writes_mem || !n.flags.unchanging) {
@@ -2824,7 +2825,7 @@ void RecoverOutgoingArgsAndFrameSize(RtlControlFlowGraph* cfg, const ParsedCompi
           node.children[1].children[0].RegNo() == kMipsSpRegno) {
         const RtlExpr& op1 = node.children[1].children[1];
         if (op1.op != RtlOp::kConstInt &&
-            !(op1.op == RtlOp::kReg && op1.RegNo() == kMipsTemp1Regno)) {
+            (op1.op != RtlOp::kReg || op1.RegNo() != kMipsTemp1Regno)) {
           has_dynamic_sp_alloc = true;
         } else if (cfg->sideband.frame_pointer_needed && op1.op == RtlOp::kConstInt &&
                    ((node.children[1].op == RtlOp::kPlus && op1.int_val < 0) ||
@@ -3200,7 +3201,7 @@ void IdentifySched2CallerSaveAndSpillOffsets(
         break;
       }
       const bool bank_exhausted = (cs_r < 32) ? all_saved_gprs_used : all_saved_fprs_used;
-      if (bucket_offsets[bk].size() == 1 && bank_exhausted && !(sum.sz == 4 && (off % 8) == 0)) {
+      if (bucket_offsets[bk].size() == 1 && bank_exhausted && (sum.sz != 4 || (off % 8) != 0)) {
         bool read_before_save = false;
         for (size_t prev = s_idx; prev > 0; --prev) {
           const auto& pin = block_insns[b][prev - 1];
@@ -3665,7 +3666,8 @@ bool CanonicalizeAdjacentSpillInputReloadPairs(
       return false;
     }
     const int src_r = pat.SetSrc().RegNo();
-    if (!((src_r >= 16 && src_r <= 23) || src_r == 30)) {
+    const bool is_callee_saved_src = (src_r >= 16 && src_r <= 23) || src_r == 30;
+    if (!is_callee_saved_src) {
       return false;
     }
     *out_reg = pat.SetDest().RegNo();
@@ -4085,7 +4087,9 @@ bool HoistSched2SunkMdOutputReloadsInBlock(
     }
     const int md_r = p0.children[0].SetDest().RegNo();
     const RtlOp op0 = p0.children[0].SetSrc().op;
-    if (!((md_r == 64 && op0 == RtlOp::kTruncate) || (md_r == 65 && op0 == RtlOp::kMult))) {
+    const bool is_expected_md_dest =
+        (md_r == 64 && op0 == RtlOp::kTruncate) || (md_r == 65 && op0 == RtlOp::kMult);
+    if (!is_expected_md_dest) {
       continue;
     }
     size_t mv_idx = insns.size();
@@ -4404,7 +4408,9 @@ bool ReadjoinCrossBankFprOutputReloads(const absl::flat_hash_set<int>& use_pinne
         return false;
       }
       const int saved_r = kpat.SetSrc().RegNo();
-      if (!((saved_r >= 16 && saved_r <= 23) || saved_r == 30 || saved_r == kMipsRaRegno)) {
+      const bool is_callee_saved_or_ra =
+          (saved_r >= 16 && saved_r <= 23) || saved_r == 30 || saved_r == kMipsRaRegno;
+      if (!is_callee_saved_or_ra) {
         return false;
       }
       if (!ExtractStackBaseDispMem(kpat.SetDest(), &kbase, &koff, &ksz) || kbase != kMipsSpRegno ||
@@ -4545,7 +4551,8 @@ bool RestoreRoundRobinFpReloadGroupOrder(bool gp64, bool fp64,
       return false;
     }
     const int gpr = pat.SetSrc().RegNo();
-    if (!((gpr >= 16 && gpr <= 23) || gpr == 30)) {
+    const bool is_callee_saved_gpr = (gpr >= 16 && gpr <= 23) || gpr == 30;
+    if (!is_callee_saved_gpr) {
       return false;
     }
     int sbase = -1;
@@ -4852,7 +4859,7 @@ bool RestoreRoundRobinTwoRegFpSpillOrder(const RtlControlFlowGraph& cfg, size_t 
       const int in_r = match_in_reload(insns[idx]);
       if (in_r >= 0) {
         size_t g_start = idx;
-        absl::flat_hash_set<int> used_regs;
+        absl::btree_set<int> used_regs;
         used_regs.insert(in_r);
         int first_r = in_r;
         int last_r = in_r;
@@ -4884,7 +4891,7 @@ bool RestoreRoundRobinTwoRegFpSpillOrder(const RtlControlFlowGraph& cfg, size_t 
                 absl::flat_hash_set<int> rw;
                 InsertRegSpan(r, RtlMachineMode::kSf, gp64, fp64, &rw);
                 const int ord = FirstReadRegPreorderIndex(insns[cons_pos].parsed.pattern, rw);
-                if (ord > best_ord) {
+                if (ord >= 0 && (ord > best_ord || (ord == best_ord && r > last_alloc_r))) {
                   best_ord = ord;
                   last_alloc_r = r;
                 }
@@ -6028,8 +6035,7 @@ bool IsMipsLargeIntForSched1Split(int64_t val) {
   // Mirrors `config/mips/mips.c:416` (`large_int`): does not fit in signed
   // 16-bit, unsigned 16-bit, or a bare upper 16-bit `lui` constant.
   const uint32_t u32 = static_cast<uint32_t>(val);
-  return !(val >= -32768 && val <= 32767) && !(val >= 0 && val <= 65535) &&
-         ((u32 & 0x0000ffffu) != 0u);
+  return (val < -32768 || val > 32767) && (val < 0 || val > 65535) && ((u32 & 0x0000ffffu) != 0u);
 }
 
 // Finds split `large_int` `lui`/`ori` pairs (`mips.md:3208-3221`) in `block` so
@@ -10020,7 +10026,7 @@ RtlControlFlowGraph InvertThreadPrologueAndEpilogueInsns(const RtlControlFlowGra
           }
           caller_base = slot_rel;
         } else {
-          if (base_reg != kMipsSpRegno && !(body_has_fp_setup && base_reg == kMipsFpRegno)) {
+          if (base_reg != kMipsSpRegno && (!body_has_fp_setup || base_reg != kMipsFpRegno)) {
             return false;
           }
           caller_base = tsize + slot_rel;

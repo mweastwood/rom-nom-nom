@@ -9,243 +9,16 @@
 #include <utility>
 #include <vector>
 
-#include "absl/container/flat_hash_map.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "core/rtl_cfg.h"
 #include "core/rtl_expr.h"
 #include "lifter/reconstruct_hard_reg_liveness.h"
+#include "lifter/reorg_model.h"
+#include "lifter/rtl_cfg_utils.h"
 
 namespace rom_nom_nom::lifter {
 namespace {
-
-bool IsValidRtlExprSubtree(const RtlExpr& root) {
-  if (root.op == RtlOp::kReturn) {
-    return false;
-  }
-  bool valid = true;
-  root.Visit([&valid](const RtlExpr& node) {
-    if (!valid) {
-      return;
-    }
-    if (node.op == RtlOp::kUnknown) {
-      valid = false;
-      return;
-    }
-    for (const RtlExpr& child : node.children) {
-      if (child.op == RtlOp::kReturn && node.op != RtlOp::kParallel) {
-        valid = false;
-        return;
-      }
-    }
-    if (node.op == RtlOp::kSequence) {
-      if (!node.bracketed_children || node.children.size() < 2) {
-        valid = false;
-        return;
-      }
-      for (const RtlExpr& child : node.children) {
-        if ((child.op != RtlOp::kInsn && child.op != RtlOp::kJumpInsn &&
-             child.op != RtlOp::kCallInsn) ||
-            child.children.empty()) {
-          valid = false;
-          return;
-        }
-      }
-    }
-  });
-  return valid;
-}
-
-bool IsValidRtlPatternSexpr(std::string_view sexpr) {
-  auto parsed = ParsePatternAndNotes(sexpr);
-  if (!parsed.ok()) {
-    return false;
-  }
-  if (!IsValidRtlExprSubtree(parsed->pattern)) {
-    return false;
-  }
-  for (const RtlRegNote& note : parsed->reg_notes) {
-    if (!IsValidRtlExprSubtree(note.datum)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-bool IsValidCfg(const RtlControlFlowGraph& cfg) {
-  if (cfg.rpo_blocks.empty()) {
-    return false;
-  }
-  const size_t num_blocks = cfg.rpo_blocks.size();
-  bool has_any_instruction = false;
-  for (size_t b = 0; b < num_blocks; ++b) {
-    const auto& blk = cfg.rpo_blocks[b];
-    if (blk.instructions.empty() && (b + 1 < num_blocks || num_blocks == 1)) {
-      return false;
-    }
-    for (size_t succ : blk.successors) {
-      if (succ >= num_blocks) {
-        return false;
-      }
-    }
-    for (size_t target : blk.addr_vec_targets) {
-      if (target >= num_blocks) {
-        return false;
-      }
-    }
-    for (const std::string& pat : blk.instructions) {
-      if (!IsValidRtlPatternSexpr(pat)) {
-        return false;
-      }
-      has_any_instruction = true;
-    }
-  }
-  return has_any_instruction;
-}
-
-bool IsReturnExpr(const RtlExpr& expr) {
-  return expr.op == RtlOp::kParallel && !expr.children.empty() &&
-         expr.children[0].op == RtlOp::kReturn;
-}
-
-bool IsSimpleUncondJumpExpr(const RtlExpr& expr) {
-  return expr.IsSet() && expr.SetDest().op == RtlOp::kPc && expr.SetSrc().op == RtlOp::kLabelRef;
-}
-
-bool IsTableJumpExpr(const RtlExpr& expr) {
-  return expr.op == RtlOp::kParallel && expr.children.size() >= 2 && expr.children[0].IsSet() &&
-         expr.children[0].SetDest().op == RtlOp::kPc && expr.children[0].SetSrc().IsReg() &&
-         expr.children[1].op == RtlOp::kUse && !expr.children[1].children.empty() &&
-         expr.children[1].children[0].op == RtlOp::kLabelRef;
-}
-
-const RtlExpr* GetCondJumpIfThenElse(const RtlExpr& expr) {
-  const RtlExpr* set_expr = nullptr;
-  if (expr.IsSet()) {
-    set_expr = &expr;
-  } else if (expr.op == RtlOp::kParallel && !expr.children.empty() && expr.children[0].IsSet()) {
-    set_expr = &expr.children[0];
-  }
-  if (set_expr == nullptr || set_expr->SetDest().op != RtlOp::kPc) {
-    return nullptr;
-  }
-  const RtlExpr& src = set_expr->SetSrc();
-  if (src.op != RtlOp::kIfThenElse || src.children.size() != 3) {
-    return nullptr;
-  }
-  return &src;
-}
-
-RtlExpr* GetMutableCondJumpIfThenElse(RtlExpr* expr) {
-  RtlExpr* set_expr = nullptr;
-  if (expr->IsSet()) {
-    set_expr = expr;
-  } else if (expr->op == RtlOp::kParallel && !expr->children.empty() && expr->children[0].IsSet()) {
-    set_expr = &expr->children[0];
-  }
-  if (set_expr == nullptr || set_expr->SetDest().op != RtlOp::kPc) {
-    return nullptr;
-  }
-  RtlExpr& src = set_expr->MutableSetSrc();
-  if (src.op != RtlOp::kIfThenElse || src.children.size() != 3) {
-    return nullptr;
-  }
-  return &src;
-}
-
-bool IsCondJumpExpr(const RtlExpr& expr) {
-  const RtlExpr* ite = GetCondJumpIfThenElse(expr);
-  if (ite == nullptr || !ite->children[0].IsComparison()) {
-    return false;
-  }
-  const RtlExpr& arm1 = ite->children[1];
-  const RtlExpr& arm2 = ite->children[2];
-  return (arm1.op == RtlOp::kLabelRef && arm2.op == RtlOp::kPc) ||
-         (arm1.op == RtlOp::kPc && arm2.op == RtlOp::kLabelRef);
-}
-
-RtlOp ReverseComparisonOp(RtlOp op) {
-  switch (op) {
-    case RtlOp::kEq:
-      return RtlOp::kNe;
-    case RtlOp::kNe:
-      return RtlOp::kEq;
-    case RtlOp::kLt:
-      return RtlOp::kGe;
-    case RtlOp::kGe:
-      return RtlOp::kLt;
-    case RtlOp::kLe:
-      return RtlOp::kGt;
-    case RtlOp::kGt:
-      return RtlOp::kLe;
-    case RtlOp::kLtu:
-      return RtlOp::kGeu;
-    case RtlOp::kGeu:
-      return RtlOp::kLtu;
-    case RtlOp::kLeu:
-      return RtlOp::kGtu;
-    case RtlOp::kGtu:
-      return RtlOp::kLeu;
-    default:
-      return RtlOp::kUnknown;
-  }
-}
-
-bool TryInvertCondJumpExpr(RtlExpr* jump_pat) {
-  RtlExpr* ite = GetMutableCondJumpIfThenElse(jump_pat);
-  if (ite == nullptr || !ite->children[0].IsComparison()) {
-    return false;
-  }
-  const RtlOp rev = ReverseComparisonOp(ite->children[0].op);
-  if (rev == RtlOp::kUnknown) {
-    return false;
-  }
-  ite->children[0].op = rev;
-  return true;
-}
-
-// Matches `reorg.c:1395-1470` (`mostly_true_jump` + `get_branch_condition`).
-int GetMostlyTrueJumpScore(const RtlExpr& jump_pat, size_t block_b, size_t target_b) {
-  const RtlExpr* ite = GetCondJumpIfThenElse(jump_pat);
-  if (ite == nullptr || !ite->children[0].IsComparison()) {
-    return 0;
-  }
-  const RtlExpr& cond = ite->children[0];
-  RtlOp code = cond.op;
-  if (ite->children[1].op == RtlOp::kPc) {
-    code = ReverseComparisonOp(code);
-  }
-  if (cond.children.size() == 2 && cond.children[1].IsConstInt() &&
-      cond.children[1].IntVal() == 0) {
-    switch (code) {
-      case RtlOp::kNe:
-      case RtlOp::kGt:
-      case RtlOp::kGe:
-      case RtlOp::kGtu:
-      case RtlOp::kGeu:
-        return 1;
-      case RtlOp::kEq:
-      case RtlOp::kLt:
-      case RtlOp::kLe:
-      case RtlOp::kLtu:
-      case RtlOp::kLeu:
-        return 0;
-      default:
-        break;
-    }
-  }
-  return (target_b <= block_b) ? 1 : 0;
-}
-
-bool HasRegDeadConstZeroNote(const RtlPatternAndNotes& pat_notes) {
-  for (const RtlRegNote& note : pat_notes.reg_notes) {
-    if (note.kind == RtlMachineMode::kRegDead && note.datum.IsConstInt() &&
-        note.datum.IntVal() == 0) {
-      return true;
-    }
-  }
-  return false;
-}
 
 bool HasRegDeadRegNote(const RtlPatternAndNotes& pat_notes) {
   for (const RtlRegNote& note : pat_notes.reg_notes) {
@@ -268,42 +41,6 @@ int GetSingleSetDestRegNo(const RtlExpr& pat) {
     return dst.children[0].RegNo() + static_cast<int>(dst.int_val);
   }
   return -1;
-}
-
-bool IsAnyJumpOrReturnTopExpr(const RtlExpr& expr) {
-  if (expr.op == RtlOp::kSequence && !expr.children.empty()) {
-    return expr.children[0].op == RtlOp::kJumpInsn;
-  }
-  return IsReturnExpr(expr) || IsSimpleUncondJumpExpr(expr) || IsCondJumpExpr(expr) ||
-         IsTableJumpExpr(expr) || (expr.IsSet() && expr.SetDest().op == RtlOp::kPc);
-}
-
-bool IsUncondJumpOrReturnOrTableJumpTopExpr(const RtlExpr& expr) {
-  if (expr.op == RtlOp::kSequence && !expr.children.empty()) {
-    if (expr.children[0].op != RtlOp::kJumpInsn || expr.children[0].children.empty()) {
-      return false;
-    }
-    const RtlExpr& inner = expr.children[0].children[0];
-    return IsReturnExpr(inner) || IsSimpleUncondJumpExpr(inner) || IsTableJumpExpr(inner);
-  }
-  return IsReturnExpr(expr) || IsSimpleUncondJumpExpr(expr) || IsTableJumpExpr(expr);
-}
-
-bool SubtreeReferencesHardReg(const RtlExpr& node, int regno) {
-  if (node.IsSubreg() && !node.children.empty() && node.children[0].IsReg()) {
-    return node.children[0].RegNo() + static_cast<int>(node.int_val) == regno;
-  }
-  if (node.IsReg()) {
-    const int r = node.RegNo();
-    const int n = (node.mode == RtlMachineMode::kDi || node.mode == RtlMachineMode::kDf) ? 2 : 1;
-    return regno >= r && regno < r + n;
-  }
-  for (const RtlExpr& child : node.children) {
-    if (SubtreeReferencesHardReg(child, regno)) {
-      return true;
-    }
-  }
-  return false;
 }
 
 bool ExprSetsOrClobbersReg(const RtlExpr& expr, int regno) {
@@ -329,41 +66,6 @@ bool ExprSetsOrClobbersReg(const RtlExpr& expr, int regno) {
   return found;
 }
 
-bool ExprReferencesRegInSrcOrMem(const RtlExpr& expr, int regno) {
-  if (expr.op == RtlOp::kClobber) {
-    return !expr.children.empty() && expr.children[0].IsMem() &&
-           SubtreeReferencesHardReg(expr.children[0], regno);
-  }
-  if (expr.IsSet()) {
-    if (SubtreeReferencesHardReg(expr.SetSrc(), regno)) {
-      return true;
-    }
-    if (expr.SetDest().IsMem() && SubtreeReferencesHardReg(expr.SetDest(), regno)) {
-      return true;
-    }
-    return false;
-  }
-  if (expr.op == RtlOp::kParallel) {
-    for (const RtlExpr& child : expr.children) {
-      if (ExprReferencesRegInSrcOrMem(child, regno)) {
-        return true;
-      }
-    }
-    return false;
-  }
-  return SubtreeReferencesHardReg(expr, regno);
-}
-
-bool ExprHasMem(const RtlExpr& expr) {
-  bool has_mem = false;
-  expr.Visit([&has_mem](const RtlExpr& node) {
-    if (node.IsMem()) {
-      has_mem = true;
-    }
-  });
-  return has_mem;
-}
-
 void CollectRegs(const RtlExpr& expr, std::vector<int>* out) {
   expr.Visit([out](const RtlExpr& node) {
     if (node.IsReg()) {
@@ -386,344 +88,6 @@ std::string ExtractCallSymbolFromInsnExpr(const RtlExpr& expr) {
     }
   });
   return sym;
-}
-
-void RewriteJumpTargetLabelRef(RtlExpr* expr, std::string_view new_label_tok) {
-  expr->Mutate([new_label_tok](RtlExpr& node) {
-    if (node.op == RtlOp::kLabelRef) {
-      node = RtlExpr::MakeSymbolicLabelRef(std::string(new_label_tok), node.mode);
-    }
-  });
-}
-
-// Recomputes canonical label names (`L0`, `L1`, ...) in linear chain order and
-// synchronizes `(label_ref L<k>)` across all jump instructions and tablejumps.
-void SynchronizeCanonicalLabels(RtlControlFlowGraph* cfg) {
-  const size_t num_blocks = cfg->rpo_blocks.size();
-  if (num_blocks == 0) {
-    return;
-  }
-  std::vector<bool> block_needs_label(num_blocks, false);
-  std::vector<bool> block_has_tablejump(num_blocks, false);
-  std::vector<std::string> old_tablejump_token(num_blocks);
-
-  for (size_t b = 0; b < num_blocks; ++b) {
-    const auto& blk = cfg->rpo_blocks[b];
-    if (blk.has_label) {
-      block_needs_label[b] = true;
-    }
-    bool ends_with_uncond = false;
-    if (!blk.instructions.empty()) {
-      auto parsed = ParsePatternAndNotes(blk.instructions.back());
-      if (parsed.ok()) {
-        ends_with_uncond = IsUncondJumpOrReturnOrTableJumpTopExpr(parsed->pattern);
-        const RtlExpr* tbl_expr = nullptr;
-        if (IsTableJumpExpr(parsed->pattern)) {
-          tbl_expr = &parsed->pattern;
-        } else if (parsed->pattern.op == RtlOp::kSequence && !parsed->pattern.children.empty() &&
-                   parsed->pattern.children[0].op == RtlOp::kJumpInsn &&
-                   !parsed->pattern.children[0].children.empty() &&
-                   IsTableJumpExpr(parsed->pattern.children[0].children[0])) {
-          tbl_expr = &parsed->pattern.children[0].children[0];
-        }
-        if (tbl_expr != nullptr) {
-          block_has_tablejump[b] = true;
-          const RtlExpr& lbl_ref = tbl_expr->children[1].children[0];
-          old_tablejump_token[b] = lbl_ref.str_val;
-          for (size_t t : blk.addr_vec_targets) {
-            if (t < num_blocks) {
-              block_needs_label[t] = true;
-            }
-          }
-        }
-      }
-    }
-    if (blk.successors.size() >= 2 && blk.addr_vec_targets.empty()) {
-      size_t target_b = blk.successors[0];
-      if (target_b == b + 1) {
-        target_b = blk.successors[1];
-      }
-      if (target_b < num_blocks) {
-        block_needs_label[target_b] = true;
-      }
-    }
-    for (size_t succ : blk.successors) {
-      if (succ < num_blocks && (succ != b + 1 || ends_with_uncond)) {
-        block_needs_label[succ] = true;
-      }
-    }
-  }
-
-  std::vector<std::string> block_label_token(num_blocks);
-  absl::flat_hash_map<std::string, std::string> tablejump_token_remap;
-  size_t next_lbl_idx = 0;
-  for (size_t b = 0; b < num_blocks; ++b) {
-    cfg->rpo_blocks[b].has_label = block_needs_label[b];
-    if (block_needs_label[b]) {
-      block_label_token[b] = absl::StrCat("L", next_lbl_idx++);
-    }
-    if (block_has_tablejump[b]) {
-      std::string new_tbl_tok = absl::StrCat("L", next_lbl_idx++);
-      if (!old_tablejump_token[b].empty()) {
-        tablejump_token_remap[old_tablejump_token[b]] = new_tbl_tok;
-      }
-    }
-  }
-
-  for (size_t b = 0; b < num_blocks; ++b) {
-    auto& blk = cfg->rpo_blocks[b];
-    for (size_t i = 0; i < blk.instructions.size(); ++i) {
-      auto parsed = ParsePatternAndNotes(blk.instructions[i]);
-      if (!parsed.ok()) {
-        continue;
-      }
-      bool modified = false;
-      if (!tablejump_token_remap.empty()) {
-        auto remap_fn = [&tablejump_token_remap, &modified](RtlExpr& node) {
-          if (node.op == RtlOp::kLabelRef && !node.str_val.empty()) {
-            auto it = tablejump_token_remap.find(node.str_val);
-            if (it != tablejump_token_remap.end() && node.str_val != it->second) {
-              node = RtlExpr::MakeSymbolicLabelRef(it->second, node.mode);
-              modified = true;
-            }
-          }
-        };
-        parsed->pattern.Mutate(remap_fn);
-        for (RtlRegNote& note : parsed->reg_notes) {
-          note.datum.Mutate(remap_fn);
-        }
-      }
-      if (i + 1 == blk.instructions.size() && !block_has_tablejump[b] && !blk.successors.empty() &&
-          IsAnyJumpOrReturnTopExpr(parsed->pattern)) {
-        size_t target_b = blk.successors[0];
-        if (blk.successors.size() >= 2 && blk.successors[0] == b + 1) {
-          target_b = blk.successors[1];
-        }
-        if (target_b < num_blocks && !block_label_token[target_b].empty()) {
-          const std::string& target_tok = block_label_token[target_b];
-          if (parsed->pattern.op == RtlOp::kSequence && !parsed->pattern.children.empty() &&
-              parsed->pattern.children[0].op == RtlOp::kJumpInsn) {
-            auto sub_or = RtlPatternAndNotes::FromSequenceSubInsn(parsed->pattern.children[0]);
-            auto slot_or = RtlPatternAndNotes::FromSequenceSubInsn(parsed->pattern.children[1]);
-            if (sub_or.ok() && slot_or.ok()) {
-              RewriteJumpTargetLabelRef(&sub_or->pattern, target_tok);
-              blk.instructions[i] =
-                  RtlExpr::MakeSequence(
-                      {
-                          RtlExpr::MakeInsnWrapper(parsed->pattern.children[0].op,
-                                                   parsed->pattern.children[0].flags, *sub_or),
-                          RtlExpr::MakeInsnWrapper(RtlOp::kInsn, parsed->pattern.children[1].flags,
-                                                   *slot_or),
-                      })
-                      .ToGccPrintRtlString();
-              continue;
-            }
-          } else {
-            RewriteJumpTargetLabelRef(&parsed->pattern, target_tok);
-            modified = true;
-          }
-        }
-      }
-      if (modified) {
-        if (parsed->pattern.op == RtlOp::kSequence && parsed->pattern.children.size() == 2) {
-          auto sub_or = RtlPatternAndNotes::FromSequenceSubInsn(parsed->pattern.children[0]);
-          auto slot_or = RtlPatternAndNotes::FromSequenceSubInsn(parsed->pattern.children[1]);
-          if (sub_or.ok() && slot_or.ok()) {
-            blk.instructions[i] =
-                RtlExpr::MakeSequence(
-                    {
-                        RtlExpr::MakeInsnWrapper(parsed->pattern.children[0].op,
-                                                 parsed->pattern.children[0].flags, *sub_or),
-                        RtlExpr::MakeInsnWrapper(RtlOp::kInsn, parsed->pattern.children[1].flags,
-                                                 *slot_or),
-                    })
-                    .ToGccPrintRtlString();
-            continue;
-          }
-        }
-        blk.instructions[i] = parsed->ToGccPrintRtlString();
-      }
-    }
-  }
-}
-
-std::vector<std::vector<size_t>> BuildPredecessors(const RtlControlFlowGraph& cfg) {
-  const size_t n = cfg.rpo_blocks.size();
-  std::vector<std::vector<size_t>> preds(n);
-  for (size_t b = 0; b < n; ++b) {
-    for (size_t succ : cfg.rpo_blocks[b].successors) {
-      if (succ < n) {
-        preds[succ].push_back(b);
-      }
-    }
-    for (size_t t : cfg.rpo_blocks[b].addr_vec_targets) {
-      if (t < n && std::find(preds[t].begin(), preds[t].end(), b) == preds[t].end()) {
-        preds[t].push_back(b);
-      }
-    }
-  }
-  return preds;
-}
-
-void InsertBlockAt(RtlControlFlowGraph* cfg, size_t insert_idx, RtlBasicBlock new_blk) {
-  cfg->rpo_blocks.insert(cfg->rpo_blocks.begin() + static_cast<ptrdiff_t>(insert_idx),
-                         std::move(new_blk));
-  for (size_t b = 0; b < cfg->rpo_blocks.size(); ++b) {
-    if (b == insert_idx) {
-      continue;
-    }
-    for (size_t& succ : cfg->rpo_blocks[b].successors) {
-      if (succ >= insert_idx) {
-        ++succ;
-      }
-    }
-    for (size_t& t : cfg->rpo_blocks[b].addr_vec_targets) {
-      if (t >= insert_idx) {
-        ++t;
-      }
-    }
-  }
-}
-
-bool BlockHasOnlyUseOrClobberInsns(const RtlBasicBlock& blk) {
-  bool saw_use_or_clobber = false;
-  for (const std::string& s : blk.instructions) {
-    auto parsed = ParsePatternAndNotes(s);
-    if (!parsed.ok()) {
-      return false;
-    }
-    if (parsed->pattern.op == RtlOp::kNote) {
-      continue;
-    }
-    if (parsed->pattern.op != RtlOp::kUse && parsed->pattern.op != RtlOp::kClobber) {
-      return false;
-    }
-    saw_use_or_clobber = true;
-  }
-  return saw_use_or_clobber;
-}
-
-bool IsEligibleForMipsUncondJumpDelaySlot(const RtlExpr& pat) {
-  if (!pat.IsSet() || IsAnyJumpOrReturnTopExpr(pat)) {
-    return false;
-  }
-  const RtlExpr& dst = pat.SetDest();
-  const RtlExpr& src = pat.SetSrc();
-  if (src.op == RtlOp::kCall || ExprHasMem(src)) {
-    return false;
-  }
-  bool has_special_reg = false;
-  pat.Visit([&has_special_reg](const RtlExpr& node) {
-    if (node.IsReg() && node.RegNo() >= 64) {
-      has_special_reg = true;
-    }
-  });
-  if (has_special_reg) {
-    return false;
-  }
-  if (dst.IsMem()) {
-    if (dst.mode != RtlMachineMode::kQi && dst.mode != RtlMachineMode::kHi &&
-        dst.mode != RtlMachineMode::kSi && dst.mode != RtlMachineMode::kSf) {
-      return false;
-    }
-    const bool valid_store_src = (src.IsReg() && src.RegNo() >= 0 && src.RegNo() < 64) ||
-                                 (src.IsConstInt() && src.IntVal() == 0);
-    if (!valid_store_src || dst.children.empty()) {
-      return false;
-    }
-    const RtlExpr& addr = dst.children[0];
-    if (addr.IsReg()) {
-      return addr.RegNo() >= 0 && addr.RegNo() < 32;
-    }
-    if (addr.IsConstInt()) {
-      return addr.IntVal() >= -32768 && addr.IntVal() <= 32767;
-    }
-    if (addr.op == RtlOp::kPlus && addr.children.size() == 2 && addr.children[0].IsReg() &&
-        addr.children[1].IsConstInt()) {
-      return addr.children[1].IntVal() >= -32768 && addr.children[1].IntVal() <= 32767;
-    }
-    return addr.op == RtlOp::kLoSum;
-  }
-
-  const int dst_reg = GetSingleSetDestRegNo(pat);
-  if (dst_reg < 0 || dst_reg >= 64) {
-    return false;
-  }
-  if (dst_reg >= 32) {
-    bool touches_gpr_or_const_double = false;
-    src.Visit([&touches_gpr_or_const_double](const RtlExpr& node) {
-      if ((node.IsReg() && node.RegNo() >= 0 && node.RegNo() < 32) ||
-          node.op == RtlOp::kConstDouble || node.op == RtlOp::kFix ||
-          node.op == RtlOp::kUnsignedFix) {
-        touches_gpr_or_const_double = true;
-      }
-    });
-    return !touches_gpr_or_const_double;
-  }
-
-  const RtlMachineMode dst_mode = dst.mode;
-  if (dst_mode != RtlMachineMode::kQi && dst_mode != RtlMachineMode::kHi &&
-      dst_mode != RtlMachineMode::kSi && dst_mode != RtlMachineMode::kSf) {
-    return false;
-  }
-  bool touches_fpr = false;
-  src.Visit([&touches_fpr](const RtlExpr& node) {
-    if (node.IsReg() && node.RegNo() >= 32 && node.RegNo() < 64) {
-      touches_fpr = true;
-    }
-  });
-  if (touches_fpr || src.op == RtlOp::kMult || src.op == RtlOp::kDiv || src.op == RtlOp::kMod ||
-      src.op == RtlOp::kUdiv || src.op == RtlOp::kUmod) {
-    return false;
-  }
-  if (src.op == RtlOp::kHigh || src.op == RtlOp::kLoSum) {
-    return true;
-  }
-  bool has_sym_or_label = false;
-  src.Visit([&has_sym_or_label](const RtlExpr& node) {
-    if (node.op == RtlOp::kSymbolRef || node.op == RtlOp::kLabelRef || node.op == RtlOp::kConst ||
-        node.op == RtlOp::kConstDouble) {
-      has_sym_or_label = true;
-    }
-  });
-  if (has_sym_or_label) {
-    return false;
-  }
-  if (src.IsConstInt()) {
-    const int64_t v = src.IntVal();
-    return (v >= -32768 && v <= 65535) ||
-           ((v & 0xffff) == 0 && v >= -2147483648LL && v <= 2147483647LL);
-  }
-  if (src.children.size() == 2 && (src.children[0].IsConstInt() || src.children[1].IsConstInt())) {
-    if (src.children[0].IsConstInt()) {
-      return false;
-    }
-    const int64_t v = src.children[1].IntVal();
-    switch (src.op) {
-      case RtlOp::kAnd:
-      case RtlOp::kIor:
-      case RtlOp::kXor:
-        return v >= 0 && v <= 65535;
-      case RtlOp::kPlus:
-      case RtlOp::kLt:
-      case RtlOp::kLtu:
-        return v >= -32768 && v <= 32767;
-      case RtlOp::kMinus:
-        return v >= -32767 && v <= 32768;
-      case RtlOp::kAshift:
-      case RtlOp::kAshiftrt:
-      case RtlOp::kLshiftrt:
-        return v >= 0 && v <= 31;
-      case RtlOp::kEq:
-      case RtlOp::kNe:
-      case RtlOp::kGt:
-      case RtlOp::kGtu:
-        return v == 0;
-      default:
-        return false;
-    }
-  }
-  return src.op != RtlOp::kLe && src.op != RtlOp::kGe && src.op != RtlOp::kGeu;
 }
 
 void RewrapSharedUseBridgePredecessors(RtlControlFlowGraph* out_ptr) {
@@ -788,7 +152,8 @@ void RewrapSharedUseBridgePredecessors(RtlControlFlowGraph* out_ptr) {
       continue;
     }
 
-    if (IsEligibleForMipsUncondJumpDelaySlot(last_parsed->pattern)) {
+    if (IsEligibleForMipsDelaySlot(last_parsed->pattern,
+                                   MipsDelaySlotOptions{.kind = MipsDelaySlotKind::kJump})) {
       for (RtlRegNote& note : last_parsed->reg_notes) {
         if (note.kind == RtlMachineMode::kRegDead && note.datum.IsReg()) {
           note.datum = RtlExpr::MakeConstInt(0);
@@ -1439,7 +804,7 @@ void RestoreRelaxedTargetBlockRedundantInsns(RtlControlFlowGraph* out_ptr,
                         if (!in_set_dst && e.IsHardReg() && !e.IsArgPointerReg()) {
                           const int r = e.RegNo();
                           if (r != cand_dst && r != 0 && r != 28 && r != 29 && r != 31 &&
-                              !(out.sideband.frame_pointer_needed && r == 30)) {
+                              (!out.sideband.frame_pointer_needed || r != 30)) {
                             only_reads_cand_dst = false;
                           }
                           return;
@@ -2047,10 +1412,22 @@ RtlControlFlowGraph InvertRelaxDelaySlots(const RtlControlFlowGraph& dbr_relaxed
       if (!TryInvertCondJumpExpr(&candidate_b_last.pattern)) {
         continue;
       }
+      const RtlExpr* b_ite = GetCondJumpIfThenElse(b_last->pattern);
+      const bool compares_against_zero = b_ite != nullptr &&
+                                         b_ite->children[0].children.size() == 2 &&
+                                         b_ite->children[0].children[1].IsConstInt() &&
+                                         b_ite->children[0].children[1].IntVal() == 0;
       // In `reorg.c:3834`, `relax_delay_slots` inverted `b` and swapped targets
-      // with `b + 1` because `mostly_true_jump > 0`.
-      if (GetMostlyTrueJumpScore(b_last->pattern, b, t1) > 0 ||
-          GetMostlyTrueJumpScore(candidate_b_last.pattern, b, t2) > 0) {
+      // with `b + 1` because `mostly_true_jump > 0`. Verbatim `reorg.c:1406-1409`
+      // returns `1` for any `NE` (including two-register `bne`), so checking
+      // `MostlyTrueJumpScore(candidate_b_last)` unconditionally would invert
+      // forward two-register `beq` switch arms whose inverted `jump` would have
+      // had its delay slot filled by `fill_eager_delay_slots` before
+      // `relax_delay_slots` ran. Restrict to compare-against-zero or backward
+      // targets to preserve Stage 1 behavior.
+      if ((compares_against_zero || t1 <= b || t2 <= b) &&
+          (MostlyTrueJumpScore(b_last->pattern, b, t1) > 0 ||
+           MostlyTrueJumpScore(candidate_b_last.pattern, b, t2) > 0)) {
         blk.instructions.back() = candidate_b_last.ToGccPrintRtlString();
         blk.successors = {t2, b + 1};
         next_blk.successors = {t1};
